@@ -155,6 +155,7 @@ class CoachLyricistAgent:
                 {
                     "id": "set_motif_chorus",
                     "label": "Đặt mô-típ làm Chorus",
+                    "action": "update_config",
                     "action_type": "update_config",
                     "payload": {"motif_position": "chorus", "output_mode": "full_song"},
                 }
@@ -164,6 +165,7 @@ class CoachLyricistAgent:
                 {
                     "id": "try_minor_rearrange",
                     "label": "Thử hợp âm thứ (Minor feel)",
+                    "action": "rearrange_chords",
                     "action_type": "rearrange_chords",
                     "payload": {"suggestion": "Use vi - IV - I - V progression"},
                 }
