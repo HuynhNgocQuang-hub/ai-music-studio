@@ -1,7 +1,7 @@
 import type { MidiNote, ProjectState } from '@/types/project';
 import { resolveAudioUrl } from '@/lib/api/client';
 
-export type VocalABMode = 'raw' | 'dry' | 'autotune' | 'ai_mix';
+export type VocalABMode = 'raw' | 'dry' | 'autotune' | 'preserve' | 'enhance' | 'ai_mix';
 
 export interface TrackChannelConfig {
   id: string;
@@ -42,6 +42,8 @@ export class MultiTrackAudioEngine {
   private analyser: AnalyserNode | null = null;
 
   private buffers: Map<string, AudioBuffer> = new Map();
+  private bufferSources: Map<string, string> = new Map();
+  private lastProjectId: string | null = null;
   private channelGains: Map<string, GainNode> = new Map();
   private channelPanners: Map<string, StereoPannerNode> = new Map();
   private activeSources: AudioBufferSourceNode[] = [];
@@ -56,6 +58,7 @@ export class MultiTrackAudioEngine {
   private loopEnabled = false;
   private abMode: VocalABMode = 'dry';
   private rafId: number | null = null;
+  private loopTimer: number | null = null;
   private listeners: Set<TransportListener> = new Set();
   private currentProject: ProjectState | null = null;
   private metronomeTimer: number | null = null;
@@ -164,6 +167,7 @@ export class MultiTrackAudioEngine {
       const arrayBuf = await blob.arrayBuffer();
       const audioBuf = await ctx.decodeAudioData(arrayBuf);
       this.buffers.set(slotKey, audioBuf);
+      this.bufferSources.set(slotKey, `blob:${Date.now()}:${blob.size}`);
       this.recomputeDuration();
       this.emit();
       return audioBuf;
@@ -172,19 +176,36 @@ export class MultiTrackAudioEngine {
     }
   }
 
-  public async loadAudioFromUrl(slotKey: string, url: string): Promise<AudioBuffer | null> {
+  public async loadAudioFromUrl(
+    slotKey: string,
+    url: string,
+    cacheKey?: string
+  ): Promise<AudioBuffer | null> {
     try {
       const ctx = this.ensureContext();
-      const res = await fetch(url);
+      const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) return null;
       const arrayBuf = await res.arrayBuffer();
       const audioBuf = await ctx.decodeAudioData(arrayBuf);
       this.buffers.set(slotKey, audioBuf);
+      this.bufferSources.set(slotKey, cacheKey || url);
       this.recomputeDuration();
       this.emit();
       return audioBuf;
     } catch {
       return null;
+    }
+  }
+
+  public invalidateSlots(slots?: string[]): void {
+    if (!slots) {
+      this.buffers.clear();
+      this.bufferSources.clear();
+      return;
+    }
+    for (const slot of slots) {
+      this.buffers.delete(slot);
+      this.bufferSources.delete(slot);
     }
   }
 
@@ -192,7 +213,15 @@ export class MultiTrackAudioEngine {
     return this.buffers.has(slotKey);
   }
 
-  public async syncFromProject(project: ProjectState): Promise<void> {
+  public async syncFromProject(
+    project: ProjectState,
+    options?: { forceSlots?: string[]; revisionKey?: string }
+  ): Promise<void> {
+    if (this.lastProjectId && this.lastProjectId !== project.project_id) {
+      this.stop();
+      this.invalidateSlots();
+    }
+    this.lastProjectId = project.project_id;
     this.currentProject = project;
     this.bpm = project.analysis.bpm || 100;
 
@@ -207,8 +236,9 @@ export class MultiTrackAudioEngine {
       });
     }
 
-    // Fetch backend audio refs if not already cached
+    // Fetch backend audio refs when missing, forced, or source revision changed
     const pid = project.project_id;
+    const forceSet = new Set(options?.forceSlots ?? []);
     const refs: Array<[string, string | null | undefined]> = [
       ['raw', project.audio_assets.raw_input_ref],
       ['dry', project.audio_assets.dry_denoised_ref],
@@ -219,17 +249,32 @@ export class MultiTrackAudioEngine {
       ['accompaniment', project.audio_assets.accompaniment_ref],
     ];
 
+    let reloadedForced = false;
     await Promise.all(
       refs.map(async ([slot, ref]) => {
-        if (!ref || this.buffers.has(slot)) return;
+        if (!ref) return;
         const url = resolveAudioUrl(ref, pid);
-        if (url) {
-          await this.loadAudioFromUrl(slot, url);
+        if (!url) return;
+        const cacheKey = options?.revisionKey ? `${url}#${options.revisionKey}` : url;
+        const prevSource = this.bufferSources.get(slot);
+        const isBlobLoaded = Boolean(prevSource && prevSource.startsWith('blob:'));
+        const sourceChanged = Boolean(prevSource && !isBlobLoaded && prevSource !== cacheKey);
+        const shouldLoad = forceSet.has(slot) || !this.buffers.has(slot) || sourceChanged;
+        if (!shouldLoad) return;
+        const buf = await this.loadAudioFromUrl(slot, url, cacheKey);
+        if (buf && forceSet.has(slot)) {
+          reloadedForced = true;
         }
       })
     );
 
     this.recomputeDuration();
+    if (reloadedForced && this.isPlayingState) {
+      const offset = this.getCurrentTimeSec();
+      this.stopSourcesOnly();
+      this.startFromOffset(offset);
+      return;
+    }
     this.emit();
   }
 
@@ -282,7 +327,13 @@ export class MultiTrackAudioEngine {
 
   public setLoop(enabled: boolean): void {
     this.loopEnabled = enabled;
-    this.emit();
+    if (this.isPlayingState) {
+      const cur = this.getCurrentTimeSec();
+      this.stopSourcesOnly();
+      this.startFromOffset(cur);
+    } else {
+      this.emit();
+    }
   }
 
   public setBpm(bpm: number): void {
@@ -336,31 +387,92 @@ export class MultiTrackAudioEngine {
     // 1. Schedule vocal / active A/B audio buffer
     const vocalKey = this.pickActiveBufferKey();
     const vocalBuf = vocalKey ? this.buffers.get(vocalKey) : undefined;
+    const isFullMixSlot =
+      vocalKey === 'ai_mix' || vocalKey === 'preserve' || vocalKey === 'enhance';
     if (vocalBuf && offsetSec < vocalBuf.duration) {
       const src = ctx.createBufferSource();
       src.buffer = vocalBuf;
-      src.loop = this.loopEnabled;
+      if (this.loopEnabled && vocalBuf.duration >= this.durationSec - 0.05) {
+        src.loop = true;
+        src.loopStart = 0;
+        src.loopEnd = this.durationSec;
+      } else {
+        src.loop = false;
+      }
       const { gain } = this.getOrCreateChannelNodes('vocal');
       src.connect(gain);
       src.start(scheduleAnchor, offsetSec);
+      if (!src.loop && vocalBuf.duration > this.durationSec) {
+        src.stop(scheduleAnchor + Math.max(0.01, this.durationSec - offsetSec));
+      }
       this.activeSources.push(src);
     }
 
-    // 2. If in dry/autotune mode and accompaniment buffer exists, play beat alongside vocal
-    if ((this.abMode === 'dry' || this.abMode === 'autotune' || this.abMode === 'raw') && this.buffers.has('accompaniment')) {
-      const accBuf = this.buffers.get('accompaniment')!;
-      if (offsetSec < accBuf.duration) {
-        const accSrc = ctx.createBufferSource();
-        accSrc.buffer = accBuf;
-        accSrc.loop = this.loopEnabled;
-        const { gain } = this.getOrCreateChannelNodes('harmony');
-        accSrc.connect(gain);
-        accSrc.start(scheduleAnchor, offsetSec);
-        this.activeSources.push(accSrc);
+    // 1b. Schedule recorded overdub clip if present on vocal track
+    if (!isFullMixSlot && this.buffers.has('overdub') && this.currentProject) {
+      const overdubClips = (this.currentProject.tracks.vocal?.clips || []).filter(
+        (c) => c.id.startsWith('clip_overdub_') || c.source.includes('overdub')
+      );
+      const latestClip = overdubClips[overdubClips.length - 1];
+      const overdubBuf = this.buffers.get('overdub');
+      if (latestClip && overdubBuf) {
+        const clipStartSec = Math.max(0, (latestClip.offset_ms ?? 0) / 1000);
+        const relOffset = offsetSec - clipStartSec;
+        if (relOffset < overdubBuf.duration) {
+          const ovSrc = ctx.createBufferSource();
+          ovSrc.buffer = overdubBuf;
+          ovSrc.loop = false;
+          const { gain } = this.getOrCreateChannelNodes('vocal');
+          ovSrc.connect(gain);
+          if (relOffset >= 0) {
+            ovSrc.start(scheduleAnchor, relOffset);
+          } else {
+            ovSrc.start(scheduleAnchor + Math.abs(relOffset), 0);
+          }
+          this.activeSources.push(ovSrc);
+        }
       }
-    } else if (this.currentProject) {
-      // Lightweight Web Audio MIDI synthesizer fallback for MIDI tracks
-      this.scheduleMidiTracks(scheduleAnchor, offsetSec);
+    }
+
+    // 2. If not playing a full pre-rendered mix, play accompaniment or MIDI synth tracks
+    if (!isFullMixSlot) {
+      if (
+        (this.abMode === 'dry' || this.abMode === 'autotune' || this.abMode === 'raw') &&
+        this.buffers.has('accompaniment')
+      ) {
+        const accBuf = this.buffers.get('accompaniment')!;
+        if (offsetSec < accBuf.duration) {
+          const accSrc = ctx.createBufferSource();
+          accSrc.buffer = accBuf;
+          if (this.loopEnabled && accBuf.duration >= this.durationSec - 0.05) {
+            accSrc.loop = true;
+            accSrc.loopStart = 0;
+            accSrc.loopEnd = this.durationSec;
+          } else {
+            accSrc.loop = false;
+          }
+          const { gain } = this.getOrCreateChannelNodes('harmony');
+          accSrc.connect(gain);
+          accSrc.start(scheduleAnchor, offsetSec);
+          if (!accSrc.loop && accBuf.duration > this.durationSec) {
+            accSrc.stop(scheduleAnchor + Math.max(0.01, this.durationSec - offsetSec));
+          }
+          this.activeSources.push(accSrc);
+        }
+      } else if (this.currentProject) {
+        // Lightweight Web Audio MIDI synthesizer fallback for MIDI tracks
+        this.scheduleMidiTracks(scheduleAnchor, offsetSec);
+      }
+    }
+
+    // Re-trigger loop boundary seamlessly at this.durationSec (covers MIDI tracks & short vocal buffers)
+    if (this.loopEnabled && this.durationSec > 0) {
+      const remainingMs = Math.max(40, (this.durationSec - offsetSec) * 1000);
+      this.loopTimer = window.setTimeout(() => {
+        if (this.isPlayingState && this.loopEnabled) {
+          this.startFromOffset(0);
+        }
+      }, remainingMs);
     }
 
     this.applyChannelRouting();
@@ -369,10 +481,17 @@ export class MultiTrackAudioEngine {
   }
 
   private pickActiveBufferKey(): string | null {
+    if (this.abMode === 'preserve') {
+      if (this.buffers.has('preserve')) return 'preserve';
+      if (this.buffers.has('autotune')) return 'autotune';
+    }
+    if (this.abMode === 'enhance') {
+      if (this.buffers.has('enhance')) return 'enhance';
+      if (this.buffers.has('autotune')) return 'autotune';
+    }
     if (this.abMode === 'ai_mix') {
       if (this.buffers.has('ai_mix')) return 'ai_mix';
-      if (this.buffers.has('enhance')) return 'enhance';
-      if (this.buffers.has('preserve')) return 'preserve';
+      if (this.buffers.has('autotune')) return 'autotune';
     }
     if (this.abMode === 'autotune') {
       if (this.buffers.has('autotune')) return 'autotune';
@@ -401,12 +520,11 @@ export class MultiTrackAudioEngine {
       if (!notes.length) continue;
       const { gain } = this.getOrCreateChannelNodes(trackId);
 
-      // Schedule up to first 128 notes from offset to keep browser lightweight
-      let scheduledCount = 0;
       for (const note of notes) {
-        if (scheduledCount >= 128) break;
         const noteStartSec = note.start_beat * secPerBeat;
-        const noteDurSec = Math.max(0.06, note.duration * secPerBeat);
+        if (noteStartSec >= this.durationSec) continue;
+        const rawDurSec = Math.max(0.06, note.duration * secPerBeat);
+        const noteDurSec = Math.min(rawDurSec, Math.max(0.06, this.durationSec - noteStartSec));
         if (noteStartSec + noteDurSec <= offsetSec) continue;
 
         const playAt = anchorTime + Math.max(0, noteStartSec - offsetSec);
@@ -425,12 +543,15 @@ export class MultiTrackAudioEngine {
         osc.start(playAt);
         osc.stop(playAt + noteDurSec + 0.02);
         this.activeOscillators.push(osc);
-        scheduledCount++;
       }
     }
   }
 
   private stopSourcesOnly(): void {
+    if (this.loopTimer !== null) {
+      clearTimeout(this.loopTimer);
+      this.loopTimer = null;
+    }
     for (const src of this.activeSources) {
       try {
         src.stop();

@@ -77,6 +77,7 @@ function buildLLMHeaders(): Record<string, string> {
   if (s.geminiApiKey) headers['X-Gemini-Api-Key'] = s.geminiApiKey;
   if (s.openaiApiKey) headers['X-OpenAI-Api-Key'] = s.openaiApiKey;
   if (s.defaultProvider) headers['X-LLM-Provider'] = s.defaultProvider;
+  if (s.agentProviders) headers['X-Agent-Providers'] = JSON.stringify(s.agentProviders);
   return headers;
 }
 
@@ -160,7 +161,15 @@ export function resolveAudioUrl(ref: string | null | undefined, _projectId?: str
 
 export function getQuickPreviewUrl(
   projectId: string,
-  mode: 'ai_mix' | 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance' = 'ai_mix'
+  mode:
+    | 'raw'
+    | 'dry'
+    | 'autotune'
+    | 'ai_mix'
+    | 'dry_beat'
+    | 'autotune_beat'
+    | 'preserve'
+    | 'enhance' = 'ai_mix'
 ): string {
   const params = new URLSearchParams({ mode });
   return `${getApiBaseUrl()}/api/audio/preview/${encodeURIComponent(projectId)}?${params.toString()}`;
@@ -182,6 +191,13 @@ export function validateAudioFileClient(file: File): string | null {
 // ============================================================
 export async function checkHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>('/api/health', { method: 'GET' });
+}
+
+export async function clearBackendCache(): Promise<{ status: string; cleared_assets?: number }> {
+  return requestJson<{ status: string; cleared_assets?: number }>('/api/settings/cache/clear', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 }
 
 // ============================================================

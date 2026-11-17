@@ -40,7 +40,11 @@ export interface ProjectAnalysis {
   detected_key: string;
   detected_scale: string;
   key_confidence?: number;
+  low_confidence_warning?: boolean;
   bars?: number;
+  duration_sec?: number;
+  bpm_locked?: boolean;
+  key_locked?: boolean;
   raw_melody_midi: MidiNote[];
 }
 
@@ -95,6 +99,7 @@ export interface AudioClip {
   trim_end_sec?: number;
   fade_in_ms: number;
   fade_out_ms?: number;
+  offset_ms?: number;
 }
 
 export interface AudioTrackState {
@@ -114,7 +119,7 @@ export interface MidiTrackState {
   solo?: boolean;
   volume?: number;
   pan?: number;
-  instrument: string;
+  instrument?: string | null;
   notes: MidiNote[];
 }
 
@@ -158,7 +163,7 @@ export interface ProjectState {
   qa_status: QAStatus;
 }
 
-// API DTOs matching docs/API_AND_UI_SPEC.md & backend/app/core/schemas.py
+// API DTOs matching docs/API_AND_UI_SPEC.md & Spring Boot backend DTOs
 export interface UploadAudioResponse {
   project_id: string;
   raw_input_ref: string;
@@ -200,7 +205,9 @@ export interface AnalyzeResponse {
   key: string;
   scale: string;
   key_confidence?: number;
+  low_confidence_warning?: boolean;
   bars?: number;
+  duration_sec?: number;
   raw_melody_midi: MidiNote[];
 }
 
@@ -212,6 +219,8 @@ export interface AutotuneRequest {
 export interface AutotuneResponse {
   project_id: string;
   tuned_vocal_ref: string;
+  autotune_settings?: AutotuneSettings;
+  duration_sec?: number;
 }
 
 export interface JobGenerateRequest {
@@ -246,6 +255,7 @@ export type JobSSEEventType =
 export interface JobSSEEvent {
   type: JobSSEEventType;
   job_id?: string;
+  code?: string;
   agent?: string;
   step?: string;
   stage?: string;
@@ -282,6 +292,7 @@ export interface LyricsSuggestRequest {
 }
 
 export interface LyricsSuggestResponse {
+  language?: string;
   lines: LyricLine[];
 }
 
@@ -338,9 +349,11 @@ export interface HealthResponse {
   version?: string;
   redis?: { connected: boolean; backend?: string; used_memory_human?: string };
   engines?: {
+    audio_worker_available?: boolean;
     ffmpeg_available?: boolean;
     fluidsynth_available?: boolean;
     soundfont_available?: boolean;
+    java_fallback_available?: boolean;
   };
   llm_providers?: {
     gemini_configured?: boolean;

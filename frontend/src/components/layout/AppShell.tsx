@@ -35,6 +35,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     project,
     saveNow,
     autoSaveStatus,
+    syncError,
     lastSavedAt,
     restorableDraft,
     dismissRestorePrompt,
@@ -214,7 +215,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               ) : autoSaveStatus === 'error' ? (
                 <>
                   <Clock className="h-3.5 w-3.5" />
-                  <span>Lỗi Auto-Save</span>
+                  <span title={syncError || undefined}>
+                    {syncError ? 'Lỗi đồng bộ Redis' : 'Lỗi Auto-Save'}
+                  </span>
                 </>
               ) : (
                 <>

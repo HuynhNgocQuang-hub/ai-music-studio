@@ -102,7 +102,7 @@ export default function HomePage() {
           <Settings className="h-6 w-6 text-sky-400" />
           <h2 className="mt-3 text-base font-semibold text-white">4. Cài đặt & Sức khỏe</h2>
           <p className="mt-1 text-xs text-slate-400">
-            Cấu hình Gemini / OpenAI API Key, phân vai Agent và kiểm tra FastAPI / Redis / SoundFont.
+            Cấu hình Gemini / OpenAI API Key, phân vai Agent và kiểm tra Spring Boot / Redis / SoundFont.
           </p>
         </Link>
       </section>
