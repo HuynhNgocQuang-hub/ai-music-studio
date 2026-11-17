@@ -47,10 +47,14 @@ import {
   type TransportSnapshot,
   type VocalABMode,
 } from '@/lib/audio/player';
-import { getDraft, markDraftSaved } from '@/lib/storage/indexeddb';
+import { getAudioBlob, getDraft, markDraftSaved, saveAudioBlob } from '@/lib/storage/indexeddb';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import type {
+  AudioClip,
+  AutoTunePreset,
+  AutotuneSettings,
   CoachMessage,
+  OneClickFix,
   OverdubFitCheckResponse,
   ProjectState,
 } from '@/types/project';
@@ -74,8 +78,10 @@ function formatTimeMMSS(sec: number): string {
 export default function StudioPage() {
   const params = useParams<{ id: string }>();
   const routeId = params?.id ? decodeURIComponent(params.id) : '';
-  const { project, updateProject, loadProjectIntoSession } = useProjectSession();
+  const { project, updateProject, loadProjectIntoSession, saveNow } = useProjectSession();
   const engine = useMemo(() => getAudioEngine(), []);
+  const latestProjectRef = useRef(project);
+  latestProjectRef.current = project;
 
   const [transport, setTransport] = useState<TransportSnapshot>(() => engine.getSnapshot());
   const [tool, setTool] = useState<'select' | 'split'>('select');
@@ -102,7 +108,10 @@ export default function StudioPage() {
   // Overdub & AI Fit Check
   const [isOverdubbing, setIsOverdubbing] = useState(false);
   const [fitCheck, setFitCheck] = useState<OverdubFitCheckResponse | null>(null);
+  const [lastOverdubClipId, setLastOverdubClipId] = useState<string | null>(null);
+  const [appliedFixIds, setAppliedFixIds] = useState<string[]>([]);
   const overdubRecorderRef = useRef<MediaRecorder | null>(null);
+  const sseCleanupRef = useRef<(() => void) | null>(null);
 
   // Lyrics & AI Coach
   const [lyricTopic, setLyricTopic] = useState('Ký ức mùa hè');
@@ -117,10 +126,9 @@ export default function StudioPage() {
   const [coachInput, setCoachInput] = useState('');
   const [coachLoading, setCoachLoading] = useState(false);
 
-  // Load project from IndexedDB or Backend if route ID differs from current session
+  // Load project from IndexedDB or Backend only when routeId changes
   useEffect(() => {
-    if (!routeId || routeId === project.project_id) {
-      void engine.syncFromProject(project);
+    if (!routeId || routeId === latestProjectRef.current.project_id) {
       return;
     }
     let active = true;
@@ -128,14 +136,12 @@ export default function StudioPage() {
       const local = await getDraft(routeId);
       if (local && active) {
         loadProjectIntoSession(local.state, { dirty: local.dirty });
-        void engine.syncFromProject(local.state);
         return;
       }
       try {
         const remote = await getProject(routeId);
         if (active) {
           loadProjectIntoSession(remote, { dirty: false });
-          void engine.syncFromProject(remote);
         }
       } catch {
         // Keep current project fallback if backend offline
@@ -144,20 +150,70 @@ export default function StudioPage() {
     return () => {
       active = false;
     };
-  }, [routeId, project, engine, loadProjectIntoSession]);
+  }, [routeId, loadProjectIntoSession]);
+
+  // Re-sync audio buffers only when audio asset refs, track clips/notes, or bar structure change
+  const audioSignature = useMemo(() => {
+    const assets = project.audio_assets;
+    const trackSig = Object.entries(project.tracks)
+      .map(([k, t]) =>
+        t.type === 'audio'
+          ? `${k}:a:${t.clips.map((c) => `${c.id}:${c.source}:${c.offset_ms ?? 0}`).join(',')}`
+          : `${k}:m:${t.instrument || ''}:${t.notes.length}`
+      )
+      .join('|');
+    return [
+      project.project_id,
+      assets.raw_input_ref ?? '',
+      assets.dry_denoised_ref ?? '',
+      assets.tuned_vocal_ref ?? '',
+      assets.rendered_mix_ref ?? '',
+      assets.accompaniment_ref ?? '',
+      assets.preserve_mix_ref ?? '',
+      assets.enhance_mix_ref ?? '',
+      project.song_structure.total_bars,
+      trackSig,
+    ].join('::');
+  }, [
+    project.project_id,
+    project.audio_assets,
+    project.tracks,
+    project.song_structure.total_bars,
+  ]);
+
+  useEffect(() => {
+    const current = latestProjectRef.current;
+    void engine.syncFromProject(current);
+    const hasOverdubClip = (current.tracks.vocal?.clips || []).some(
+      (c) => c.id.startsWith('clip_overdub_') || c.source.includes('overdub')
+    );
+    if (hasOverdubClip && !engine.hasBuffer('overdub')) {
+      void getAudioBlob(current.project_id, 'overdub').then((blob) => {
+        if (blob) void engine.loadAudioFromBlob('overdub', blob);
+      });
+    }
+  }, [audioSignature, engine]);
 
   useEffect(() => {
     const unsub = engine.subscribe(setTransport);
-    return unsub;
+    const snap = engine.getSnapshot();
+    if (snap.abMode === 'preserve' || snap.abMode === 'enhance') {
+      engine.setABMode('ai_mix');
+    }
+    return () => {
+      unsub();
+      sseCleanupRef.current?.();
+      sseCleanupRef.current = null;
+    };
   }, [engine]);
 
   const mutateWithUndo = useCallback(
     (updater: (prev: ProjectState) => ProjectState) => {
-      setUndoStack((s) => [...s.slice(-19), project]);
+      setUndoStack((s) => [...s.slice(-19), latestProjectRef.current]);
       setRedoStack([]);
       updateProject(updater);
     },
-    [project, updateProject]
+    [updateProject]
   );
 
   const handleUndo = () => {
@@ -226,29 +282,39 @@ export default function StudioPage() {
   };
 
   const handleRegenerateTrack = async (trackId: string) => {
-    const track = project.tracks[trackId];
+    const current = latestProjectRef.current;
+    const track = current.tracks[trackId];
     if (!track || track.type !== 'midi' || track.locked) return;
     setBusyJobTrack(trackId);
     setStudioNotice(`Đang tạo lại track ${trackId}...`);
     try {
+      await saveNow(true);
       const { job_id } = await regenerateTrackJob({
-        project_id: project.project_id,
+        project_id: current.project_id,
         target_track: trackId,
-        instrument: track.instrument,
+        instrument: track.instrument || 'grand_piano',
       });
-      subscribeJobEvents(job_id, (evt) => {
-        if (evt.type === 'completed') {
-          setBusyJobTrack(null);
-          if (evt.project_state) {
-            loadProjectIntoSession(evt.project_state, { dirty: true });
-            void engine.syncFromProject(evt.project_state);
+      sseCleanupRef.current?.();
+      sseCleanupRef.current = subscribeJobEvents(
+        job_id,
+        (evt) => {
+          if (evt.type === 'completed') {
+            setBusyJobTrack(null);
+            if (evt.project_state) {
+              loadProjectIntoSession(evt.project_state, { dirty: true });
+              void engine.syncFromProject(evt.project_state);
+            }
+            setStudioNotice(`Đã cập nhật lại track ${trackId}.`);
+          } else if (evt.type === 'error') {
+            setBusyJobTrack(null);
+            setStudioNotice(evt.message || evt.error || 'Lỗi tạo lại track.');
           }
-          setStudioNotice(`Đã cập nhật lại track ${trackId}.`);
-        } else if (evt.type === 'error') {
+        },
+        () => {
           setBusyJobTrack(null);
-          setStudioNotice(evt.error || 'Lỗi tạo lại track.');
+          setStudioNotice(`Mất kết nối SSE khi tạo lại track ${trackId}.`);
         }
-      });
+      );
     } catch (err) {
       setBusyJobTrack(null);
       setStudioNotice(err instanceof ApiError ? err.detail : 'Không thể gọi API regenerate-track.');
@@ -256,31 +322,41 @@ export default function StudioPage() {
   };
 
   const handleRearrangeChords = async () => {
+    const current = latestProjectRef.current;
     setBusyJobTrack('rearrange');
     setStudioNotice('Đang đồng bộ hòa âm cho các track chưa khóa...');
     try {
-      const lockedTracks = Object.entries(project.tracks)
+      await saveNow(true);
+      const lockedTracks = Object.entries(current.tracks)
         .filter(([, t]) => t.locked)
         .map(([k]) => k);
       const { job_id } = await rearrangeChordsJob({
-        project_id: project.project_id,
-        chords: project.song_structure.chords,
+        project_id: current.project_id,
+        chords: current.song_structure.chords,
         locked_tracks: lockedTracks,
       });
-      subscribeJobEvents(job_id, (evt) => {
-        if (evt.type === 'completed') {
-          setBusyJobTrack(null);
-          setChordsDirty(false);
-          if (evt.project_state) {
-            loadProjectIntoSession(evt.project_state, { dirty: true });
-            void engine.syncFromProject(evt.project_state);
+      sseCleanupRef.current?.();
+      sseCleanupRef.current = subscribeJobEvents(
+        job_id,
+        (evt) => {
+          if (evt.type === 'completed') {
+            setBusyJobTrack(null);
+            setChordsDirty(false);
+            if (evt.project_state) {
+              loadProjectIntoSession(evt.project_state, { dirty: true });
+              void engine.syncFromProject(evt.project_state);
+            }
+            setStudioNotice('Đã đồng bộ nhạc đệm theo hợp âm mới.');
+          } else if (evt.type === 'error') {
+            setBusyJobTrack(null);
+            setStudioNotice(evt.message || evt.error || 'Lỗi đồng bộ hợp âm.');
           }
-          setStudioNotice('Đã đồng bộ nhạc đệm theo hợp âm mới.');
-        } else if (evt.type === 'error') {
+        },
+        () => {
           setBusyJobTrack(null);
-          setStudioNotice(evt.error || 'Lỗi đồng bộ hợp âm.');
+          setStudioNotice('Mất kết nối SSE khi đồng bộ hợp âm.');
         }
-      });
+      );
     } catch (err) {
       setBusyJobTrack(null);
       setStudioNotice(err instanceof ApiError ? err.detail : 'Không thể kết nối API rearrange.');
@@ -311,10 +387,37 @@ export default function StudioPage() {
         setStudioNotice('AI Fit Check đang phân tích bản thu Overdub...');
         try {
           const wavBlob = await encodeBlobToWav(rawBlob);
-          const res = await overdubFitCheck(project.project_id, wavBlob);
+          const currentId = latestProjectRef.current.project_id;
+          await saveAudioBlob(currentId, 'overdub', wavBlob);
+          await engine.loadAudioFromBlob('overdub', wavBlob);
+
+          const clipId = `clip_overdub_${Date.now()}`;
+          const overdubClip: AudioClip = {
+            id: clipId,
+            source: `idb://overdub/${clipId}`,
+            start_bar: 1,
+            trim_start_sec: 0,
+            fade_in_ms: 20,
+            fade_out_ms: 20,
+            offset_ms: 0,
+          };
+          setLastOverdubClipId(clipId);
+          setAppliedFixIds([]);
+          mutateWithUndo((prev) => ({
+            ...prev,
+            tracks: {
+              ...prev.tracks,
+              vocal: {
+                ...prev.tracks.vocal,
+                clips: [...(prev.tracks.vocal?.clips || []), overdubClip],
+              },
+            },
+          }));
+
+          const res = await overdubFitCheck(currentId, wavBlob);
           setFitCheck(res);
           setCoachOpen(true);
-          setStudioNotice('Đã hoàn tất AI Fit Check cho bản thu đè.');
+          setStudioNotice('Đã lưu bản thu Overdub vào IndexedDB và hoàn tất AI Fit Check.');
         } catch (err) {
           setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi chạy AI Fit Check.');
         }
@@ -328,18 +431,144 @@ export default function StudioPage() {
     }
   };
 
+  const handleApplyOneClickFix = async (fix: OneClickFix) => {
+    const current = latestProjectRef.current;
+    if (fix.action_type === 'shift_timing') {
+      const shiftMs = Number(fix.value) || 0;
+      mutateWithUndo((prev) => {
+        const clips = [...(prev.tracks.vocal?.clips || [])];
+        if (clips.length === 0) {
+          clips.push({
+            id: `clip_overdub_${Date.now()}`,
+            source: 'overdub',
+            start_bar: 1,
+            trim_start_sec: 0,
+            fade_in_ms: 20,
+            fade_out_ms: 20,
+            offset_ms: shiftMs,
+          });
+        } else {
+          const targetIdx = lastOverdubClipId
+            ? clips.findIndex((c) => c.id === lastOverdubClipId)
+            : clips.length - 1;
+          const idx = targetIdx >= 0 ? targetIdx : clips.length - 1;
+          clips[idx] = {
+            ...clips[idx],
+            offset_ms: Math.round(((clips[idx].offset_ms ?? 0) + shiftMs) * 10) / 10,
+          };
+        }
+        return {
+          ...prev,
+          tracks: {
+            ...prev.tracks,
+            vocal: { ...prev.tracks.vocal, clips },
+          },
+        };
+      });
+      setAppliedFixIds((prev) => (prev.includes(fix.id) ? prev : [...prev, fix.id]));
+      setStudioNotice(`Đã dịch timing vocal ${shiftMs > 0 ? `+${shiftMs}` : shiftMs} ms.`);
+      return;
+    }
+
+    if (fix.action_type === 'adjust_gain') {
+      const deltaDb = Number(fix.value) || 0;
+      const factor = Math.pow(10, deltaDb / 20);
+      const currVol = current.tracks.vocal?.volume ?? 0.95;
+      const nextVol = Math.max(0, Math.min(1.2, Number((currVol * factor).toFixed(3))));
+      mutateWithUndo((prev) => ({
+        ...prev,
+        tracks: {
+          ...prev.tracks,
+          vocal: { ...prev.tracks.vocal, volume: nextVol },
+        },
+      }));
+      engine.setChannelConfig({
+        id: 'vocal',
+        mute: Boolean(current.tracks.vocal?.mute),
+        solo: Boolean(current.tracks.vocal?.solo),
+        volume: nextVol,
+        pan: current.tracks.vocal?.pan ?? 0.0,
+      });
+      setAppliedFixIds((prev) => (prev.includes(fix.id) ? prev : [...prev, fix.id]));
+      setStudioNotice(`Đã chỉnh Gain vocal (${deltaDb > 0 ? `+${deltaDb}` : deltaDb} dB → ${Math.round(nextVol * 100)}%).`);
+      return;
+    }
+
+    if (fix.action_type === 'apply_autotune') {
+      const presetVal = String(fix.value || 'natural') as AutoTunePreset;
+      const preset: AutoTunePreset =
+        presetVal === 'natural' || presetVal === 'balanced' || presetVal === 'modern'
+          ? presetVal
+          : 'natural';
+      const nextSettings: AutotuneSettings = {
+        ...current.autotune_settings,
+        enabled: true,
+        preset,
+        key: current.analysis.detected_key,
+        scale: current.analysis.detected_scale,
+        retune_speed_ms: preset === 'modern' ? 5 : preset === 'balanced' ? 20 : 45,
+        humanize: preset === 'modern' ? 0.15 : preset === 'balanced' ? 0.4 : 0.7,
+        mix_percent: preset === 'modern' ? 100 : preset === 'balanced' ? 90 : 75,
+      };
+      setStudioNotice('Đang áp dụng Auto-Tune 1-Click Fix...');
+      try {
+        mutateWithUndo((prev) => ({ ...prev, autotune_settings: nextSettings }));
+        await saveNow(true);
+        const res = await autotuneAudio({
+          project_id: current.project_id,
+          autotune_settings: nextSettings,
+        });
+        const updated: ProjectState = {
+          ...latestProjectRef.current,
+          autotune_settings: nextSettings,
+          audio_assets: {
+            ...latestProjectRef.current.audio_assets,
+            tuned_vocal_ref: res.tuned_vocal_ref,
+          },
+        };
+        updateProject((prev) => ({
+          ...prev,
+          autotune_settings: nextSettings,
+          audio_assets: { ...prev.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
+        }));
+        await engine.syncFromProject(updated, { forceSlots: ['autotune'] });
+        engine.setABMode('autotune');
+        setAppliedFixIds((prev) => (prev.includes(fix.id) ? prev : [...prev, fix.id]));
+        setStudioNotice(`Đã bật Auto-Tune (${preset}) theo ${nextSettings.key} ${nextSettings.scale}.`);
+      } catch (err) {
+        setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi áp dụng Auto-Tune 1-Click Fix.');
+      }
+    }
+  };
+
   const handleApplyAutotunePro = async () => {
+    const current = latestProjectRef.current;
+    const effectiveSettings: AutotuneSettings =
+      current.autotune_settings.enabled && current.autotune_settings.preset === 'off'
+        ? { ...current.autotune_settings, preset: 'balanced' }
+        : current.autotune_settings;
     setStudioNotice('Đang render Auto-Tune Pro...');
     try {
+      await saveNow(true);
       const res = await autotuneAudio({
-        project_id: project.project_id,
-        autotune_settings: project.autotune_settings,
+        project_id: current.project_id,
+        autotune_settings: effectiveSettings,
       });
+      const updated: ProjectState = {
+        ...latestProjectRef.current,
+        autotune_settings: effectiveSettings,
+        audio_assets: {
+          ...latestProjectRef.current.audio_assets,
+          tuned_vocal_ref: res.tuned_vocal_ref,
+        },
+      };
       updateProject((prev) => ({
         ...prev,
+        autotune_settings: effectiveSettings,
         audio_assets: { ...prev.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
       }));
-      engine.setABMode('autotune');
+      await engine.syncFromProject(updated, { forceSlots: ['autotune'] });
+      engine.setABMode(effectiveSettings.enabled ? 'autotune' : 'dry');
       setStudioNotice('Đã cập nhật Auto-Tune Pro.');
     } catch (err) {
       setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi áp dụng Auto-Tune Pro.');
@@ -402,6 +631,7 @@ export default function StudioPage() {
 
   const handleSaveAimusic = async () => {
     try {
+      await saveNow(true);
       const blob = await exportAimusic(project.project_id);
       const safeName = (project.title || project.project_id).replace(/[^a-zA-Z0-9_-]/g, '_');
       triggerBlobDownload(blob, `${safeName}.aimusic`);
@@ -419,6 +649,7 @@ export default function StudioPage() {
       return;
     }
     try {
+      await saveNow(true);
       const safeName = (project.title || project.project_id).replace(/[^a-zA-Z0-9_-]/g, '_');
       if (kind === 'midi') {
         const blob = await exportMidi(project.project_id);
@@ -775,7 +1006,7 @@ export default function StudioPage() {
                           {trackId}
                         </span>
                         <span className="text-[10px] text-slate-400">
-                          {track.type === 'audio' ? 'Audio Clips' : track.instrument}
+                          {track.type === 'audio' ? 'Audio Clips' : track.instrument || 'midi'}
                         </span>
                       </div>
                       <div className="flex flex-wrap items-center gap-1">
@@ -848,19 +1079,29 @@ export default function StudioPage() {
                       className="relative flex h-14 flex-1 cursor-pointer items-center overflow-hidden rounded-lg border border-slate-800 bg-[#0e121c] px-2"
                     >
                       {track.type === 'audio' ? (
-                        <div className="flex h-10 w-full items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-3 text-xs text-emerald-200">
-                          <span>
+                        <div className="flex h-10 w-full items-center gap-2 overflow-x-auto rounded-md border border-emerald-500/40 bg-emerald-500/15 px-3 text-xs text-emerald-200">
+                          <span className="shrink-0">
                             {project.audio_assets.tuned_vocal_ref
                               ? 'Vocal Clip (Auto-Tuned / Dry Ready)'
                               : project.audio_assets.dry_denoised_ref
                               ? 'Vocal Clip (Dry Denoised)'
                               : 'Chưa có Audio Clip — Dùng Record Overdub hoặc Wizard /create'}
                           </span>
+                          {track.clips
+                            .filter((c) => c.id.startsWith('clip_overdub_') || c.source.includes('overdub'))
+                            .map((c) => (
+                              <span
+                                key={c.id}
+                                className="shrink-0 rounded border border-rose-400/40 bg-rose-500/20 px-2 py-0.5 text-[10px] font-medium text-rose-200"
+                              >
+                                Overdub ({c.offset_ms ? `${c.offset_ms > 0 ? '+' : ''}${c.offset_ms}ms` : 'Bar ' + c.start_bar})
+                              </span>
+                            ))}
                         </div>
                       ) : (
                         <div className="flex h-10 w-full items-center justify-between rounded-md border border-indigo-500/30 bg-indigo-500/15 px-3 text-xs text-indigo-200">
                           <span>
-                            MIDI Pattern ({track.notes.length} notes • {track.instrument})
+                            MIDI Pattern ({track.notes.length} notes • {track.instrument || 'default'})
                           </span>
                           <span className="text-[10px] text-indigo-300">Bấm để mở Piano Roll</span>
                         </div>
@@ -943,7 +1184,7 @@ export default function StudioPage() {
                             <span>Pan: {panVal === 0 ? 'C' : panVal < 0 ? `${Math.abs(panVal)}L` : `${panVal}R`}</span>
                             {track.type === 'midi' && (
                               <select
-                                value={track.instrument}
+                                value={track.instrument || ''}
                                 onChange={(e) =>
                                   mutateWithUndo((p) => ({
                                     ...p,
@@ -955,7 +1196,7 @@ export default function StudioPage() {
                                 }
                                 className="rounded bg-slate-900 px-1 py-0.5 text-[10px] text-slate-200"
                               >
-                                {(INSTRUMENTS[trackId] || [track.instrument]).map((inst) => (
+                                {(INSTRUMENTS[trackId] || (track.instrument ? [track.instrument] : [])).map((inst) => (
                                   <option key={inst} value={inst}>
                                     {inst}
                                   </option>
@@ -1060,7 +1301,16 @@ export default function StudioPage() {
                           onChange={(e) =>
                             updateProject((p) => ({
                               ...p,
-                              autotune_settings: { ...p.autotune_settings, key: e.target.value },
+                              autotune_settings: {
+                                ...p.autotune_settings,
+                                enabled: true,
+                                preset:
+                                  p.autotune_settings.preset === 'off'
+                                    ? 'balanced'
+                                    : p.autotune_settings.preset,
+                                auto_follow_project_key: false,
+                                key: e.target.value,
+                              },
                             }))
                           }
                           className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-white"
@@ -1076,7 +1326,16 @@ export default function StudioPage() {
                           onChange={(e) =>
                             updateProject((p) => ({
                               ...p,
-                              autotune_settings: { ...p.autotune_settings, scale: e.target.value },
+                              autotune_settings: {
+                                ...p.autotune_settings,
+                                enabled: true,
+                                preset:
+                                  p.autotune_settings.preset === 'off'
+                                    ? 'balanced'
+                                    : p.autotune_settings.preset,
+                                auto_follow_project_key: false,
+                                scale: e.target.value,
+                              },
                             }))
                           }
                           className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-white"
@@ -1105,6 +1364,10 @@ export default function StudioPage() {
                             autotune_settings: {
                               ...p.autotune_settings,
                               enabled: true,
+                              preset:
+                                p.autotune_settings.preset === 'off'
+                                  ? 'balanced'
+                                  : p.autotune_settings.preset,
                               retune_speed_ms: Number(e.target.value),
                             },
                           }))
@@ -1127,6 +1390,11 @@ export default function StudioPage() {
                             ...p,
                             autotune_settings: {
                               ...p.autotune_settings,
+                              enabled: true,
+                              preset:
+                                p.autotune_settings.preset === 'off'
+                                  ? 'balanced'
+                                  : p.autotune_settings.preset,
                               humanize: Number(e.target.value) / 100,
                             },
                           }))
@@ -1149,6 +1417,11 @@ export default function StudioPage() {
                             ...p,
                             autotune_settings: {
                               ...p.autotune_settings,
+                              enabled: true,
+                              preset:
+                                p.autotune_settings.preset === 'off'
+                                  ? 'balanced'
+                                  : p.autotune_settings.preset,
                               mix_percent: Number(e.target.value),
                             },
                           }))
@@ -1277,16 +1550,24 @@ export default function StudioPage() {
                   Lệch nhịp: <strong>{fitCheck.timing_offset_ms} ms</strong> • {fitCheck.gain_suggestion}
                 </p>
                 <div className="flex flex-wrap gap-1.5">
-                  {fitCheck.one_click_fixes.map((fix) => (
-                    <button
-                      key={fix.id}
-                      type="button"
-                      onClick={() => setStudioNotice(`Đã áp dụng 1-Click Fix: ${fix.label}`)}
-                      className="rounded-md bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-500"
-                    >
-                      {fix.label}
-                    </button>
-                  ))}
+                  {fitCheck.one_click_fixes.map((fix) => {
+                    const applied = appliedFixIds.includes(fix.id);
+                    return (
+                      <button
+                        key={fix.id}
+                        type="button"
+                        disabled={applied}
+                        onClick={() => void handleApplyOneClickFix(fix)}
+                        className={`rounded-md px-2 py-1 text-[11px] font-medium text-white ${
+                          applied
+                            ? 'bg-emerald-600/60 cursor-default'
+                            : 'bg-indigo-600 hover:bg-indigo-500'
+                        }`}
+                      >
+                        {applied ? `✓ ${fix.label}` : fix.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}

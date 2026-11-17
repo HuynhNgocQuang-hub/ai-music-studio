@@ -21,6 +21,7 @@ interface ProjectContextValue {
   resetProject: () => ProjectState;
   saveNow: (syncToBackend?: boolean) => Promise<void>;
   autoSaveStatus: AutoSaveStatus;
+  syncError: string | null;
   lastSavedAt: string | null;
   restorableDraft: StoredDraft | null;
   dismissRestorePrompt: () => void;
@@ -33,6 +34,7 @@ const ProjectContext = createContext<ProjectContextValue | null>(null);
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [project, setProject] = useState<ProjectState>(() => createDefaultProjectState());
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [restorableDraft, setRestorableDraft] = useState<StoredDraft | null>(null);
 
@@ -61,7 +63,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const persistDraft = useCallback(async (state: ProjectState, syncBackend = false) => {
     setAutoSaveStatus('saving');
     try {
-      const saved = await saveDraft(state, { dirty: !syncBackend });
+      const saved = await saveDraft(state, { dirty: true });
       if (saved) {
         setLastSavedAt(saved.updated_at);
       }
@@ -69,13 +71,20 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         try {
           await syncProject(state.project_id, state);
           await markDraftSaved(state.project_id);
-        } catch {
-          // Backend might be offline; IndexedDB still safely holds the draft
+          setSyncError(null);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Lỗi đồng bộ state lên Redis.';
+          setSyncError(msg);
+          setAutoSaveStatus('error');
+          return;
         }
+      } else {
+        setSyncError(null);
       }
       isDirtyRef.current = false;
       setAutoSaveStatus('saved');
-    } catch {
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : 'Lỗi lưu bản nháp IndexedDB.');
       setAutoSaveStatus('error');
     }
   }, []);
@@ -120,9 +129,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         },
       };
       isDirtyRef.current = options.dirty ?? false;
+      latestProjectRef.current = normalized;
       setProject(normalized);
       void saveDraft(normalized, { dirty: options.dirty ?? false }).then((d) => {
         if (d) setLastSavedAt(d.updated_at);
+        setSyncError(null);
         setAutoSaveStatus('saved');
       });
     },
@@ -132,7 +143,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const resetProject = useCallback(() => {
     const fresh = createDefaultProjectState();
     isDirtyRef.current = false;
+    latestProjectRef.current = fresh;
     setProject(fresh);
+    setSyncError(null);
     setAutoSaveStatus('idle');
     return fresh;
   }, []);
@@ -150,8 +163,10 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const acceptRestoreDraft = useCallback((draft: StoredDraft) => {
     isDirtyRef.current = false;
+    latestProjectRef.current = draft.state;
     setProject(draft.state);
     setLastSavedAt(draft.updated_at);
+    setSyncError(null);
     setAutoSaveStatus('saved');
     setRestorableDraft(null);
   }, []);
@@ -186,6 +201,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         resetProject,
         saveNow,
         autoSaveStatus,
+        syncError,
         lastSavedAt,
         restorableDraft,
         dismissRestorePrompt,

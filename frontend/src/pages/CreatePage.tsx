@@ -28,6 +28,7 @@ import {
   cancelJob,
   denoiseAudio,
   exportAudio,
+  getQuickPreviewUrl,
   MIN_AUDIO_DURATION_SEC,
   startGenerateJob,
   subscribeJobEvents,
@@ -50,6 +51,7 @@ import type {
   MelodyMode,
   MotifPosition,
   OutputMode,
+  ProjectState,
 } from '@/types/project';
 
 const GENRES = ['Pop', 'Ballad', 'Lo-fi', 'R&B', 'Hip-hop', 'EDM', 'Acoustic', 'Rock'];
@@ -82,6 +84,8 @@ export default function CreateWizardPage() {
   const navigate = useNavigate();
   const { project, updateProject, loadProjectIntoSession, saveNow } = useProjectSession();
   const engine = useMemo(() => getAudioEngine(), []);
+  const latestProjectRef = useRef(project);
+  latestProjectRef.current = project;
 
   const [step, setStep] = useState<number>(1);
   const [transport, setTransport] = useState<TransportSnapshot>(() => engine.getSnapshot());
@@ -190,12 +194,13 @@ export default function CreateWizardPage() {
           return;
         }
 
+        const currentId = latestProjectRef.current.project_id;
         await engine.loadAudioFromBlob('raw', blob);
-        await saveAudioBlob(project.project_id, 'raw_input', blob);
+        await saveAudioBlob(currentId, 'raw_input', blob);
 
-        const uploadRes = await uploadAudio(blob, filename, project.project_id);
-        const nextProjectId = uploadRes.project_id || project.project_id;
-        if (nextProjectId !== project.project_id) {
+        const uploadRes = await uploadAudio(blob, filename, currentId);
+        const nextProjectId = uploadRes.project_id || currentId;
+        if (nextProjectId !== currentId) {
           await saveAudioBlob(nextProjectId, 'raw_input', blob);
         }
 
@@ -253,28 +258,37 @@ export default function CreateWizardPage() {
         }
 
         // Load denoised buffer for instant A/B Dry Check
-        await engine.syncFromProject({
-          ...project,
+        const base = latestProjectRef.current;
+        const nextTitle =
+          !base.title || base.title === 'Untitled Session' ? derivedTitle : base.title;
+        const syncedProject: ProjectState = {
+          ...base,
           project_id: nextProjectId,
+          title: nextTitle,
+          config: {
+            ...base.config,
+            title: nextTitle,
+          },
           audio_assets: {
-            ...project.audio_assets,
+            ...base.audio_assets,
             raw_input_ref: uploadRes.raw_input_ref,
             dry_denoised_ref: denoiseRes.dry_denoised_ref,
           },
-        });
+        };
+        await engine.syncFromProject(syncedProject, { forceSlots: ['dry'] });
         engine.setABMode('dry');
       } catch (err) {
         const msg =
           err instanceof ApiError
             ? err.detail
-            : 'Không thể kết nối Backend FastAPI. Kiểm tra kết nối tại /settings.';
+            : 'Không thể kết nối Backend Spring Boot. Kiểm tra kết nối tại /settings.';
         setStepError(msg);
       } finally {
         setUploading(false);
         setDenoising(false);
       }
     },
-    [autoTrim, enableDenoise, engine, project, updateProject]
+    [autoTrim, enableDenoise, engine, updateProject]
   );
 
   const handleFileUpload = async (file: File) => {
@@ -368,12 +382,13 @@ export default function CreateWizardPage() {
   };
 
   const handleRerunDenoise = async () => {
-    if (!project.audio_assets.raw_input_ref) return;
+    const current = latestProjectRef.current;
+    if (!current.audio_assets.raw_input_ref) return;
     setDenoising(true);
     setStepError(null);
     try {
       const res = await denoiseAudio({
-        project_id: project.project_id,
+        project_id: current.project_id,
         enable_denoise: enableDenoise,
         auto_trim: autoTrim,
       });
@@ -384,10 +399,15 @@ export default function CreateWizardPage() {
           dry_denoised_ref: res.dry_denoised_ref,
         },
       }));
-      await engine.syncFromProject({
-        ...project,
-        audio_assets: { ...project.audio_assets, dry_denoised_ref: res.dry_denoised_ref },
-      });
+      const latest = latestProjectRef.current;
+      await engine.syncFromProject(
+        {
+          ...latest,
+          audio_assets: { ...latest.audio_assets, dry_denoised_ref: res.dry_denoised_ref },
+        },
+        { forceSlots: ['dry'] }
+      );
+      engine.setABMode('dry');
     } catch (err) {
       setStepError(err instanceof ApiError ? err.detail : 'Lỗi chạy AI Denoise.');
     } finally {
@@ -460,12 +480,13 @@ export default function CreateWizardPage() {
   };
 
   const handleSelectAutotunePreset = async (preset: (typeof AUTOTUNE_PRESETS)[number]) => {
+    const current = latestProjectRef.current;
     const nextSettings: AutotuneSettings = {
-      ...project.autotune_settings,
+      ...current.autotune_settings,
       enabled: preset.id !== 'off',
       preset: preset.id,
-      key: project.analysis.detected_key,
-      scale: project.analysis.detected_scale,
+      key: current.analysis.detected_key,
+      scale: current.analysis.detected_scale,
       retune_speed_ms: preset.retune_speed_ms,
       humanize: preset.humanize,
       mix_percent: preset.mix_percent,
@@ -482,20 +503,21 @@ export default function CreateWizardPage() {
     setStepError(null);
     try {
       const res = await autotuneAudio({
-        project_id: project.project_id,
+        project_id: current.project_id,
         autotune_settings: nextSettings,
       });
-      const updated = {
-        ...project,
+      const latest = latestProjectRef.current;
+      const updated: ProjectState = {
+        ...latest,
         autotune_settings: nextSettings,
-        audio_assets: { ...project.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
+        audio_assets: { ...latest.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
       };
       updateProject((prev) => ({
         ...prev,
         autotune_settings: nextSettings,
         audio_assets: { ...prev.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
       }));
-      await engine.syncFromProject(updated);
+      await engine.syncFromProject(updated, { forceSlots: ['autotune'] });
       engine.setABMode('autotune');
     } catch (err) {
       setStepError(err instanceof ApiError ? err.detail : 'Lỗi áp dụng Auto-Tune.');
@@ -533,18 +555,36 @@ export default function CreateWizardPage() {
             if (warningText) setJobWarning(warningText);
           }
           if (evt.type === 'error') {
-            setStepError(evt.error || evt.message || 'Multi-Agent Job gặp lỗi.');
+            setStepError(evt.message || evt.error || 'Multi-Agent Job gặp lỗi.');
             setIsGenerating(false);
           }
           if (evt.type === 'completed') {
             setJobProgress(100);
             setIsGenerating(false);
+            const resolvedState = evt.project_state ?? latestProjectRef.current;
             if (evt.project_state) {
               loadProjectIntoSession(evt.project_state, { dirty: true });
-              void engine.syncFromProject(evt.project_state);
             }
-            setPreviewLayer(project.config.melody_mode === 'enhance' ? 'enhance' : 'preserve');
+            const nextLayer =
+              resolvedState.config.melody_mode === 'enhance' ? 'enhance' : 'preserve';
+            setPreviewLayer(nextLayer);
             setStep(4);
+            void (async () => {
+              await engine.syncFromProject(resolvedState);
+              await Promise.all([
+                engine.loadAudioFromUrl(
+                  'preserve',
+                  getQuickPreviewUrl(resolvedState.project_id, 'preserve'),
+                  `preview:${resolvedState.project_id}:preserve:v${resolvedState.version}`
+                ),
+                engine.loadAudioFromUrl(
+                  'enhance',
+                  getQuickPreviewUrl(resolvedState.project_id, 'enhance'),
+                  `preview:${resolvedState.project_id}:enhance:v${resolvedState.version}`
+                ),
+              ]);
+              engine.setABMode(nextLayer);
+            })();
           }
         },
         () => {
@@ -578,17 +618,37 @@ export default function CreateWizardPage() {
     const modeMap: Record<typeof layer, VocalABMode> = {
       dry: 'dry',
       autotune: 'autotune',
-      preserve: 'ai_mix',
-      enhance: 'ai_mix',
+      preserve: 'preserve',
+      enhance: 'enhance',
     };
-    engine.setABMode(modeMap[layer]);
+    const nextMode = modeMap[layer];
+    if ((layer === 'preserve' || layer === 'enhance') && !engine.hasBuffer(layer)) {
+      const current = latestProjectRef.current;
+      void engine
+        .loadAudioFromUrl(
+          layer,
+          getQuickPreviewUrl(current.project_id, layer),
+          `preview:${current.project_id}:${layer}:v${current.version}`
+        )
+        .then(() => {
+          engine.setABMode(nextMode);
+        });
+      return;
+    }
+    engine.setABMode(nextMode);
   };
 
   const handleQuickExport = async (format: 'mp3' | 'wav') => {
     setExportingFormat(format);
     setStepError(null);
     try {
-      const blob = await exportAudio(project.project_id, format, true);
+      const exportMode =
+        previewLayer === 'preserve' || previewLayer === 'enhance'
+          ? previewLayer
+          : previewLayer === 'dry'
+          ? 'dry_beat'
+          : 'autotune_beat';
+      const blob = await exportAudio(project.project_id, format, true, exportMode);
       const safeName = (project.title || project.project_id).replace(/[^a-zA-Z0-9_-]/g, '_');
       triggerBlobDownload(blob, `${safeName}.${format}`);
     } catch (err) {

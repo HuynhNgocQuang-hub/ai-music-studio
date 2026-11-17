@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import {
   checkHealth,
+  clearBackendCache,
   DEFAULT_LLM_SETTINGS,
   loadStudioSettings,
   saveStudioSettings,
@@ -28,6 +29,7 @@ export default function SettingsPage() {
   const [showGemini, setShowGemini] = useState(false);
   const [showOpenai, setShowOpenai] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
+  const [cacheNotice, setCacheNotice] = useState<string | null>(null);
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
@@ -42,7 +44,7 @@ export default function SettingsPage() {
       setHealth(res);
     } catch {
       setHealth(null);
-      setHealthError('Không thể kết nối Backend FastAPI tại URL đã cấu hình.');
+      setHealthError('Không thể kết nối Backend Spring Boot tại URL đã cấu hình.');
     } finally {
       setCheckingHealth(false);
     }
@@ -72,8 +74,22 @@ export default function SettingsPage() {
   };
 
   const handleClearCache = async () => {
+    setCacheNotice(null);
     await clearAllDrafts();
+    let backendCleared = false;
+    try {
+      await clearBackendCache();
+      backendCleared = true;
+    } catch {
+      // Backend may be offline; IndexedDB drafts are cleared
+    }
     await refreshStorage();
+    setCacheNotice(
+      backendCleared
+        ? 'Đã dọn cache IndexedDB và Backend Spring Boot.'
+        : 'Đã dọn cache IndexedDB (Backend offline).'
+    );
+    setTimeout(() => setCacheNotice(null), 3000);
   };
 
   return (
@@ -81,7 +97,7 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold text-white">Cài đặt Dual LLM & Sức khỏe Hệ thống</h1>
         <p className="text-xs text-slate-400">
-          Cấu hình Gemini API Key, OpenAI API Key, phân vai Agent và kiểm tra kết nối FastAPI /
+          Cấu hình Gemini API Key, OpenAI API Key, phân vai Agent và kiểm tra kết nối Spring Boot /
           Redis / FluidSynth.
         </p>
       </div>
@@ -115,7 +131,7 @@ export default function SettingsPage() {
           <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-3.5">
             <div className="flex items-center justify-between text-xs text-slate-400">
               <span className="flex items-center gap-1.5">
-                <Server className="h-3.5 w-3.5" /> Backend FastAPI
+                <Server className="h-3.5 w-3.5" /> Backend Spring Boot
               </span>
               {health?.status === 'ok' || health?.status === 'degraded' ? (
                 <CheckCircle2 className="h-4 w-4 text-emerald-400" />
@@ -185,7 +201,7 @@ export default function SettingsPage() {
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="mb-1.5 block text-xs font-medium text-slate-300">
-              Backend FastAPI URL
+              Backend Spring Boot URL
             </label>
             <input
               type="url"
@@ -311,6 +327,7 @@ export default function SettingsPage() {
             >
               <Trash2 className="h-3 w-3" /> Dọn Cache
             </button>
+            {cacheNotice && <span className="text-emerald-400">{cacheNotice}</span>}
           </div>
 
           <div className="flex items-center gap-3">
