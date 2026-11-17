@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 @RestController
 @RequestMapping("/api/audio")
@@ -290,8 +291,8 @@ public class AudioController {
         project.getSongStructure().setTotalBars(Math.max(project.getSongStructure().getTotalBars(), bars));
         if (project.getAutotuneSettings().isAutoFollowProjectKey()) {
             project.getAutotuneSettings().setKey(detKey);
-            if ("major".equalsIgnoreCase(detScale) || "minor".equalsIgnoreCase(detScale)) {
-                project.getAutotuneSettings().setScale(detScale);
+            if (isSupportedScale(detScale)) {
+                project.getAutotuneSettings().setScale(normalizeScaleName(detScale));
             }
         }
         store.saveProject(project);
@@ -315,8 +316,9 @@ public class AudioController {
         byte[] srcBytes = store.getAudioBytes(srcRef)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Source audio asset expired or missing."));
 
+        boolean hasProSettings = req.getAutotuneSettings() != null;
         AutotuneSettings rawSettings;
-        if (req.getAutotuneSettings() != null) {
+        if (hasProSettings) {
             rawSettings = req.getAutotuneSettings();
         } else if (req.getPreset() != null) {
             rawSettings = audioFallback.applyPreset(
@@ -327,11 +329,18 @@ public class AudioController {
 
         AutotuneSettings effective = audioFallback.resolveAutotuneSettings(rawSettings);
         if (effective.isAutoFollowProjectKey()) {
-            effective.setKey(project.getAnalysis().getDetectedKey());
-            String detScale = project.getAnalysis().getDetectedScale();
-            if ("major".equalsIgnoreCase(detScale) || "minor".equalsIgnoreCase(detScale)) {
-                effective.setScale(detScale);
+            if (!hasProSettings || !effective.isKeyProvided()) {
+                effective.setKey(project.getAnalysis().getDetectedKey());
             }
+            if (!hasProSettings || !effective.isScaleProvided()) {
+                String detScale = project.getAnalysis().getDetectedScale();
+                if (isSupportedScale(detScale)) {
+                    effective.setScale(normalizeScaleName(detScale));
+                }
+            }
+        }
+        if (isSupportedScale(effective.getScale())) {
+            effective.setScale(normalizeScaleName(effective.getScale()));
         }
 
         byte[] tunedBytes;
@@ -386,12 +395,46 @@ public class AudioController {
         ProjectState project = store.getProject(projectId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + projectId + "' not found."));
+
+        Map<String, TrackState> tracks = project.getTracks();
+        if (tracks != null && !tracks.isEmpty() && tracks.values().stream().allMatch(TrackState::isMute)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "All tracks are muted; unmute at least one track before previewing.");
+        }
+
+        String normMode = audioFallback.normalizePreviewMode(mode);
+        if (audioWorkerClient.isHealthy()) {
+            ProjectState previewProject = audioFallback.preparePreviewProject(project, normMode);
+            String workerMode = audioFallback.toWorkerRenderMode(normMode);
+            Map<String, byte[]> assets = store.collectAudioAssets(previewProject);
+            Optional<byte[]> workerWav = audioWorkerClient.renderProjectMix(
+                    previewProject, assets, workerMode, true, properties.getSampleRate());
+            if (workerWav.isPresent()) {
+                return ResponseEntity.ok()
+                        .header(HttpHeaders.CONTENT_TYPE, "audio/wav")
+                        .body(workerWav.get());
+            }
+        }
+
         JavaAudioFallbackService.RenderedMix mix = audioFallback.renderProjectMix(
-                project, store, mode, true, properties.getSampleRate());
+                project, store, normMode, true, properties.getSampleRate());
         byte[] wav = audioFallback.encodeWavStereo(mix.stereo(), mix.sampleRate());
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_TYPE, "audio/wav")
                 .body(wav);
+    }
+
+    private static final Set<String> SUPPORTED_SCALES = Set.of(
+            "major", "minor", "pentatonic_major", "pentatonic_minor", "chromatic"
+    );
+
+    private static String normalizeScaleName(String scale) {
+        if (scale == null) return "";
+        return scale.trim().toLowerCase(Locale.ROOT).replace(' ', '_');
+    }
+
+    private static boolean isSupportedScale(String scale) {
+        return SUPPORTED_SCALES.contains(normalizeScaleName(scale));
     }
 
     private double toDouble(Object v, double fallback) {

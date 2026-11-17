@@ -59,6 +59,7 @@ public class AgentOrchestrator {
         private volatile String status = "running";
         private volatile String error;
         private volatile ProjectState resultState;
+        private volatile Thread workerThread;
         private final AtomicBoolean cancelled = new AtomicBoolean(false);
         private final AtomicBoolean timedOut = new AtomicBoolean(false);
         private final List<SseEventRecord> history = new ArrayList<>();
@@ -79,13 +80,23 @@ public class AgentOrchestrator {
         public void setError(String error) { this.error = error; }
         public ProjectState getResultState() { return resultState; }
         public void setResultState(ProjectState resultState) { this.resultState = resultState; }
+        public void setWorkerThread(Thread workerThread) { this.workerThread = workerThread; }
+        public void interruptWorker() {
+            Thread t = this.workerThread;
+            if (t != null) {
+                t.interrupt();
+            }
+        }
         public AtomicBoolean getCancelled() { return cancelled; }
         public AtomicBoolean getTimedOut() { return timedOut; }
 
         public synchronized void publish(String eventName, Map<String, Object> payload, ObjectMapper mapper) {
+            boolean terminal = TERMINAL_EVENTS.contains(eventName);
+            if (terminal && history.stream().anyMatch(e -> TERMINAL_EVENTS.contains(e.eventName()))) {
+                return;
+            }
             SseEventRecord rec = new SseEventRecord(eventName, payload);
             history.add(rec);
-            boolean terminal = TERMINAL_EVENTS.contains(eventName);
             for (SseEmitter emitter : subscribers) {
                 try {
                     String json = mapper.writeValueAsString(payload);
@@ -228,6 +239,7 @@ public class AgentOrchestrator {
 
         ProjectState prevCopy = deepCopy(initialState);
         executor.submit(() -> {
+            job.setWorkerThread(Thread.currentThread());
             LlmContextHolder.set(llmOverrides);
             try {
                 ProjectState updated = work.apply(job);
@@ -247,6 +259,7 @@ public class AgentOrchestrator {
                 job.setStatus("failed");
                 job.setError(ex.getMessage());
             } finally {
+                job.setWorkerThread(null);
                 LlmContextHolder.clear();
                 syncJobToStore(job);
             }
@@ -283,7 +296,14 @@ public class AgentOrchestrator {
         job.getCancelled().set(true);
         if ("running".equals(job.getStatus())) {
             job.setStatus("cancelled");
+            job.setError("Job cancelled by user.");
+            job.publish("error", mapOf(
+                    "job_id", jobId,
+                    "code", "cancelled",
+                    "message", "Job cancelled by user."
+            ), objectMapper);
         }
+        job.interruptWorker();
         if (store != null) {
             store.setCancelFlag(jobId, 3600);
         }
@@ -538,6 +558,9 @@ public class AgentOrchestrator {
                     "issues", bestReport.issues(),
                     "iterations", maxQaIterations
             ));
+            double elapsed = Math.round(((System.nanoTime() - startedNanos) / 1_000_000_000.0) * 1000.0) / 1000.0;
+            emit(callback, "progress", mapOf(
+                    "job_id", jid, "progress", 100, "stage", "done_fallback", "elapsed_sec", elapsed));
             emit(callback, "completed", mapOf(
                     "job_id", jid,
                     "project_id", bestState.getProjectId(),
@@ -642,6 +665,9 @@ public class AgentOrchestrator {
                     "issues", bestReport.issues(),
                     "iterations", maxQaIterations
             ));
+            double elapsed = Math.round(((System.nanoTime() - startedNanos) / 1_000_000_000.0) * 1000.0) / 1000.0;
+            emit(callback, "progress", mapOf(
+                    "job_id", jid, "progress", 100, "stage", "done_fallback", "elapsed_sec", elapsed));
             emit(callback, "completed", mapOf(
                     "job_id", jid,
                     "project_id", bestState.getProjectId(),

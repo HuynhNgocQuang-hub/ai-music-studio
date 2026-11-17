@@ -36,8 +36,13 @@ public class AudioWorkerClient {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofMillis(1200))
                 .build();
+    }
+
+    public HttpClient.Version getHttpVersion() {
+        return httpClient.version();
     }
 
     private String baseUrl() {
@@ -75,6 +80,7 @@ public class AudioWorkerClient {
             if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
                 return Optional.of(objectMapper.readValue(resp.body(), new TypeReference<>() {}));
             }
+            log.warn("audio-worker /health returned HTTP {}: {}", resp.statusCode(), bodySnippet(resp.body()));
         } catch (Exception ignored) {
         }
         return Optional.empty();
@@ -96,44 +102,73 @@ public class AudioWorkerClient {
     }
 
     public Optional<Map<String, Object>> autotune(byte[] wavBytes, AutotuneSettings settings) {
+        AutotuneSettings effective = settings != null ? settings.copy() : new AutotuneSettings();
+        // audio-worker disables pitch correction whenever preset == "off"; map custom Pro settings to "balanced"
+        if (effective.isEnabled() && effective.getMixPercent() > 0.0 && "off".equalsIgnoreCase(effective.getPreset())) {
+            effective.setPreset("balanced");
+        }
         Map<String, String> fields = new LinkedHashMap<>();
         try {
-            fields.put("settings_json", objectMapper.writeValueAsString(settings));
+            fields.put("settings_json", objectMapper.writeValueAsString(effective));
         } catch (Exception e) {
             return Optional.empty();
         }
-        fields.put("preset", settings.getPreset());
-        fields.put("key", settings.getKey());
-        fields.put("scale", settings.getScale());
-        fields.put("retune_speed_ms", String.valueOf(settings.getRetuneSpeedMs()));
-        fields.put("humanize", String.valueOf(settings.getHumanize()));
-        fields.put("mix_percent", String.valueOf(settings.getMixPercent()));
-        fields.put("enabled", String.valueOf(settings.isEnabled()));
+        fields.put("preset", effective.getPreset());
+        fields.put("key", effective.getKey());
+        fields.put("scale", effective.getScale());
+        fields.put("retune_speed_ms", String.valueOf(effective.getRetuneSpeedMs()));
+        fields.put("humanize", String.valueOf(effective.getHumanize()));
+        fields.put("mix_percent", String.valueOf(effective.getMixPercent()));
+        fields.put("enabled", String.valueOf(effective.isEnabled()));
         return postMultipartJson("/internal/audio/autotune", "file", "audio.wav", wavBytes, fields);
     }
 
+    public Optional<byte[]> renderProjectMix(
+            ProjectState project,
+            Map<String, byte[]> audioAssets,
+            String mode,
+            boolean applyMastering,
+            int sampleRate
+    ) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("project", project);
+        body.put("audio_assets_base64", encodeAssetsBase64(audioAssets));
+        body.put("mode", (mode != null && !mode.isBlank()) ? mode : "ai_mix");
+        body.put("apply_mastering", applyMastering);
+        body.put("sample_rate", sampleRate);
+        return postJsonForBytes("/internal/audio/render", body, Duration.ofSeconds(30));
+    }
+
     public Optional<byte[]> exportAudio(ProjectState project, Map<String, byte[]> audioAssets, String format, String mode, boolean applyMastering, int sampleRate) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("project", project);
+        body.put("audio_assets_base64", encodeAssetsBase64(audioAssets));
+        body.put("format", format);
+        body.put("mode", mode);
+        body.put("apply_mastering", applyMastering);
+        body.put("sample_rate", sampleRate);
+        return postJsonForBytes("/internal/audio/export", body, Duration.ofSeconds(30));
+    }
+
+    private Map<String, String> encodeAssetsBase64(Map<String, byte[]> audioAssets) {
+        Map<String, String> b64Assets = new LinkedHashMap<>();
+        if (audioAssets == null) return b64Assets;
+        for (Map.Entry<String, byte[]> e : audioAssets.entrySet()) {
+            if (e.getValue() != null) {
+                b64Assets.put(e.getKey(), Base64.getEncoder().encodeToString(e.getValue()));
+            }
+        }
+        return b64Assets;
+    }
+
+    private Optional<byte[]> postJsonForBytes(String path, Map<String, Object> body, Duration timeout) {
         String base = baseUrl();
         if (base.isEmpty()) return Optional.empty();
         try {
-            Map<String, String> b64Assets = new LinkedHashMap<>();
-            for (Map.Entry<String, byte[]> e : audioAssets.entrySet()) {
-                if (e.getValue() != null) {
-                    b64Assets.put(e.getKey(), Base64.getEncoder().encodeToString(e.getValue()));
-                }
-            }
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("project", project);
-            body.put("audio_assets_base64", b64Assets);
-            body.put("format", format);
-            body.put("mode", mode);
-            body.put("apply_mastering", applyMastering);
-            body.put("sample_rate", sampleRate);
-
             String json = objectMapper.writeValueAsString(body);
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(base + "/internal/audio/export"))
-                    .timeout(Duration.ofSeconds(30))
+                    .uri(URI.create(base + path))
+                    .timeout(timeout)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json))
                     .build();
@@ -141,8 +176,10 @@ public class AudioWorkerClient {
             if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
                 return Optional.of(resp.body());
             }
+            log.warn("audio-worker {} returned HTTP {}: {}",
+                    path, resp.statusCode(), bodySnippet(new String(resp.body(), StandardCharsets.UTF_8)));
         } catch (Exception ex) {
-            log.debug("audio-worker export unavailable ({}); using Java fallback.", ex.getMessage());
+            log.debug("audio-worker {} unavailable ({}); using Java fallback.", path, ex.getMessage());
         }
         return Optional.empty();
     }
@@ -177,10 +214,17 @@ public class AudioWorkerClient {
             if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
                 return Optional.of(objectMapper.readValue(resp.body(), new TypeReference<>() {}));
             }
+            log.warn("audio-worker {} returned HTTP {}: {}", path, resp.statusCode(), bodySnippet(resp.body()));
         } catch (Exception ex) {
             log.debug("audio-worker {} unavailable ({}); using Java fallback.", path, ex.getMessage());
         }
         return Optional.empty();
+    }
+
+    private static String bodySnippet(String body) {
+        if (body == null || body.isBlank()) return "<empty>";
+        String cleaned = body.replaceAll("[\\r\\n]+", " ").trim();
+        return cleaned.length() > 300 ? cleaned.substring(0, 300) + "..." : cleaned;
     }
 
     private byte[] buildMultipartBody(

@@ -192,19 +192,8 @@ public class ProjectsController {
         };
     }
 
-    private Map<String, byte[]> collectAudioAssets(ProjectState project) {
-        Map<String, byte[]> map = new LinkedHashMap<>();
-        if (project.getAudioAssets() == null) return map;
-        putIfPresent(map, project.getAudioAssets().getRawInputRef());
-        putIfPresent(map, project.getAudioAssets().getDryDenoisedRef());
-        putIfPresent(map, project.getAudioAssets().getTunedVocalRef());
-        return map;
-    }
-
-    private void putIfPresent(Map<String, byte[]> map, String ref) {
-        if (ref != null && !ref.isBlank()) {
-            store.getAudioBytes(ref).ifPresent(bytes -> map.put(ref, bytes));
-        }
+    public Map<String, byte[]> collectAudioAssets(ProjectState project) {
+        return store.collectAudioAssets(project);
     }
 
     private ProjectSummary toSummary(ProjectState p) {

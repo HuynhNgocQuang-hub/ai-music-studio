@@ -709,9 +709,12 @@ public class JavaAudioFallbackService {
 
     public AutotuneSettings resolveAutotuneSettings(AutotuneSettings input) {
         AutotuneSettings s = input != null ? input.copy() : new AutotuneSettings();
-        if ("off".equalsIgnoreCase(s.getPreset())) {
-            s.setEnabled(false);
-            s.setMixPercent(0.0);
+        // In Auto-Tune Pro, enabled=true with mix_percent > 0 must remain active even if preset is still "off"
+        if (!s.isEnabled() || s.getMixPercent() <= 0.0) {
+            if ("off".equalsIgnoreCase(s.getPreset())) {
+                s.setEnabled(false);
+                s.setMixPercent(0.0);
+            }
         }
         return s;
     }
@@ -722,7 +725,7 @@ public class JavaAudioFallbackService {
         int sr = decoded.sampleRate();
         AutotuneSettings eff = resolveAutotuneSettings(settings);
 
-        if (!eff.isEnabled() || "off".equalsIgnoreCase(eff.getPreset()) || eff.getMixPercent() <= 0.0) {
+        if (!eff.isEnabled() || eff.getMixPercent() <= 0.0) {
             return encodeWavMono(samples, sr);
         }
 
@@ -868,19 +871,150 @@ public class JavaAudioFallbackService {
         return x;
     }
 
+    public String normalizePreviewMode(String mode) {
+        if (mode == null || mode.isBlank()) return "ai_mix";
+        String m = mode.trim().toLowerCase(Locale.ROOT);
+        return switch (m) {
+            case "mix", "ai_mix" -> "ai_mix";
+            case "raw", "dry", "dry_beat", "autotune", "autotune_beat", "preserve", "enhance" -> m;
+            default -> "ai_mix";
+        };
+    }
+
+    public String toWorkerRenderMode(String mode) {
+        String norm = normalizePreviewMode(mode);
+        return switch (norm) {
+            case "raw" -> "preserve";
+            case "dry", "dry_beat" -> "dry_beat";
+            case "autotune", "autotune_beat" -> "autotune_beat";
+            case "preserve" -> "preserve";
+            case "enhance" -> "enhance";
+            default -> "ai_mix";
+        };
+    }
+
+    public ProjectState preparePreviewProject(ProjectState source, String mode) {
+        String norm = normalizePreviewMode(mode);
+        ProjectState copy;
+        try {
+            copy = objectMapper.readValue(objectMapper.writeValueAsBytes(source), ProjectState.class);
+        } catch (Exception e) {
+            copy = source;
+        }
+        Map<String, TrackState> tracks = copy.getTracks();
+        if (tracks == null) return copy;
+
+        if ("raw".equals(norm)) {
+            muteAllMidiTracks(tracks);
+            String rawRef = copy.getAudioAssets() != null ? copy.getAudioAssets().getRawInputRef() : null;
+            if (copy.getAudioAssets() != null && rawRef != null && !rawRef.isBlank()) {
+                copy.getAudioAssets().setDryDenoisedRef(rawRef);
+                copy.getAudioAssets().setTunedVocalRef(rawRef);
+            }
+            setVocalClipSource(tracks.get("vocal"), "raw_input_ref");
+        } else if ("dry".equals(norm)) {
+            muteAllMidiTracks(tracks);
+            setVocalClipSource(tracks.get("vocal"), "dry_denoised_ref");
+        } else if ("dry_beat".equals(norm)) {
+            setVocalClipSource(tracks.get("vocal"), "dry_denoised_ref");
+        } else if ("autotune".equals(norm)) {
+            muteAllMidiTracks(tracks);
+            setVocalClipSource(tracks.get("vocal"), "tuned_vocal_ref");
+        } else if ("preserve".equals(norm)) {
+            TrackState lead = tracks.get("lead");
+            if (lead != null) {
+                lead.setMute(true);
+                lead.setSolo(false);
+            }
+            for (Map.Entry<String, TrackState> e : tracks.entrySet()) {
+                if (!"vocal".equalsIgnoreCase(e.getKey()) && !"lead".equalsIgnoreCase(e.getKey())
+                        && e.getValue() != null && !"audio".equalsIgnoreCase(e.getValue().getType())) {
+                    e.getValue().setVolume(Math.max(0.0, e.getValue().getVolume() * 0.78));
+                }
+            }
+        } else if ("enhance".equals(norm)) {
+            TrackState vocal = tracks.get("vocal");
+            if (vocal != null) {
+                vocal.setVolume(Math.max(0.0, vocal.getVolume() * 0.90));
+            }
+            TrackState lead = tracks.computeIfAbsent("lead",
+                    k -> TrackState.midiTrack("electric_piano", 0.85, 0.1));
+            lead.setMute(false);
+            if ((lead.getNotes() == null || lead.getNotes().isEmpty())) {
+                List<MidiNote> srcNotes = (copy.getMelodyNotes() != null && !copy.getMelodyNotes().isEmpty())
+                        ? copy.getMelodyNotes()
+                        : (copy.getAnalysis() != null ? copy.getAnalysis().getRawMelodyMidi() : List.of());
+                if (srcNotes != null && !srcNotes.isEmpty()) {
+                    List<MidiNote> synthLead = new ArrayList<>(srcNotes.size());
+                    for (MidiNote n : srcNotes) {
+                        synthLead.add(new MidiNote(
+                                Math.min(127, n.getPitch() + 12),
+                                n.getStartBeat(),
+                                n.getDuration(),
+                                Math.min(127, Math.max(70, n.getVelocity())),
+                                n.getConfidence()
+                        ));
+                    }
+                    lead.setNotes(synthLead);
+                }
+            }
+            for (Map.Entry<String, TrackState> e : tracks.entrySet()) {
+                TrackState t = e.getValue();
+                if (t != null && !"audio".equalsIgnoreCase(t.getType())) {
+                    t.setVolume(Math.min(1.2, t.getVolume() * 1.12));
+                }
+            }
+        }
+        return copy;
+    }
+
+    private void muteAllMidiTracks(Map<String, TrackState> tracks) {
+        for (Map.Entry<String, TrackState> e : tracks.entrySet()) {
+            TrackState t = e.getValue();
+            if (t == null) continue;
+            if ("vocal".equalsIgnoreCase(e.getKey()) || "audio".equalsIgnoreCase(t.getType())) {
+                t.setMute(false);
+                t.setSolo(false);
+            } else {
+                t.setMute(true);
+                t.setSolo(false);
+            }
+        }
+    }
+
+    private void setVocalClipSource(TrackState vocalTrack, String targetSource) {
+        if (vocalTrack == null) return;
+        vocalTrack.setMute(false);
+        if (vocalTrack.getClips() == null) return;
+        for (AudioClip clip : vocalTrack.getClips()) {
+            if (clip == null) continue;
+            String s = clip.getSource();
+            if (s == null || s.isBlank()
+                    || "raw_input_ref".equals(s)
+                    || "dry_denoised_ref".equals(s)
+                    || "tuned_vocal_ref".equals(s)) {
+                clip.setSource(targetSource);
+            }
+        }
+    }
+
     public RenderedMix renderProjectMix(ProjectState project, ProjectStateStore store,
                                         String mode, boolean applyMastering, int sampleRate) {
-        Map<String, TrackState> tracks = project.getTracks();
-        if (tracks != null && !tracks.isEmpty() && tracks.values().stream().allMatch(TrackState::isMute)) {
+        Map<String, TrackState> origTracks = project.getTracks();
+        if (origTracks != null && !origTracks.isEmpty() && origTracks.values().stream().allMatch(TrackState::isMute)) {
             throw new IllegalArgumentException("All tracks are muted; unmute at least one track before exporting.");
         }
 
-        double bpm = project.getAnalysis() != null && project.getAnalysis().getBpm() > 0
-                ? project.getAnalysis().getBpm() : 120.0;
-        int structBars = project.getSongStructure() != null ? project.getSongStructure().getTotalBars() : 4;
-        int analysisBars = project.getAnalysis() != null ? project.getAnalysis().getBars() : 4;
+        String normMode = normalizePreviewMode(mode);
+        ProjectState effectiveProject = preparePreviewProject(project, normMode);
+        Map<String, TrackState> tracks = effectiveProject.getTracks();
+
+        double bpm = effectiveProject.getAnalysis() != null && effectiveProject.getAnalysis().getBpm() > 0
+                ? effectiveProject.getAnalysis().getBpm() : 120.0;
+        int structBars = effectiveProject.getSongStructure() != null ? effectiveProject.getSongStructure().getTotalBars() : 4;
+        int analysisBars = effectiveProject.getAnalysis() != null ? effectiveProject.getAnalysis().getBars() : 4;
         int totalBars = Math.max(1, Math.max(structBars, analysisBars));
-        String timeSig = project.getAnalysis() != null ? project.getAnalysis().getTimeSignature() : "4/4";
+        String timeSig = effectiveProject.getAnalysis() != null ? effectiveProject.getAnalysis().getTimeSignature() : "4/4";
         int beatsPerBar = MusicTheory.beatsPerBarFromTs(timeSig);
         int totalSamples = Math.max(1, (int) Math.round(totalBars * beatsPerBar * (60.0 / bpm) * sampleRate));
 
@@ -893,7 +1027,7 @@ public class JavaAudioFallbackService {
                 String name = entry.getKey();
                 TrackState track = entry.getValue();
                 float[] mono = "audio".equalsIgnoreCase(track.getType())
-                        ? renderAudioTrack(track, project, store, totalSamples, sampleRate, mode, bpm, beatsPerBar)
+                        ? renderAudioTrack(track, effectiveProject, store, totalSamples, sampleRate, normMode, bpm, beatsPerBar)
                         : synthesizeMidiTrack(name, track.getNotes(), bpm, totalSamples, sampleRate);
 
                 boolean active = !track.isMute() && (!anySolo || track.isSolo());
@@ -909,8 +1043,8 @@ public class JavaAudioFallbackService {
         }
 
         if (applyMastering) {
-            double ceiling = project.getMastering() != null ? project.getMastering().getLimiterCeilingDb() : -1.0;
-            double lufs = project.getMastering() != null ? project.getMastering().getTargetLufs() : -14.0;
+            double ceiling = effectiveProject.getMastering() != null ? effectiveProject.getMastering().getLimiterCeilingDb() : -1.0;
+            double lufs = effectiveProject.getMastering() != null ? effectiveProject.getMastering().getTargetLufs() : -14.0;
             mix = applyMasterLimiter(mix, ceiling, lufs);
         }
 
@@ -969,7 +1103,13 @@ public class JavaAudioFallbackService {
     private String resolvePreferredAudioRef(ProjectState project, String mode) {
         var assets = project.getAudioAssets();
         if (assets == null) return null;
-        if ("dry_beat".equals(mode)) {
+        String norm = normalizePreviewMode(mode);
+        if ("raw".equals(norm)) {
+            if (assets.getRawInputRef() != null) return assets.getRawInputRef();
+            if (assets.getDryDenoisedRef() != null) return assets.getDryDenoisedRef();
+            return assets.getTunedVocalRef();
+        }
+        if ("dry".equals(norm) || "dry_beat".equals(norm)) {
             return assets.getDryDenoisedRef() != null ? assets.getDryDenoisedRef() : assets.getRawInputRef();
         }
         if (assets.getTunedVocalRef() != null) return assets.getTunedVocalRef();
@@ -978,10 +1118,17 @@ public class JavaAudioFallbackService {
     }
 
     private byte[] resolveClipBytes(String src, ProjectState project, ProjectStateStore store, String mode) {
-        String pref = resolvePreferredAudioRef(project, mode);
-        if (("dry_beat".equals(mode) || "autotune_beat".equals(mode) || "ai_mix".equals(mode)) && pref != null) {
-            Optional<byte[]> b = store.getAudioBytes(pref);
-            if (b.isPresent()) return b.get();
+        String norm = normalizePreviewMode(mode);
+        boolean isStandardVocalSrc = src == null || src.isBlank()
+                || "raw_input_ref".equals(src)
+                || "dry_denoised_ref".equals(src)
+                || "tuned_vocal_ref".equals(src);
+        if (isStandardVocalSrc) {
+            String pref = resolvePreferredAudioRef(project, norm);
+            if (pref != null) {
+                Optional<byte[]> b = store.getAudioBytes(pref);
+                if (b.isPresent()) return b.get();
+            }
         }
         var assets = project.getAudioAssets();
         if (assets != null) {

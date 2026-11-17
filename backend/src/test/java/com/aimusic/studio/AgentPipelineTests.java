@@ -91,6 +91,36 @@ class AgentPipelineTests {
             assertEquals("AIzaHeaderOverrideKey12345", adapter.effectiveGeminiKey());
             assertEquals("sk-HeaderOverrideKey12345", adapter.effectiveOpenaiKey());
             assertEquals(LlmAdapter.Provider.OPENAI, adapter.effectiveDefaultProvider());
+            // X-LLM-Provider: openai overrides hardcoded composer -> GEMINI roleProviders
+            assertEquals(LlmAdapter.Provider.OPENAI, adapter.resolveProvider("composer", null));
+        } finally {
+            LlmContextHolder.clear();
+        }
+
+        // X-LLM-Provider: mock must override even when valid Gemini/OpenAI keys and roleProviders exist
+        MockHttpServletRequest mockHeaderReq = new MockHttpServletRequest();
+        mockHeaderReq.addHeader("X-LLM-Provider", "mock");
+        LlmContextHolder.set(LlmContextHolder.extractFromRequest(mockHeaderReq));
+        try {
+            assertEquals(LlmAdapter.Provider.MOCK, adapter.resolveProvider("composer", null));
+            assertEquals(LlmAdapter.Provider.MOCK, adapter.resolveProvider("arranger", null));
+            assertEquals(LlmAdapter.Provider.MOCK, adapter.resolveProvider("qa", null));
+            var resp = adapter.generateJson("Create chords", "", "composer", null);
+            assertTrue(resp.isMock());
+            assertEquals(LlmAdapter.Provider.MOCK, resp.provider());
+        } finally {
+            LlmContextHolder.clear();
+        }
+
+        // X-Agent-Providers JSON header routes per role
+        MockHttpServletRequest agentHeaderReq = new MockHttpServletRequest();
+        agentHeaderReq.addHeader("X-LLM-Provider", "gemini");
+        agentHeaderReq.addHeader("X-Agent-Providers", "{\"composer\":\"openai\",\"qa\":\"mock\"}");
+        LlmContextHolder.set(LlmContextHolder.extractFromRequest(agentHeaderReq));
+        try {
+            assertEquals(LlmAdapter.Provider.OPENAI, adapter.resolveProvider("composer", null));
+            assertEquals(LlmAdapter.Provider.MOCK, adapter.resolveProvider("qa", null));
+            assertEquals(LlmAdapter.Provider.GEMINI, adapter.resolveProvider("lyricist", null));
         } finally {
             LlmContextHolder.clear();
         }
@@ -300,5 +330,70 @@ class AgentPipelineTests {
         assertEquals(origDrumsCount, rearranged.getTracks().get("drums").getNotes().size());
         assertEquals("Am", rearranged.getSongStructure().getChords().get(0).getSymbol());
         assertEquals("F", rearranged.getSongStructure().getChords().get(1).getSymbol());
+    }
+
+    @Test
+    void regenerateAndRearrangeFallbackEmitProgress100AndCancelInterruptsJob() throws Exception {
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        QaReviewerAgent alwaysFailQa = new QaReviewerAgent(adapter) {
+            @Override
+            public QaReport review(ProjectState projectState, String targetTrack) {
+                return new QaReport(false, 0.5, List.of("Test QA fail"),
+                        "Retry", "arranger", -1.0, -14.0, true);
+            }
+        };
+        AgentOrchestrator orch = new AgentOrchestrator(
+                new ComposerAgent(adapter),
+                new ArrangerAgent(adapter),
+                new CoachLyricistAgent(adapter),
+                alwaysFailQa,
+                store,
+                objectMapper,
+                60.0,
+                1
+        );
+
+        List<Map<String, Object>> regenProgress = new ArrayList<>();
+        orch.runRegenerateTrack(sampleProjectState("preserve", "accompaniment"), "bass", "finger_bass",
+                "job_rf", (ev, p) -> { if ("progress".equals(ev)) regenProgress.add(p); }, null, null, 60.0);
+        assertTrue(regenProgress.stream().anyMatch(p -> Integer.valueOf(100).equals(p.get("progress"))));
+
+        List<Map<String, Object>> rearrProgress = new ArrayList<>();
+        orch.runRearrange(sampleProjectState("preserve", "accompaniment"),
+                List.of(new ChordEvent(1, 1.0, "C", 4.0)), List.of(),
+                "job_raf", (ev, p) -> { if ("progress".equals(ev)) rearrProgress.add(p); }, null, null, 60.0);
+        assertTrue(rearrProgress.stream().anyMatch(p -> Integer.valueOf(100).equals(p.get("progress"))));
+
+        // Cancel interrupts active job thread and records SSE error
+        AtomicBoolean interruptedSeen = new AtomicBoolean(false);
+        ComposerAgent blockingComposer = new ComposerAgent(adapter) {
+            @Override
+            public ComposeResult compose(ProjectState projectState, String qaFeedback) {
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    interruptedSeen.set(true);
+                    Thread.currentThread().interrupt();
+                }
+                return super.compose(projectState, qaFeedback);
+            }
+        };
+        AgentOrchestrator cancelOrch = new AgentOrchestrator(
+                blockingComposer,
+                new ArrangerAgent(adapter),
+                new CoachLyricistAgent(adapter),
+                new QaReviewerAgent(adapter),
+                store,
+                objectMapper,
+                60.0,
+                1
+        );
+        var job = cancelOrch.startGenerateJob(sampleProjectState("preserve", "accompaniment"), null, null);
+        Thread.sleep(100);
+        assertTrue(cancelOrch.cancelJob(job.getJobId()));
+        Thread.sleep(150);
+        assertTrue(interruptedSeen.get());
+        assertEquals("cancelled", job.getStatus());
     }
 }

@@ -1,6 +1,8 @@
 package com.aimusic.studio.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSetter;
 
 public class AutotuneSettings {
 
@@ -28,6 +30,9 @@ public class AutotuneSettings {
     @JsonProperty("auto_follow_project_key")
     private boolean autoFollowProjectKey = true;
 
+    private transient boolean keyProvided = false;
+    private transient boolean scaleProvided = false;
+
     public AutotuneSettings() {}
 
     public AutotuneSettings copy() {
@@ -40,6 +45,8 @@ public class AutotuneSettings {
         s.humanize = this.humanize;
         s.mixPercent = this.mixPercent;
         s.autoFollowProjectKey = this.autoFollowProjectKey;
+        s.keyProvided = this.keyProvided;
+        s.scaleProvided = this.scaleProvided;
         return s;
     }
 
@@ -50,10 +57,34 @@ public class AutotuneSettings {
     public void setPreset(String preset) { this.preset = preset != null ? preset : "off"; }
 
     public String getKey() { return key; }
-    public void setKey(String key) { this.key = key != null ? key : "C"; }
+    @JsonSetter("key")
+    public void setKey(String key) {
+        if (key != null && !key.isBlank()) {
+            this.key = key;
+            this.keyProvided = true;
+        } else {
+            this.key = "C";
+            this.keyProvided = false;
+        }
+    }
 
     public String getScale() { return scale; }
-    public void setScale(String scale) { this.scale = scale != null ? scale : "major"; }
+    @JsonSetter("scale")
+    public void setScale(String scale) {
+        if (scale != null && !scale.isBlank()) {
+            this.scale = scale;
+            this.scaleProvided = true;
+        } else {
+            this.scale = "major";
+            this.scaleProvided = false;
+        }
+    }
+
+    @JsonIgnore
+    public boolean isKeyProvided() { return keyProvided; }
+
+    @JsonIgnore
+    public boolean isScaleProvided() { return scaleProvided; }
 
     public double getRetuneSpeedMs() { return retuneSpeedMs; }
     public void setRetuneSpeedMs(double retuneSpeedMs) {

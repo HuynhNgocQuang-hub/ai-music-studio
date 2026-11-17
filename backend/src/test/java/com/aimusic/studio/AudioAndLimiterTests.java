@@ -2,14 +2,25 @@ package com.aimusic.studio;
 
 import com.aimusic.studio.agents.MusicTheory;
 import com.aimusic.studio.audio.AudioValidationException;
+import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
+import com.aimusic.studio.config.AppProperties;
+import com.aimusic.studio.controller.ProjectsController;
+import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.AutotuneSettings;
 import com.aimusic.studio.model.MidiNote;
 import com.aimusic.studio.model.ProjectState;
 import com.aimusic.studio.model.TrackState;
 import com.aimusic.studio.store.ProjectStateStore;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.http.HttpStatus;
 
 import javax.sound.midi.MetaMessage;
@@ -19,9 +30,17 @@ import javax.sound.midi.MidiSystem;
 import javax.sound.midi.Sequence;
 import javax.sound.midi.Track;
 import java.io.ByteArrayInputStream;
+import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -205,5 +224,174 @@ class AudioAndLimiterTests {
             popped++;
         }
         assertEquals(20, popped);
+    }
+
+    @Test
+    void audioWorkerClientUsesHttp11AndRenderProjectMixSchema() throws Exception {
+        AtomicReference<String> seenMethod = new AtomicReference<>();
+        AtomicReference<String> seenPath = new AtomicReference<>();
+        AtomicReference<String> seenUpgrade = new AtomicReference<>();
+        AtomicReference<String> seenBody = new AtomicReference<>();
+        byte[] dummyWav = makeMelodyWav(1.0, 44100, false);
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/internal/audio/render", exchange -> {
+            seenMethod.set(exchange.getRequestMethod());
+            seenPath.set(exchange.getRequestURI().getPath());
+            seenUpgrade.set(exchange.getRequestHeaders().getFirst("Upgrade"));
+            seenBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.getResponseHeaders().add("Content-Type", "audio/wav");
+            exchange.sendResponseHeaders(200, dummyWav.length);
+            exchange.getResponseBody().write(dummyWav);
+            exchange.close();
+        });
+        server.start();
+        try {
+            AppProperties props = new AppProperties();
+            props.setAudioWorkerUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            AudioWorkerClient client = new AudioWorkerClient(props, objectMapper);
+            assertEquals(HttpClient.Version.HTTP_1_1, client.getHttpVersion());
+
+            ProjectState proj = ProjectState.createDefault("render_test", "Render Test");
+            proj.getAudioAssets().setRawInputRef("mem://raw/render_test.wav");
+            var res = client.renderProjectMix(proj, Map.of("mem://raw/render_test.wav", dummyWav), "ai_mix", true, 44100);
+            assertTrue(res.isPresent());
+            assertArrayEquals(dummyWav, res.get());
+            assertEquals("POST", seenMethod.get());
+            assertEquals("/internal/audio/render", seenPath.get());
+            assertNull(seenUpgrade.get());
+
+            JsonNode payload = objectMapper.readTree(seenBody.get());
+            assertTrue(payload.has("project"));
+            assertTrue(payload.has("audio_assets_base64"));
+            assertTrue(payload.get("audio_assets_base64").has("mem://raw/render_test.wav"));
+            assertEquals("ai_mix", payload.get("mode").asText());
+            assertTrue(payload.get("apply_mastering").asBoolean());
+            assertEquals(44100, payload.get("sample_rate").asInt());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void autotuneProCustomSettingsAllowPresetOffAndPentatonicScales() {
+        // Off-pitch A4 + 40 cents (~450.2 Hz) so pitch correction clearly modifies samples
+        int sr = 44100;
+        int n = sr * 2;
+        float[] offPitch = new float[n];
+        for (int i = 0; i < n; i++) {
+            offPitch[i] = (float) (0.4 * Math.sin(2.0 * Math.PI * 450.2 * ((double) i / sr)));
+        }
+        byte[] wav = audioService.encodeWavMono(offPitch, sr);
+
+        AutotuneSettings pro = new AutotuneSettings();
+        pro.setEnabled(true);
+        pro.setPreset("off");
+        pro.setKey("C");
+        pro.setScale("pentatonic_minor");
+        pro.setRetuneSpeedMs(5.0);
+        pro.setHumanize(0.0);
+        pro.setMixPercent(100.0);
+
+        AutotuneSettings resolved = audioService.resolveAutotuneSettings(pro);
+        assertTrue(resolved.isEnabled());
+        assertEquals(100.0, resolved.getMixPercent());
+        assertEquals("pentatonic_minor", resolved.getScale());
+
+        byte[] tuned = audioService.applyAutotune(wav, pro);
+        assertFalse(Arrays.equals(wav, tuned));
+        assertEquals(70.0, MusicTheory.nearestScaleMidi(70.3, "C", "pentatonic_minor"));
+        assertEquals(64.0, MusicTheory.nearestScaleMidi(64.2, "C", "pentatonic_major"));
+    }
+
+    @Test
+    void previewModesProduceDistinctAudioAndCollectAudioAssetsIncludesTrackClips() {
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        ProjectState proj = ProjectState.createDefault("preview_diff_1", "Preview Diff");
+        proj.getAnalysis().setBpm(120.0);
+        proj.getAnalysis().setBars(2);
+        proj.getSongStructure().setTotalBars(2);
+
+        byte[] rawWav = makeMelodyWav(3.2, 44100, true);
+        byte[] dryWav = audioService.denoiseAndTrim(rawWav, true, true).wavBytes();
+        AutotuneSettings tunedCfg = audioService.applyPreset("modern", "D", "minor");
+        byte[] tunedWav = audioService.applyAutotune(dryWav, tunedCfg);
+        byte[] overdubWav = makeMelodyWav(1.5, 44100, false);
+
+        String rawRef = "mem://raw/preview_diff_1.wav";
+        String dryRef = "mem://processed/preview_diff_1_dry.wav";
+        String tunedRef = "mem://processed/preview_diff_1_tuned.wav";
+        String overdubRef = "mem://overdub/preview_diff_1_ov1.wav";
+
+        store.saveAudioBytes(rawRef, rawWav);
+        store.saveAudioBytes(dryRef, dryWav);
+        store.saveAudioBytes(tunedRef, tunedWav);
+        store.saveAudioBytes(overdubRef, overdubWav);
+
+        proj.getAudioAssets().setRawInputRef(rawRef);
+        proj.getAudioAssets().setDryDenoisedRef(dryRef);
+        proj.getAudioAssets().setTunedVocalRef(tunedRef);
+        proj.getTracks().get("vocal").getClips().add(new AudioClip("clip_1", "tuned_vocal_ref", 1.0, 0.0));
+        proj.getTracks().get("vocal").getClips().add(new AudioClip("clip_ov", overdubRef, 2.0, 0.0));
+
+        proj.getTracks().get("drums").setNotes(List.of(new MidiNote(36, 0.0, 0.5, 115, 1.0)));
+        proj.getTracks().get("harmony").setNotes(List.of(new MidiNote(60, 0.0, 2.0, 105, 1.0)));
+        proj.getTracks().get("lead").setNotes(List.of(new MidiNote(72, 0.0, 2.0, 110, 1.0)));
+
+        // OPTB-BUG-05: collectAudioAssets must include all clip.getSource() refs
+        ProjectsController pc = new ProjectsController(store, new AudioWorkerClient(new AppProperties(), objectMapper),
+                audioService, new AppProperties());
+        Map<String, byte[]> collected = pc.collectAudioAssets(proj);
+        assertTrue(collected.containsKey(rawRef));
+        assertTrue(collected.containsKey(dryRef));
+        assertTrue(collected.containsKey(tunedRef));
+        assertTrue(collected.containsKey(overdubRef));
+
+        // OPTB-BUG-04: preview modes must return distinct audio
+        List<String> modes = List.of("raw", "dry", "dry_beat", "autotune", "preserve", "enhance", "ai_mix");
+        Map<String, byte[]> outputs = new HashMap<>();
+        for (String m : modes) {
+            var rendered = audioService.renderProjectMix(proj, store, m, true, 44100);
+            outputs.put(m, audioService.encodeWavStereo(rendered.stereo(), rendered.sampleRate()));
+        }
+        for (int i = 0; i < modes.size(); i++) {
+            for (int j = i + 1; j < modes.size(); j++) {
+                String m1 = modes.get(i);
+                String m2 = modes.get(j);
+                assertFalse(Arrays.equals(outputs.get(m1), outputs.get(m2)),
+                        "Expected preview modes '" + m1 + "' and '" + m2 + "' to produce distinct audio");
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void projectStateStoreResetsRedisAvailableWhenRedisRecovers() {
+        RedisTemplate<String, byte[]> template = Mockito.mock(RedisTemplate.class);
+        ValueOperations<String, byte[]> valueOps = Mockito.mock(ValueOperations.class);
+        AtomicBoolean redisUp = new AtomicBoolean(true);
+
+        Mockito.when(template.execute(Mockito.<RedisCallback<String>>any())).thenAnswer(inv -> {
+            if (!redisUp.get()) throw new RuntimeException("Redis down");
+            return "PONG";
+        });
+        Mockito.when(template.opsForValue()).thenReturn(valueOps);
+        Mockito.doAnswer(inv -> {
+            if (!redisUp.get()) throw new RuntimeException("Connection refused");
+            return null;
+        }).when(valueOps).set(Mockito.anyString(), Mockito.any(byte[].class), Mockito.any());
+
+        AppProperties props = new AppProperties();
+        ProjectStateStore store = new ProjectStateStore(objectMapper, props, template);
+        store.setRedisRetryIntervalMs(0L);
+        assertTrue(store.isRedisAvailable());
+
+        redisUp.set(false);
+        store.saveProject(ProjectState.createDefault("r1", "Failover"));
+        assertFalse(store.isRedisAvailable());
+
+        redisUp.set(true);
+        store.saveProject(ProjectState.createDefault("r2", "Recovered"));
+        assertTrue(store.isRedisAvailable());
     }
 }
