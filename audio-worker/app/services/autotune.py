@@ -5,7 +5,12 @@ from __future__ import annotations
 import numpy as np
 
 from app.schemas import AutotuneSettings
-from app.services.analyzer import NOTE_NAMES, extract_f0_contour
+from app.services.analyzer import (
+    SCALE_INTERVALS,
+    extract_f0_contour,
+    key_to_pitch_class,
+    nearest_scale_midi,
+)
 from app.services.denoise import decode_wav_bytes, encode_wav_bytes
 
 PRESET_PARAMS: dict[str, dict[str, float | bool]] = {
@@ -13,14 +18,6 @@ PRESET_PARAMS: dict[str, dict[str, float | bool]] = {
     "natural": {"enabled": True, "retune_speed_ms": 65.0, "humanize": 0.7, "mix_percent": 75.0},
     "balanced": {"enabled": True, "retune_speed_ms": 25.0, "humanize": 0.35, "mix_percent": 95.0},
     "modern": {"enabled": True, "retune_speed_ms": 0.0, "humanize": 0.05, "mix_percent": 100.0},
-}
-
-SCALE_INTERVALS: dict[str, set[int]] = {
-    "major": {0, 2, 4, 5, 7, 9, 11},
-    "minor": {0, 2, 3, 5, 7, 8, 10},
-    "pentatonic_major": {0, 2, 4, 7, 9},
-    "pentatonic_minor": {0, 3, 5, 7, 10},
-    "chromatic": set(range(12)),
 }
 
 
@@ -54,51 +51,6 @@ def apply_preset(preset: str, key: str = "C", scale: str = "major") -> AutotuneS
         humanize=float(cfg["humanize"]),
         mix_percent=float(cfg["mix_percent"]),
     )
-
-
-_FLAT_AND_ENHARMONIC_TO_PC: dict[str, int] = {
-    "c": 0, "b#": 0,
-    "c#": 1, "db": 1,
-    "d": 2,
-    "d#": 3, "eb": 3,
-    "e": 4, "fb": 4,
-    "f": 5, "e#": 5,
-    "f#": 6, "gb": 6,
-    "g": 7,
-    "g#": 8, "ab": 8,
-    "a": 9,
-    "a#": 10, "bb": 10,
-    "b": 11, "cb": 11,
-}
-
-
-def key_to_pitch_class(key: str) -> int:
-    """Normalize sharp/flat/enharmonic key names (e.g. Eb, Bb, F#) to pitch class 0..11."""
-    cleaned = (key or "C").strip().lower()
-    if cleaned in _FLAT_AND_ENHARMONIC_TO_PC:
-        return _FLAT_AND_ENHARMONIC_TO_PC[cleaned]
-    if cleaned in [n.lower() for n in NOTE_NAMES]:
-        return [n.lower() for n in NOTE_NAMES].index(cleaned)
-    return 0
-
-
-def nearest_scale_midi(midi_val: float, key: str, scale: str) -> float:
-    """Snap a fractional MIDI note to the nearest pitch in the target key/scale."""
-    root_pc = key_to_pitch_class(key)
-    intervals = SCALE_INTERVALS.get(scale, SCALE_INTERVALS["major"])
-    allowed_pcs = {(root_pc + iv) % 12 for iv in intervals}
-
-    base = int(round(midi_val))
-    best_note = float(base)
-    best_dist = 999.0
-    for offset in range(-6, 7):
-        cand = base + offset
-        if (cand % 12) in allowed_pcs:
-            dist = abs(midi_val - cand)
-            if dist < best_dist:
-                best_dist = dist
-                best_note = float(cand)
-    return best_note
 
 
 def _pitch_shift_frame_ola(

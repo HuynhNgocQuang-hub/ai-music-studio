@@ -21,7 +21,7 @@ NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 _MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 
-_SCALE_INTERVALS: dict[str, set[int]] = {
+SCALE_INTERVALS: dict[str, set[int]] = {
     "major": {0, 2, 4, 5, 7, 9, 11},
     "minor": {0, 2, 3, 5, 7, 8, 10},
     "pentatonic_major": {0, 2, 4, 7, 9},
@@ -43,6 +43,36 @@ _KEY_TO_PC: dict[str, int] = {
     "a#": 10, "bb": 10,
     "b": 11, "cb": 11,
 }
+
+
+def key_to_pitch_class(key: str) -> int:
+    """Normalize sharp/flat/enharmonic key names (e.g. Eb, Bb, F#) to pitch class 0..11."""
+    cleaned = (key or "C").strip().lower()
+    if cleaned in _KEY_TO_PC:
+        return _KEY_TO_PC[cleaned]
+    lower_names = [n.lower() for n in NOTE_NAMES]
+    if cleaned in lower_names:
+        return lower_names.index(cleaned)
+    return 0
+
+
+def nearest_scale_midi(midi_val: float, key: str, scale: str) -> float:
+    """Snap a fractional MIDI note to the nearest pitch in the target key/scale."""
+    root_pc = key_to_pitch_class(key)
+    intervals = SCALE_INTERVALS.get((scale or "major").lower(), SCALE_INTERVALS["major"])
+    allowed_pcs = {(root_pc + iv) % 12 for iv in intervals}
+
+    base = int(round(midi_val))
+    best_note = float(base)
+    best_dist = 999.0
+    for offset in range(-6, 7):
+        cand = base + offset
+        if (cand % 12) in allowed_pcs:
+            dist = abs(midi_val - cand)
+            if dist < best_dist:
+                best_dist = dist
+                best_note = float(cand)
+    return best_note
 
 
 def _hz_to_midi(hz: float) -> float:
@@ -184,14 +214,14 @@ def estimate_bpm(samples: np.ndarray, sr: int) -> float:
     return _clamp_bpm(60.0 * fps / best_lag)
 
 
-def _segment_notes(
+def _segment_notes_detailed(
     f0: np.ndarray,
     conf: np.ndarray,
     sr: int,
     hop_length: int,
     bpm: float,
-) -> list[MidiNote]:
-    """Convert F0 curve into discrete MidiNote events filtering < 60ms or conf < 0.5."""
+) -> list[tuple[MidiNote, float]]:
+    """Convert F0 curve into (MidiNote, midi_float) pairs filtering < 60ms or conf < 0.5."""
     frame_dur = hop_length / sr
     beats_per_sec = bpm / 60.0
 
@@ -200,7 +230,7 @@ def _segment_notes(
         if hz > 0 and c >= 0.5:
             midi_raw[i] = _hz_to_midi(float(hz))
 
-    notes: list[MidiNote] = []
+    notes: list[tuple[MidiNote, float]] = []
     cur_pitches: list[float] = []
     cur_confs: list[float] = []
     start_idx = 0
@@ -212,16 +242,20 @@ def _segment_notes(
         avg_conf = float(np.mean(cur_confs))
         if dur_sec < 0.06 or avg_conf < 0.5:
             return
-        pitch_midi = int(np.clip(round(float(np.median(cur_pitches))), 21, 108))
+        midi_float = float(np.median(cur_pitches))
+        pitch_midi = int(np.clip(round(midi_float), 21, 108))
         start_beat = round(start_idx * frame_dur * beats_per_sec, 3)
         dur_beats = max(0.05, round(dur_sec * beats_per_sec, 3))
         notes.append(
-            MidiNote(
-                pitch=pitch_midi,
-                start_beat=start_beat,
-                duration=dur_beats,
-                velocity=85,
-                confidence=round(avg_conf, 3),
+            (
+                MidiNote(
+                    pitch=pitch_midi,
+                    start_beat=start_beat,
+                    duration=dur_beats,
+                    velocity=85,
+                    confidence=round(avg_conf, 3),
+                ),
+                midi_float,
             )
         )
 
@@ -247,6 +281,17 @@ def _segment_notes(
                 cur_confs = [float(conf[i])]
     flush(len(midi_raw))
     return notes
+
+
+def _segment_notes(
+    f0: np.ndarray,
+    conf: np.ndarray,
+    sr: int,
+    hop_length: int,
+    bpm: float,
+) -> list[MidiNote]:
+    """Convert F0 curve into discrete MidiNote events filtering < 60ms or conf < 0.5."""
+    return [note for note, _ in _segment_notes_detailed(f0, conf, sr, hop_length, bpm)]
 
 
 def estimate_key_scale(
@@ -350,29 +395,32 @@ def inspect_overdub_fit(
         if len(above):
             onset_sec = float(above[0]) / sr
 
-    analysis = analyze_audio(wav_bytes, bpm_override=bpm)
-    notes: list[MidiNote] = analysis.get("raw_melody_midi") or []
+    hop_length = 512
+    f0, conf = extract_f0_contour(samples, sr, hop_length=hop_length)
+    segmented = _segment_notes_detailed(f0, conf, sr, hop_length=hop_length, bpm=_clamp_bpm(bpm))
 
     beat_sec = 60.0 / max(40.0, float(bpm))
     nearest_beat_sec = round(onset_sec / beat_sec) * beat_sec
     timing_offset_ms = round((onset_sec - nearest_beat_sec) * 1000.0, 1)
 
-    root_pc = _KEY_TO_PC.get((key or "C").strip().lower(), 0)
-    intervals = _SCALE_INTERVALS.get((scale or "major").lower(), _SCALE_INTERVALS["major"])
+    root_pc = key_to_pitch_class(key)
+    intervals = SCALE_INTERVALS.get((scale or "major").lower(), SCALE_INTERVALS["major"])
     scale_pcs = {(root_pc + iv) % 12 for iv in intervals}
 
     pitch_issues: list[dict[str, Any]] = []
-    for note in notes:
+    for note, midi_float in segmented:
         pitch = int(note.pitch)
         pc = pitch % 12
         if pc not in scale_pcs:
             bar = int(float(note.start_beat) // 4.0) + 1
             note_name = f"{NOTE_NAMES[pc]}{(pitch // 12) - 1}"
+            target_midi = nearest_scale_midi(midi_float, key, scale)
+            cents_off = round(100.0 * abs(midi_float - target_midi), 1)
             pitch_issues.append(
                 {
                     "bar": bar,
                     "note": note_name,
-                    "cents_off": 50.0,
+                    "cents_off": cents_off,
                     "description": f"Note {note_name} at bar {bar} is outside {key} {scale}.",
                 }
             )

@@ -114,14 +114,39 @@ class ProjectState(_WorkerBaseModel):
     mastering: MasteringSettings = Field(default_factory=MasteringSettings)
 
 
+PreviewMode = Literal[
+    "raw",
+    "dry",
+    "dry_beat",
+    "autotune",
+    "autotune_beat",
+    "preserve",
+    "enhance",
+    "ai_mix",
+    "mix",
+]
+
+
+def _normalize_mode_value(value: Any) -> Any:
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        return cleaned or "ai_mix"
+    return value
+
+
 class RenderRequest(_WorkerBaseModel):
     """Request payload for POST /internal/audio/render."""
 
     project: ProjectState
     audio_assets_base64: dict[str, str] = Field(default_factory=dict)
-    mode: Literal["ai_mix", "dry_beat", "autotune_beat", "preserve", "enhance"] = "ai_mix"
+    mode: PreviewMode = "ai_mix"
     apply_mastering: bool = True
     sample_rate: int = Field(default=44100, ge=8000, le=96000)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value: Any) -> Any:
+        return _normalize_mode_value(value)
 
 
 class ExportRequest(_WorkerBaseModel):
@@ -130,9 +155,14 @@ class ExportRequest(_WorkerBaseModel):
     project: ProjectState
     audio_assets_base64: dict[str, str] = Field(default_factory=dict)
     format: Literal["wav", "mp3", "stems"] = "wav"
-    mode: Literal["ai_mix", "dry_beat", "autotune_beat", "preserve", "enhance"] = "ai_mix"
+    mode: PreviewMode = "ai_mix"
     apply_mastering: bool = True
     sample_rate: int = Field(default=44100, ge=8000, le=96000)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value: Any) -> Any:
+        return _normalize_mode_value(value)
 
 
 class DenoiseWorkerResponse(_WorkerBaseModel):

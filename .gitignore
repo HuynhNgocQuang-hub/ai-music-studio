@@ -8,13 +8,12 @@
 
 # Node / Frontend
 frontend/node_modules/
-frontend/.next/
-frontend/out/
+frontend/dist/
 node_modules/
 *.log
 
-# Python / Backend
-backend/.venv/
+# Backend (Java / Python)
+backend/target/
 backend/__pycache__/
 **/__pycache__/
 *.py[cod]

@@ -187,3 +187,103 @@ def test_overdub_fit_check(client: TestClient) -> None:
     assert "pitch_issues" in body
     assert "gain_suggestion" in body
     assert "one_click_fixes" in body
+
+
+def test_overdub_fit_check_real_cents_off(client: TestClient) -> None:
+    """Out-of-scale notes report real 100 * |midi_float - nearest_scale_midi| instead of hardcoded 50.0."""
+    sr = 44100
+    dur_sec = 2.0
+    n_total = int(dur_sec * sr)
+    t = np.arange(n_total, dtype=np.float32) / sr
+    y = np.zeros(n_total, dtype=np.float32)
+    half = n_total // 2
+    # First half: C4 (261.63 Hz, MIDI 60.0, in C major)
+    y[:half] = 0.45 * np.sin(2.0 * np.pi * 261.63 * t[:half])
+    # Second half: 282.0 Hz (~MIDI 61.30, rounds to C#4=61, ~70 cents below D4=62 in C major)
+    y[half:] = 0.45 * np.sin(2.0 * np.pi * 282.0 * t[half:])
+    wav_bytes = encode_wav_bytes(y, sr)
+
+    resp = client.post(
+        "/internal/audio/overdub-fit-check",
+        files={"file": ("offkey.wav", wav_bytes, "audio/wav")},
+        data={"bpm": "120.0", "key": "C", "scale": "major"},
+    )
+    assert resp.status_code == 200
+    issues = resp.json()["pitch_issues"]
+    assert len(issues) >= 1
+    cents = issues[0]["cents_off"]
+    assert cents != 50.0
+    assert 60.0 <= cents <= 80.0
+
+
+def test_render_mode_differentiation(client: TestClient) -> None:
+    """POST /internal/audio/render produces distinct WAV previews across all supported modes."""
+    sr = 44100
+    dur_sec = 2.0
+    n_total = int(dur_sec * sr)
+    t = np.arange(n_total, dtype=np.float32) / sr
+    rng = np.random.default_rng(7)
+
+    raw_samples = 0.35 * np.sin(2.0 * np.pi * 261.63 * t) + 0.05 * rng.standard_normal(n_total).astype(np.float32)
+    dry_samples = 0.35 * np.sin(2.0 * np.pi * 261.63 * t)
+    tuned_samples = 0.35 * np.sin(2.0 * np.pi * 329.63 * t)
+
+    raw_b64 = base64.b64encode(encode_wav_bytes(raw_samples, sr)).decode("ascii")
+    dry_b64 = base64.b64encode(encode_wav_bytes(dry_samples, sr)).decode("ascii")
+    tuned_b64 = base64.b64encode(encode_wav_bytes(tuned_samples, sr)).decode("ascii")
+
+    project_payload = {
+        "project_id": "proj_mode_test",
+        "audio_assets": {
+            "raw_input_ref": "mem://raw/test.wav",
+            "dry_denoised_ref": "mem://dry/test.wav",
+            "tuned_vocal_ref": "mem://tuned/test.wav",
+        },
+        "analysis": {"bpm": 120.0, "time_signature": "4/4", "detected_key": "C", "detected_scale": "major", "bars": 2},
+        "song_structure": {"total_bars": 2},
+        "mastering": {"auto_mix_enabled": True, "limiter_ceiling_db": -1.0, "target_lufs": -14.0},
+        "tracks": {
+            "vocal": {"type": "audio", "volume": 0.9, "pan": 0.0, "clips": [{"id": "c1", "source": "dry_denoised_ref", "start_bar": 1.0}]},
+            "drums": {
+                "type": "midi",
+                "instrument": "acoustic_kit",
+                "volume": 0.9,
+                "pan": 0.0,
+                "notes": [{"pitch": 36, "start_beat": 0.0, "duration": 0.5, "velocity": 115}],
+            },
+            "lead": {
+                "type": "midi",
+                "instrument": "lead_synth",
+                "volume": 0.8,
+                "pan": 0.0,
+                "notes": [{"pitch": 64, "start_beat": 0.0, "duration": 1.0, "velocity": 100}],
+            },
+        },
+    }
+    assets_map = {
+        "mem://raw/test.wav": raw_b64,
+        "mem://dry/test.wav": dry_b64,
+        "mem://tuned/test.wav": tuned_b64,
+    }
+
+    modes = ["raw", "dry", "dry_beat", "autotune", "preserve", "enhance", "ai_mix", "mix"]
+    rendered: dict[str, np.ndarray] = {}
+    for mode in modes:
+        resp = client.post(
+            "/internal/audio/render",
+            json={"project": project_payload, "audio_assets_base64": assets_map, "mode": mode, "apply_mastering": True},
+        )
+        assert resp.status_code == 200, f"mode={mode} failed: {resp.text}"
+        assert resp.content[:4] == b"RIFF"
+        arr, out_sr = sf.read(io.BytesIO(resp.content), dtype="float32")
+        assert out_sr == sr
+        assert peak_dbfs(arr) <= -1.0
+        rendered[mode] = arr
+
+    assert np.allclose(rendered["ai_mix"], rendered["mix"], atol=1e-6)
+
+    distinct_modes = ["raw", "dry", "dry_beat", "autotune", "preserve", "enhance", "ai_mix"]
+    for i, m1 in enumerate(distinct_modes):
+        for m2 in distinct_modes[i + 1 :]:
+            diff = float(np.max(np.abs(rendered[m1] - rendered[m2])))
+            assert diff > 1e-3, f"Expected distinct previews for {m1} vs {m2}, got max diff {diff}"

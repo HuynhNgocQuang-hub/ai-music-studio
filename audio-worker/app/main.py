@@ -222,7 +222,11 @@ def internal_render(req: RenderRequest) -> Response:
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
-        headers={"X-Peak-Dbfs": str(peak), "X-Sample-Rate": str(sr)},
+        headers={
+            "X-Peak-Dbfs": str(peak),
+            "X-Sample-Rate": str(sr),
+            "X-Render-Mode": req.mode,
+        },
     )
 
 

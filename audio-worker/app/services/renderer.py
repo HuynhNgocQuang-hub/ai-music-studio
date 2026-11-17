@@ -202,6 +202,29 @@ def _pan_stereo(mono: np.ndarray, pan: float, volume: float) -> np.ndarray:
     return stereo
 
 
+VOCAL_ONLY_MODES = {"raw", "dry", "autotune"}
+
+
+def _normalize_render_mode(mode: Optional[str]) -> str:
+    cleaned = (mode or "ai_mix").strip().lower()
+    if cleaned == "mix":
+        return "ai_mix"
+    return cleaned or "ai_mix"
+
+
+def _vocal_ref_candidates(project: ProjectState, mode: str) -> tuple[tuple[Optional[str], str], ...]:
+    """Return ordered (project_ref, slot_key) candidates for the requested render mode."""
+    raw_pair = (project.audio_assets.raw_input_ref, "raw_input_ref")
+    dry_pair = (project.audio_assets.dry_denoised_ref, "dry_denoised_ref")
+    tuned_pair = (project.audio_assets.tuned_vocal_ref, "tuned_vocal_ref")
+
+    if mode == "raw":
+        return (raw_pair, dry_pair, tuned_pair)
+    if mode in ("dry", "dry_beat"):
+        return (dry_pair, raw_pair, tuned_pair)
+    return (tuned_pair, dry_pair, raw_pair)
+
+
 def _render_audio_track(
     track: TrackState,
     project: ProjectState,
@@ -219,46 +242,36 @@ def _render_audio_track(
     except Exception:
         pass
     sec_per_bar = beats_per_bar * (60.0 / bpm)
+    mode_norm = _normalize_render_mode(mode)
 
     def _get_bytes(key: Optional[str]) -> Optional[bytes]:
         if not key:
             return None
         return audio_assets.get(key)
 
+    canonical_refs = {
+        "raw_input_ref",
+        "dry_denoised_ref",
+        "tuned_vocal_ref",
+        project.audio_assets.raw_input_ref,
+        project.audio_assets.dry_denoised_ref,
+        project.audio_assets.tuned_vocal_ref,
+    }
+
     def _resolve_ref(src: str) -> Optional[bytes]:
-        if mode == "dry_beat":
-            for k in (
-                project.audio_assets.dry_denoised_ref,
-                "dry_denoised_ref",
-                project.audio_assets.raw_input_ref,
-                "raw_input_ref",
-            ):
-                b = _get_bytes(k)
-                if b:
-                    return b
-        if mode in ("autotune_beat", "ai_mix"):
-            for k in (
-                project.audio_assets.tuned_vocal_ref,
-                "tuned_vocal_ref",
-                project.audio_assets.dry_denoised_ref,
-                "dry_denoised_ref",
-                project.audio_assets.raw_input_ref,
-                "raw_input_ref",
-            ):
-                b = _get_bytes(k)
-                if b:
-                    return b
-        if src == "dry_denoised_ref":
-            return _get_bytes(project.audio_assets.dry_denoised_ref) or _get_bytes("dry_denoised_ref")
-        if src == "tuned_vocal_ref":
-            return _get_bytes(project.audio_assets.tuned_vocal_ref) or _get_bytes("tuned_vocal_ref")
-        if src == "raw_input_ref":
-            return _get_bytes(project.audio_assets.raw_input_ref) or _get_bytes("raw_input_ref")
+        if src and src not in canonical_refs:
+            custom = _get_bytes(src)
+            if custom:
+                return custom
+        for proj_ref, slot_name in _vocal_ref_candidates(project, mode_norm):
+            b = _get_bytes(proj_ref) or _get_bytes(slot_name)
+            if b:
+                return b
         return _get_bytes(src)
 
     clips = list(track.clips)
     if not clips:
-        wav_bytes = _resolve_ref("tuned_vocal_ref" if mode != "dry_beat" else "dry_denoised_ref")
+        wav_bytes = _resolve_ref("raw_input_ref" if mode_norm == "raw" else "dry_denoised_ref")
         if wav_bytes:
             samples, _ = decode_wav_bytes(wav_bytes)
             n = min(total_samples, len(samples))
@@ -344,13 +357,20 @@ def render_project_mix(
         pass
     total_samples = max(1, int(round(total_bars * beats_per_bar * (60.0 / bpm) * sample_rate)))
 
+    mode_norm = _normalize_render_mode(mode)
+    include_midi = mode_norm not in VOCAL_ONLY_MODES
+
     any_solo = any(t.solo for t in project.tracks.values())
-    midi_monos = render_midi_tracks_to_audio(
-        project.tracks,
-        bpm=bpm,
-        total_bars=total_bars,
-        sample_rate=sample_rate,
-        time_signature=project.analysis.time_signature,
+    midi_monos = (
+        render_midi_tracks_to_audio(
+            project.tracks,
+            bpm=bpm,
+            total_bars=total_bars,
+            sample_rate=sample_rate,
+            time_signature=project.analysis.time_signature,
+        )
+        if include_midi
+        else {}
     )
 
     stems: dict[str, np.ndarray] = {}
@@ -358,15 +378,26 @@ def render_project_mix(
 
     for name, track in project.tracks.items():
         if track.type == "audio":
-            mono = _render_audio_track(track, project, assets, total_samples, sample_rate, mode)
+            mono = _render_audio_track(track, project, assets, total_samples, sample_rate, mode_norm)
+            mode_gain = 1.05 if mode_norm == "preserve" else 1.0
         else:
             mono = midi_monos.get(name, np.zeros(total_samples, dtype=np.float32))
+            if mode_norm == "preserve":
+                mode_gain = 0.40 if name == "lead" else 0.80
+            elif mode_norm == "enhance":
+                mode_gain = 1.08
+            else:
+                mode_gain = 1.0
 
         active = (not track.mute) and (not any_solo or track.solo)
-        stereo = _pan_stereo(mono, track.pan, track.volume if active else 0.0)
+        stereo = _pan_stereo(mono, track.pan, track.volume * mode_gain if active else 0.0)
         stems[name] = stereo
         if active:
             mix += stereo
+
+    if mode_norm == "enhance" and len(mix):
+        air = np.diff(mix, axis=0, prepend=mix[:1])
+        mix = (0.92 * mix + 0.08 * np.tanh(1.5 * mix) + 0.06 * air).astype(np.float32)
 
     if apply_mastering:
         mix = apply_master_limiter(
