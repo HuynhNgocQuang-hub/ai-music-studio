@@ -21,7 +21,7 @@
   * `backend/Dockerfile`, `backend/requirements.txt`
   * `backend/app/main.py`, `backend/app/core/` (Config, Redis Client + In-Memory fallback, State Manager)
   * `backend/app/services/audio/` (`denoise.py`, `analyzer.py`, `autotune.py`, `renderer.py` với FluidSynth/SoundFont nhẹ + `pedalboard` Limiter, `exporter.py`)
-  * `backend/app/api/` (Endpoints: `/api/audio/*`, `/api/projects/*`, `/api/jobs/*`, `/api/health`)
+  * `backend/app/api/` (`health.py`, `audio.py`, `projects.py` — riêng `jobs.py` do `ai-multi-agent-core` phụ trách)
 * **Đầu ra hoàn thành:** `docker compose up` chạy khỏe, API Health trả về OK, test pass luồng Upload $\rightarrow$ Denoise $\rightarrow$ Analyze $\rightarrow$ Auto-Tune $\rightarrow$ Render WAV/MP3.
 
 ### Agent 2 — `ai-multi-agent-core` (Hệ thống Multi-Agent bên trong App)
@@ -49,6 +49,25 @@
     * `/settings` (Cấu hình Gemini/OpenAI Key & Kiểm tra Redis/Backend)
 * **Đầu ra hoàn thành:** `npm run build` pass không lỗi TypeScript, chạy được trọn vẹn Wizard `/create` $\rightarrow$ Preview $\rightarrow$ `/library` phân trang.
 
-### Agent 4 — `integration-qa` (Kiểm thử Tích hợp & Nghiệm thu)
+### Agent 4 — `integration-qa` (Kiểm thử Tích hợp, Cross-Review & Nghiệm thu)
 * **Phạm vi sở hữu:** `tests/e2e/` và rà soát đối chiếu [SRS.md](./SRS.md) & [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md).
-* **Nhiệm vụ:** Chạy thử end-to-end khi 3 Agent trên xong việc, đối chiếu Payload giữa `frontend` và `backend`, kiểm tra giới hạn Master Limiter (`<= -1.0 dBFS`) và báo lỗi nếu lệch contract.
+* **Nhiệm vụ:** Chạy thử end-to-end khi 3 Agent trên xong việc, đối chiếu Payload giữa `frontend` và `backend`, kiểm tra giới hạn Master Limiter (`<= -1.0 dBFS`), kiểm tra rò rỉ file đĩa và báo lỗi nếu lệch contract.
+
+---
+
+## Quy trình Làm việc & Cross-Review 3 Tầng (Chống Xung đột & Tự Bắt Bug)
+
+Để đảm bảo mỗi AI làm đúng việc riêng và các AI tự bắt bug cho nhau trước khi bàn giao:
+
+1. **Luật Sở hữu File (Strict File Ownership):**
+   * Mỗi Agent chỉ được tạo/sửa file trong phạm vi được liệt kê ở trên (trừ phần cập nhật trạng thái dòng của mình trong [TASK_BOARD.md](./TASK_BOARD.md)).
+   * Trước khi hoàn tất, kiểm tra `git diff --name-only` để xác nhận không sửa lấn sang thư mục của Agent khác.
+2. **Tầng 1 — Tự kiểm tra tại chỗ (Self-Check):**
+   * `infra-backend-dsp`: Chạy `pytest` cho DSP/API + kiểm tra `docker compose config`.
+   * `ai-multi-agent-core`: Chạy `pytest backend/tests/test_agents.py` (pass với Mock LLM, vòng QA $\le 2$, Timeout `60s`).
+   * `frontend-studio`: Chạy `npx tsc --noEmit` và `npm run build` (0 lỗi TypeScript/Next.js).
+3. **Tầng 2 — Cross-Review chéo (Maker–Checker):**
+   * AI viết code **không** tự duyệt bài mình. `integration-qa` đọc chéo code giữa `backend/app/api/*`, `backend/app/agents/*` và `frontend/src/lib/api/client.ts` đối chiếu 1:1 với [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md).
+   * Nếu phát hiện bug (lệch tên trường JSON, sai validation, thiếu Limiter, không dọn temp file...), ghi vào mục **Bug Tracker** trong [TASK_BOARD.md](./TASK_BOARD.md) kèm `File:Line` để đúng Agent sở hữu sửa lại.
+4. **Tầng 3 — Nghiệm thu E2E:**
+   * Chạy thử trọn vẹn luồng Phase 1 và dán kết quả thực tế (test output/build log) vào cột **Bằng chứng** trên [TASK_BOARD.md](./TASK_BOARD.md).
