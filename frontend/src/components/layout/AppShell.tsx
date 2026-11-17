@@ -1,8 +1,5 @@
-'use client';
-
 import React, { useEffect, useState } from 'react';
-import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   CheckCircle2,
   ChevronLeft,
@@ -32,8 +29,8 @@ function formatRelativeSeconds(iso: string | null): string {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const router = useRouter();
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
   const {
     project,
     saveNow,
@@ -95,7 +92,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (!restorableDraft) return;
     const id = restorableDraft.project_id;
     acceptRestoreDraft(restorableDraft);
-    router.push(`/studio/${encodeURIComponent(id)}`);
+    navigate(`/studio/${encodeURIComponent(id)}`);
   };
 
   return (
@@ -107,7 +104,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }`}
       >
         <div className="flex h-14 items-center justify-between border-b border-slate-800/80 px-3">
-          <Link href="/" className="flex items-center gap-2.5 overflow-hidden">
+          <Link to="/" className="flex items-center gap-2.5 overflow-hidden">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-emerald-500 text-white shadow-md shadow-indigo-500/20">
               <Disc3 className="h-5 w-5" />
             </div>
@@ -135,7 +132,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             return (
               <Link
                 key={item.href}
-                href={item.href}
+                to={item.href}
                 title={collapsed ? item.label : undefined}
                 className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors ${
                   item.active

@@ -1,9 +1,12 @@
-# Local Next.js build artifacts
-.next/
-out/
+# Dependencies & build output
 node_modules/
-next-env.d.ts
+dist/
+dist-ssr/
 *.tsbuildinfo
+
+# Local env files
+.env.local
+.env.*.local
 
 # Ensure frontend/src/lib/storage/ is tracked despite root storage/ rule
 !src/lib/storage/

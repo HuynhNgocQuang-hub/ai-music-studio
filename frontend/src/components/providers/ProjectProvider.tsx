@@ -1,5 +1,3 @@
-'use client';
-
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
   AUTO_SAVE_INTERVAL_MS,

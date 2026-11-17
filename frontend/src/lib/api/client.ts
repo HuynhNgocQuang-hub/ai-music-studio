@@ -39,7 +39,7 @@ export const DEFAULT_LLM_SETTINGS: StudioLLMSettings = {
     coach: 'gemini',
     qa: 'openai',
   },
-  backendUrl: process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000',
+  backendUrl: import.meta.env.VITE_API_BASE_URL ?? '',
 };
 
 export function loadStudioSettings(): StudioLLMSettings {
