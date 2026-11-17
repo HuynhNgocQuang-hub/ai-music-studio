@@ -1,0 +1,10 @@
+# Local Next.js build artifacts
+.next/
+out/
+node_modules/
+next-env.d.ts
+*.tsbuildinfo
+
+# Ensure frontend/src/lib/storage/ is tracked despite root storage/ rule
+!src/lib/storage/
+!src/lib/storage/**
