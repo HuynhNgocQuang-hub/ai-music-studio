@@ -1,0 +1,38 @@
+server:
+  port: ${SERVER_PORT:8000}
+
+spring:
+  application:
+    name: ai-music-studio-backend
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379/0}
+      timeout: 500ms
+      connect-timeout: 500ms
+
+app:
+  name: "AI Music Studio API"
+  version: "1.0.0"
+  redis-url: ${REDIS_URL:redis://localhost:6379/0}
+  audio-worker-url: ${AUDIO_WORKER_URL:http://localhost:8001}
+  project-ttl-seconds: ${PROJECT_TTL_SECONDS:86400}
+  audio-ttl-seconds: ${AUDIO_TTL_SECONDS:43200}
+  max-upload-mb: ${MAX_UPLOAD_MB:50}
+  min-duration-sec: ${MIN_DURATION_SEC:3.0}
+  max-hum-duration-sec: ${MAX_HUM_DURATION_SEC:60.0}
+  max-vocal-duration-sec: ${MAX_VOCAL_DURATION_SEC:300.0}
+  sample-rate: ${SAMPLE_RATE:44100}
+  master-limiter-ceiling-db: ${MASTER_LIMITER_CEILING_DB:-1.0}
+  target-lufs: ${TARGET_LUFS:-14.0}
+  gemini-api-key: ${GEMINI_API_KEY:}
+  openai-api-key: ${OPENAI_API_KEY:}
+  default-llm-provider: ${DEFAULT_LLM_PROVIDER:gemini}
+  gemini-model: ${GEMINI_MODEL:gemini-2.5-flash}
+  openai-model: ${OPENAI_MODEL:gpt-4o-mini}
+  cors-origins: ${CORS_ORIGINS:http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
+  job-timeout-seconds: ${JOB_TIMEOUT_SECONDS:60.0}
+  max-qa-iterations: ${MAX_QA_ITERATIONS:2}

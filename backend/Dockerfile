@@ -1,26 +1,20 @@
-FROM python:3.11-slim
+FROM maven:3.9.9-eclipse-temurin-21-alpine AS builder
+WORKDIR /build
+COPY pom.xml .
+RUN mvn dependency:go-offline -B
+COPY src ./src
+RUN mvn package -DskipTests -B
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-# System audio engines: FFmpeg, libsndfile, FluidSynth + lightweight GM SoundFont
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    libsndfile1 \
-    fluidsynth \
-    fluid-soundfont-gm \
-    && rm -rf /var/lib/apt/lists/*
-
+FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apk add --no-cache curl
 
-COPY . .
-
-RUN mkdir -p /tmp/ai_music_studio
+COPY --from=builder /build/target/*.jar app.jar
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+  CMD curl -fsS http://localhost:8000/api/health || exit 1
+
+ENTRYPOINT ["java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-jar", "/app/app.jar"]
