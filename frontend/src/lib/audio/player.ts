@@ -530,3 +530,65 @@ export function getAudioEngine(): MultiTrackAudioEngine {
   }
   return sharedEngine;
 }
+
+function writeAsciiString(view: DataView, offset: number, str: string): void {
+  for (let i = 0; i < str.length; i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
+}
+
+/**
+ * Decode a browser MediaRecorder blob (e.g. audio/webm or audio/ogg) and encode it
+ * as a standard Mono 16-bit PCM WAV Blob accepted by the backend audio validator.
+ */
+export async function encodeBlobToWav(blob: Blob): Promise<Blob> {
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const ctx = new AudioCtx();
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    const sampleRate = audioBuffer.sampleRate;
+    const numSamples = audioBuffer.length;
+    const numChannels = audioBuffer.numberOfChannels;
+
+    // Mix down to mono float32
+    const mono = new Float32Array(numSamples);
+    for (let ch = 0; ch < numChannels; ch++) {
+      const channelData = audioBuffer.getChannelData(ch);
+      for (let i = 0; i < numSamples; i++) {
+        mono[i] += channelData[i] / numChannels;
+      }
+    }
+
+    const dataSize = numSamples * 2; // 16-bit PCM
+    const wavBuffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(wavBuffer);
+
+    writeAsciiString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeAsciiString(view, 8, 'WAVE');
+    writeAsciiString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // PCM chunk size
+    view.setUint16(20, 1, true); // AudioFormat = 1 (PCM)
+    view.setUint16(22, 1, true); // NumChannels = 1 (Mono)
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // ByteRate
+    view.setUint16(32, 2, true); // BlockAlign
+    view.setUint16(34, 16, true); // BitsPerSample
+    writeAsciiString(view, 36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (let i = 0; i < numSamples; i++) {
+      const sample = Math.max(-1, Math.min(1, mono[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+  } finally {
+    await ctx.close();
+  }
+}

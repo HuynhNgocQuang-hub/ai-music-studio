@@ -145,7 +145,7 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
 /**
  * Resolve backend audio ref (`mem://...` or `/api/...` or full http URL) into a playable URL.
  */
-export function resolveAudioUrl(ref: string | null | undefined, projectId?: string): string | null {
+export function resolveAudioUrl(ref: string | null | undefined, _projectId?: string): string | null {
   if (!ref) return null;
   if (ref.startsWith('http://') || ref.startsWith('https://') || ref.startsWith('blob:')) {
     return ref;
@@ -155,8 +155,15 @@ export function resolveAudioUrl(ref: string | null | undefined, projectId?: stri
     return `${base}${ref}`;
   }
   const params = new URLSearchParams({ ref });
-  if (projectId) params.set('project_id', projectId);
-  return `${base}/api/audio/stream?${params.toString()}`;
+  return `${base}/api/audio/asset?${params.toString()}`;
+}
+
+export function getQuickPreviewUrl(
+  projectId: string,
+  mode: 'ai_mix' | 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance' = 'ai_mix'
+): string {
+  const params = new URLSearchParams({ mode });
+  return `${getApiBaseUrl()}/api/audio/preview/${encodeURIComponent(projectId)}?${params.toString()}`;
 }
 
 export function validateAudioFileClient(file: File): string | null {
@@ -361,17 +368,32 @@ export async function listProjects(params: {
   });
 }
 
+function hydrateProjectTitle(state: ProjectState): ProjectState {
+  const effectiveTitle = state.config?.title || state.title || 'Untitled Session';
+  return {
+    ...state,
+    title: effectiveTitle,
+    config: {
+      ...state.config,
+      title: effectiveTitle,
+    },
+  };
+}
+
 export async function getProject(projectId: string): Promise<ProjectState> {
-  return requestJson<ProjectState>(`/api/projects/${encodeURIComponent(projectId)}`, {
+  const res = await requestJson<ProjectState>(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: 'GET',
   });
+  return hydrateProjectTitle(res);
 }
 
 export async function syncProject(projectId: string, state: ProjectState): Promise<ProjectState> {
-  return requestJson<ProjectState>(`/api/projects/${encodeURIComponent(projectId)}/sync`, {
+  const normalized = hydrateProjectTitle(state);
+  const res = await requestJson<ProjectState>(`/api/projects/${encodeURIComponent(projectId)}/sync`, {
     method: 'PUT',
-    body: JSON.stringify(state),
+    body: JSON.stringify(normalized),
   });
+  return hydrateProjectTitle(res);
 }
 
 export async function exportAimusic(projectId: string): Promise<Blob> {
@@ -384,20 +406,22 @@ export async function exportAimusic(projectId: string): Promise<Blob> {
 export async function importAimusic(file: File): Promise<ProjectState> {
   const formData = new FormData();
   formData.append('file', file, file.name);
-  return requestJson<ProjectState>('/api/projects/import', {
+  const res = await requestJson<ProjectState>('/api/projects/import', {
     method: 'POST',
     body: formData,
   });
+  return hydrateProjectTitle(res);
 }
 
 export async function exportAudio(
   projectId: string,
   format: 'wav' | 'mp3' | 'stems',
-  applyMastering = true
+  applyMastering = true,
+  mode: 'ai_mix' | 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance' = 'ai_mix'
 ): Promise<Blob> {
   return requestBlob(`/api/projects/${encodeURIComponent(projectId)}/export/audio`, {
     method: 'POST',
-    body: JSON.stringify({ format, apply_mastering: applyMastering }),
+    body: JSON.stringify({ format, apply_mastering: applyMastering, mode }),
   });
 }
 
