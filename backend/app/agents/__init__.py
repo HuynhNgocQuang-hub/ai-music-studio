@@ -7,7 +7,10 @@ from .llm_adapter import (
     LLMAdapter,
     LLMProvider,
     LLMResponse,
+    extract_llm_overrides_from_headers,
     get_llm_adapter,
+    reset_request_llm_overrides,
+    set_request_llm_overrides,
 )
 from .orchestrator import (
     JobCancelledError,
@@ -29,6 +32,9 @@ __all__ = [
     "Orchestrator",
     "QAAgent",
     "QAReport",
+    "extract_llm_overrides_from_headers",
     "get_llm_adapter",
     "orchestrator",
+    "reset_request_llm_overrides",
+    "set_request_llm_overrides",
 ]

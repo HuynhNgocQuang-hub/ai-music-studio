@@ -9,10 +9,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.agents.llm_adapter import (
+    extract_llm_overrides_from_headers,
+    reset_request_llm_overrides,
+    set_request_llm_overrides,
+)
 from app.agents.orchestrator import JobCancelledError, JobTimeoutError, orchestrator
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -218,6 +223,7 @@ def _launch_job(
     job_type: str,
     initial_state: Dict[str, Any],
     runner_coro_factory: Any,
+    llm_overrides: Optional[Dict[str, Any]] = None,
 ) -> _JobRuntime:
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     job = _JobRuntime(job_id=job_id, project_id=project_id, job_type=job_type)
@@ -225,6 +231,7 @@ def _launch_job(
     _sync_job_to_store(job)
 
     async def _run() -> None:
+        token = set_request_llm_overrides(**llm_overrides) if llm_overrides else None
         try:
             updated_state = await runner_coro_factory(job)
             job.result_state = updated_state
@@ -239,6 +246,8 @@ def _launch_job(
             job.status = "failed"
             job.error = str(exc)
         finally:
+            if token is not None:
+                reset_request_llm_overrides(token)
             _sync_job_to_store(job)
 
     job.task = asyncio.create_task(_run())
@@ -246,8 +255,9 @@ def _launch_job(
 
 
 @router.post("/generate")
-async def start_generate_job(req: GenerateJobRequest) -> Dict[str, Any]:
+async def start_generate_job(req: GenerateJobRequest, request: Request) -> Dict[str, Any]:
     state = _load_project_state(req.project_id, req.project_state)
+    llm_overrides = extract_llm_overrides_from_headers(request.headers)
 
     async def _runner(job: _JobRuntime) -> Dict[str, Any]:
         return await orchestrator.run_generate(
@@ -259,7 +269,7 @@ async def start_generate_job(req: GenerateJobRequest) -> Dict[str, Any]:
             cancel_check=_make_cancel_check(job),
         )
 
-    job = _launch_job(req.project_id, "generate", state, _runner)
+    job = _launch_job(req.project_id, "generate", state, _runner, llm_overrides=llm_overrides)
     return {
         "job_id": job.job_id,
         "project_id": job.project_id,
@@ -268,7 +278,7 @@ async def start_generate_job(req: GenerateJobRequest) -> Dict[str, Any]:
 
 
 @router.post("/regenerate-track")
-async def start_regenerate_track_job(req: RegenerateTrackRequest) -> Dict[str, Any]:
+async def start_regenerate_track_job(req: RegenerateTrackRequest, request: Request) -> Dict[str, Any]:
     target = req.target_track.strip().lower()
     if target not in VALID_MIDI_TRACKS:
         raise HTTPException(
@@ -276,6 +286,7 @@ async def start_regenerate_track_job(req: RegenerateTrackRequest) -> Dict[str, A
             detail=f"target_track must be one of {sorted(VALID_MIDI_TRACKS)}",
         )
     state = _load_project_state(req.project_id, req.project_state)
+    llm_overrides = extract_llm_overrides_from_headers(request.headers)
 
     async def _runner(job: _JobRuntime) -> Dict[str, Any]:
         return await orchestrator.run_regenerate_track(
@@ -288,7 +299,7 @@ async def start_regenerate_track_job(req: RegenerateTrackRequest) -> Dict[str, A
             cancel_check=_make_cancel_check(job),
         )
 
-    job = _launch_job(req.project_id, "regenerate_track", state, _runner)
+    job = _launch_job(req.project_id, "regenerate_track", state, _runner, llm_overrides=llm_overrides)
     return {
         "job_id": job.job_id,
         "project_id": job.project_id,
@@ -298,8 +309,9 @@ async def start_regenerate_track_job(req: RegenerateTrackRequest) -> Dict[str, A
 
 
 @router.post("/rearrange")
-async def start_rearrange_job(req: RearrangeRequest) -> Dict[str, Any]:
+async def start_rearrange_job(req: RearrangeRequest, request: Request) -> Dict[str, Any]:
     state = _load_project_state(req.project_id, req.project_state)
+    llm_overrides = extract_llm_overrides_from_headers(request.headers)
 
     async def _runner(job: _JobRuntime) -> Dict[str, Any]:
         return await orchestrator.run_rearrange(
@@ -312,7 +324,7 @@ async def start_rearrange_job(req: RearrangeRequest) -> Dict[str, Any]:
             cancel_check=_make_cancel_check(job),
         )
 
-    job = _launch_job(req.project_id, "rearrange", state, _runner)
+    job = _launch_job(req.project_id, "rearrange", state, _runner, llm_overrides=llm_overrides)
     return {
         "job_id": job.job_id,
         "project_id": job.project_id,

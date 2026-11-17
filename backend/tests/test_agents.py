@@ -18,7 +18,13 @@ if str(BACKEND_DIR) not in sys.path:
 from app.agents.arranger_agent import ArrangerAgent
 from app.agents.coach_lyricist_agent import CoachLyricistAgent
 from app.agents.composer_agent import ComposerAgent, sanitize_user_prompt
-from app.agents.llm_adapter import LLMAdapter, LLMProvider
+from app.agents.llm_adapter import (
+    LLMAdapter,
+    LLMProvider,
+    extract_llm_overrides_from_headers,
+    reset_request_llm_overrides,
+    set_request_llm_overrides,
+)
 from app.agents.orchestrator import JobCancelledError, JobTimeoutError, Orchestrator
 from app.agents.qa_agent import QAAgent, QAReport
 
@@ -94,6 +100,24 @@ class TestLLMAdapter(unittest.IsolatedAsyncioTestCase):
         text_resp = await adapter.generate_text("hello", provider="mock")
         self.assertTrue(text_resp.is_mock)
         self.assertEqual(text_resp.provider, LLMProvider.MOCK)
+
+    async def test_request_header_overrides_context(self) -> None:
+        adapter = LLMAdapter()
+        overrides = extract_llm_overrides_from_headers(
+            {
+                "X-Gemini-Api-Key": "AIzaHeaderOverrideKey12345",
+                "X-OpenAI-Api-Key": "sk-HeaderOverrideKey12345",
+                "X-LLM-Provider": "openai",
+            }
+        )
+        token = set_request_llm_overrides(**overrides)
+        try:
+            self.assertEqual(adapter.gemini_api_key, "AIzaHeaderOverrideKey12345")
+            self.assertEqual(adapter.openai_api_key, "sk-HeaderOverrideKey12345")
+            self.assertEqual(adapter.default_provider, LLMProvider.OPENAI)
+        finally:
+            reset_request_llm_overrides(token)
+        self.assertIsNone(adapter._gemini_api_key)
 
 
 class TestAgentsPipeline(unittest.IsolatedAsyncioTestCase):
@@ -315,6 +339,57 @@ class TestJobsRouter(unittest.IsolatedAsyncioTestCase):
             cancel_resp = client.post(f"/api/jobs/{regen_resp.json()['job_id']}/cancel")
             self.assertEqual(cancel_resp.status_code, 200)
             self.assertEqual(cancel_resp.json()["status"], "cancelled")
+
+    async def test_studio_lyrics_coach_and_overdub_endpoints_if_fastapi_installed(self) -> None:
+        try:
+            import io
+            import struct
+            import wave
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+            from app.api.studio import router as studio_router
+        except ImportError:
+            self.skipTest("fastapi not installed in standalone environment")
+
+        app = FastAPI()
+        app.include_router(studio_router)
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(struct.pack("<" + "h" * 1600, *([0] * 400 + [8000] * 1200)))
+        buf.seek(0)
+
+        with TestClient(app) as client:
+            lyr = client.post(
+                "/api/lyrics/suggest",
+                json={"project_id": "proj_api_001", "language": "vi", "topic": "kỷ niệm", "section": ""},
+            )
+            self.assertEqual(lyr.status_code, 200)
+            self.assertGreater(len(lyr.json()["lines"]), 0)
+
+            coach = client.post(
+                "/api/coach/chat",
+                json={"project_id": "proj_api_001", "message": "Nên đặt ở Chorus hay Verse?", "history": []},
+            )
+            self.assertEqual(coach.status_code, 200)
+            self.assertIn("reply", coach.json())
+            self.assertTrue(len(coach.json()["suggested_actions"]) >= 1)
+            self.assertIn("action", coach.json()["suggested_actions"][0])
+
+            fit = client.post(
+                "/api/studio/overdub-fit-check",
+                data={"project_id": "proj_api_001"},
+                files={"file": ("overdub.wav", buf.getvalue(), "audio/wav")},
+            )
+            self.assertEqual(fit.status_code, 200)
+            body = fit.json()
+            self.assertIn("timing_offset_ms", body)
+            self.assertIn("pitch_issues", body)
+            self.assertIn("gain_suggestion", body)
+            self.assertIn("one_click_fixes", body)
 
 
 if __name__ == "__main__":

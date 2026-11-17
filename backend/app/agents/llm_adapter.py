@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -10,11 +11,51 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_PREFIXES = ("your_", "changeme", "replace_", "example_", "<")
+
+_REQUEST_LLM_OVERRIDES: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "request_llm_overrides", default=None
+)
+
+
+def set_request_llm_overrides(
+    gemini_api_key: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+    default_provider: Optional[str] = None,
+    role_providers: Optional[Dict[str, str]] = None,
+) -> contextvars.Token[Optional[Dict[str, Any]]]:
+    """Bind per-request LLM overrides (e.g. from X-*-Api-Key headers) to current async context."""
+    payload: Dict[str, Any] = {}
+    if gemini_api_key:
+        payload["gemini_api_key"] = gemini_api_key.strip()
+    if openai_api_key:
+        payload["openai_api_key"] = openai_api_key.strip()
+    if default_provider:
+        payload["default_provider"] = default_provider.strip().lower()
+    if role_providers:
+        payload["role_providers"] = {k.lower(): v.lower() for k, v in role_providers.items()}
+    return _REQUEST_LLM_OVERRIDES.set(payload or None)
+
+
+def reset_request_llm_overrides(token: contextvars.Token[Optional[Dict[str, Any]]]) -> None:
+    _REQUEST_LLM_OVERRIDES.reset(token)
+
+
+def extract_llm_overrides_from_headers(headers: Mapping[str, str]) -> Dict[str, Any]:
+    """Parse X-Gemini-Api-Key, X-OpenAI-Api-Key, X-LLM-Provider from HTTP headers (case-insensitive)."""
+    lowered = {k.lower(): v for k, v in headers.items() if v}
+    overrides: Dict[str, Any] = {}
+    if lowered.get("x-gemini-api-key"):
+        overrides["gemini_api_key"] = lowered["x-gemini-api-key"].strip()
+    if lowered.get("x-openai-api-key"):
+        overrides["openai_api_key"] = lowered["x-openai-api-key"].strip()
+    if lowered.get("x-llm-provider"):
+        overrides["default_provider"] = lowered["x-llm-provider"].strip().lower()
+    return overrides
 
 
 class LLMProvider(str, Enum):
@@ -128,17 +169,29 @@ class LLMAdapter:
     def gemini_api_key(self) -> Optional[str]:
         if self._gemini_api_key is not None:
             return self._gemini_api_key
+        ctx = _REQUEST_LLM_OVERRIDES.get() or {}
+        if ctx.get("gemini_api_key"):
+            return ctx["gemini_api_key"]
         return self._read_setting("GEMINI_API_KEY")
 
     @property
     def openai_api_key(self) -> Optional[str]:
         if self._openai_api_key is not None:
             return self._openai_api_key
+        ctx = _REQUEST_LLM_OVERRIDES.get() or {}
+        if ctx.get("openai_api_key"):
+            return ctx["openai_api_key"]
         return self._read_setting("OPENAI_API_KEY")
 
     @property
     def default_provider(self) -> LLMProvider:
-        raw = self._default_provider_override or self._read_setting("DEFAULT_LLM_PROVIDER") or "gemini"
+        ctx = _REQUEST_LLM_OVERRIDES.get() or {}
+        raw = (
+            self._default_provider_override
+            or ctx.get("default_provider")
+            or self._read_setting("DEFAULT_LLM_PROVIDER")
+            or "gemini"
+        )
         try:
             return LLMProvider(raw.strip().lower())
         except ValueError:
