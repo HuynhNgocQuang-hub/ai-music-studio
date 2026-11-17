@@ -1,7 +1,5 @@
-'use client';
-
 import React, { useCallback, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useNavigate } from 'react-router-dom';
 import {
   ChevronLeft,
   ChevronRight,
@@ -39,7 +37,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function LibraryPage() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { acceptRestoreDraft, loadProjectIntoSession } = useProjectSession();
 
   const [search, setSearch] = useState('');
@@ -103,9 +101,9 @@ export default function LibraryPage() {
     try {
       const state = await getProject(projectId);
       loadProjectIntoSession(state, { dirty: false });
-      router.push(`/studio/${encodeURIComponent(projectId)}`);
+      navigate(`/studio/${encodeURIComponent(projectId)}`);
     } catch {
-      router.push(`/studio/${encodeURIComponent(projectId)}`);
+      navigate(`/studio/${encodeURIComponent(projectId)}`);
     }
   };
 
@@ -115,7 +113,7 @@ export default function LibraryPage() {
     try {
       const state = await importAimusic(file);
       loadProjectIntoSession(state, { dirty: false });
-      router.push(`/studio/${encodeURIComponent(state.project_id)}`);
+      navigate(`/studio/${encodeURIComponent(state.project_id)}`);
     } catch (err) {
       setRemoteError(err instanceof ApiError ? err.detail : 'Không thể nạp file .aimusic');
     } finally {
@@ -210,7 +208,7 @@ export default function LibraryPage() {
             type="button"
             onClick={() => {
               acceptRestoreDraft(latestDraft);
-              router.push(`/studio/${encodeURIComponent(latestDraft.project_id)}`);
+              navigate(`/studio/${encodeURIComponent(latestDraft.project_id)}`);
             }}
             className="rounded-xl bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400"
           >
@@ -321,7 +319,7 @@ export default function LibraryPage() {
                     type="button"
                     onClick={() => {
                       acceptRestoreDraft(d);
-                      router.push(`/studio/${encodeURIComponent(d.project_id)}`);
+                      navigate(`/studio/${encodeURIComponent(d.project_id)}`);
                     }}
                     className="rounded-lg bg-indigo-600/20 px-3 py-1 font-medium text-indigo-300 hover:bg-indigo-600/30"
                   >

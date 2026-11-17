@@ -1,7 +1,5 @@
-'use client';
-
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useNavigate } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
@@ -81,7 +79,7 @@ const STEPS = [
 ];
 
 export default function CreateWizardPage() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { project, updateProject, loadProjectIntoSession, saveNow } = useProjectSession();
   const engine = useMemo(() => getAudioEngine(), []);
 
@@ -1433,7 +1431,7 @@ export default function CreateWizardPage() {
 
             <button
               type="button"
-              onClick={() => router.push(`/studio/${encodeURIComponent(project.project_id)}`)}
+              onClick={() => navigate(`/studio/${encodeURIComponent(project.project_id)}`)}
               className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 hover:opacity-95"
             >
               <Sliders className="h-4 w-4" />

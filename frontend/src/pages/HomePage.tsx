@@ -1,8 +1,5 @@
-'use client';
-
 import React, { useEffect, useState } from 'react';
-import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
   FolderOpen,
@@ -18,7 +15,7 @@ import { useProjectSession } from '@/components/providers/ProjectProvider';
 import { listDrafts, type StoredDraft } from '@/lib/storage/indexeddb';
 
 export default function HomePage() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { project, acceptRestoreDraft } = useProjectSession();
   const [recentDrafts, setRecentDrafts] = useState<StoredDraft[]>([]);
 
@@ -45,7 +42,7 @@ export default function HomePage() {
           </p>
           <div className="flex flex-wrap gap-3 pt-2">
             <Link
-              href="/create"
+              to="/create"
               className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:bg-indigo-500"
             >
               <Mic2 className="h-4 w-4" />
@@ -53,7 +50,7 @@ export default function HomePage() {
               <ArrowRight className="h-4 w-4" />
             </Link>
             <Link
-              href={`/studio/${encodeURIComponent(project.project_id)}`}
+              to={`/studio/${encodeURIComponent(project.project_id)}`}
               className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800/70 px-5 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
             >
               <Sliders className="h-4 w-4 text-emerald-400" />
@@ -66,7 +63,7 @@ export default function HomePage() {
       {/* Quick Navigation Cards */}
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Link
-          href="/create"
+          to="/create"
           className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-indigo-500/50"
         >
           <Wand2 className="h-6 w-6 text-indigo-400" />
@@ -77,7 +74,7 @@ export default function HomePage() {
         </Link>
 
         <Link
-          href={`/studio/${encodeURIComponent(project.project_id)}`}
+          to={`/studio/${encodeURIComponent(project.project_id)}`}
           className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-emerald-500/50"
         >
           <Music4 className="h-6 w-6 text-emerald-400" />
@@ -88,7 +85,7 @@ export default function HomePage() {
         </Link>
 
         <Link
-          href="/library"
+          to="/library"
           className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-amber-500/50"
         >
           <FolderOpen className="h-6 w-6 text-amber-400" />
@@ -99,7 +96,7 @@ export default function HomePage() {
         </Link>
 
         <Link
-          href="/settings"
+          to="/settings"
           className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-sky-500/50"
         >
           <Settings className="h-6 w-6 text-sky-400" />
@@ -118,7 +115,7 @@ export default function HomePage() {
               <RotateCcw className="h-4 w-4 text-amber-400" />
               <span>Bản nháp gần đây (IndexedDB Rolling Cap: tối đa 5)</span>
             </h3>
-            <Link href="/library" className="text-xs text-indigo-400 hover:underline">
+            <Link to="/library" className="text-xs text-indigo-400 hover:underline">
               Xem tất cả →
             </Link>
           </div>
@@ -141,7 +138,7 @@ export default function HomePage() {
                   type="button"
                   onClick={() => {
                     acceptRestoreDraft(d);
-                    router.push(`/studio/${encodeURIComponent(d.project_id)}`);
+                    navigate(`/studio/${encodeURIComponent(d.project_id)}`);
                   }}
                   className="shrink-0 rounded-lg bg-indigo-600/20 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:bg-indigo-600/30"
                 >
