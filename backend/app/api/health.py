@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from app.core.config import settings
 from app.core.redis_store import get_store
@@ -14,10 +14,13 @@ router = APIRouter(prefix="/api", tags=["health"])
 
 
 @router.get("/health")
-def health_check() -> dict:
+def health_check(request: Request) -> dict:
     """Report backend, Redis/memory store, audio binaries, and LLM config status."""
     store = get_store()
     store_status = store.ping()
+    hdr_gemini = request.headers.get("X-Gemini-Api-Key", "").strip()
+    hdr_openai = request.headers.get("X-OpenAI-Api-Key", "").strip()
+    hdr_provider = request.headers.get("X-LLM-Provider", "").strip()
     return {
         "status": "ok",
         "app": settings.APP_NAME,
@@ -29,9 +32,9 @@ def health_check() -> dict:
             "soundfont_available": os.path.exists(settings.SOUNDFONT_PATH),
         },
         "llm_providers": {
-            "gemini_configured": bool(settings.GEMINI_API_KEY),
-            "openai_configured": bool(settings.OPENAI_API_KEY),
-            "default": settings.DEFAULT_LLM_PROVIDER,
+            "gemini_configured": bool(settings.GEMINI_API_KEY or hdr_gemini),
+            "openai_configured": bool(settings.OPENAI_API_KEY or hdr_openai),
+            "default": hdr_provider or settings.DEFAULT_LLM_PROVIDER,
         },
     }
 
