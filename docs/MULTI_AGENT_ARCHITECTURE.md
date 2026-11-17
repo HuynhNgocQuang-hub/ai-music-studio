@@ -1,18 +1,26 @@
 # Tài liệu Kiến trúc Multi-Agent & Thiết kế Kỹ thuật
 ## Dự án: AI Music Studio (Hum-to-Music + Auto-Tune + DAW-lite)
 
-- **Phiên bản:** 1.2 (Complete Baseline + Infra & API Linked)
+- **Phiên bản:** 1.3 (Option B: Java 21 Spring Boot + React Vite + Python Audio-Worker + Redis)
 - **Liên kết:** [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md)
 - **Phạm vi:** Ứng dụng **Single-User Local App** (cá nhân, không phân quyền), tối ưu lưu trữ nhẹ ổ đĩa bằng Redis + MIDI JSON.
-- **Mục tiêu tài liệu:** Định nghĩa cách các AI Agent phối hợp với nhau, cấu trúc dữ liệu dùng chung (`Shared State`), cơ chế kết hợp **MIDI + Audio Clips**, kiến trúc lưu trữ nhẹ đĩa, và lộ trình triển khai từ MVP đến bản hoàn chỉnh.
+- **Mục tiêu tài liệu:** Định nghĩa cách các AI Agent phối hợp với nhau, cấu trúc dữ liệu dùng chung (`Shared State`), cơ chế kết hợp **MIDI + Audio Clips**, kiến trúc tách lớp Java Spring Boot + Python DSP Worker, kiến trúc lưu trữ nhẹ đĩa, và lộ trình triển khai từ MVP đến bản hoàn chỉnh.
 
 ---
 
 ## 1. Nguyên lý Thiết kế Cốt lõi: Hybrid LLM + DSP Architecture
 
-Trong bài toán âm nhạc, một LLM thuần túy không thể tự xử lý sóng âm (waveform) ở mức sample hay kéo cao độ giọng hát mượt mà. Vì vậy, hệ thống áp dụng mô hình **Hybrid Multi-Agent**:
-* **LLM Agents (Bộ não sáng tạo & điều phối):** Hiểu yêu cầu ngôn ngữ, lập kế hoạch cấu trúc bài hát, viết tiến trình hợp âm (chord progression), phát triển giai điệu tượng trưng (MIDI / Note JSON), chọn nhạc cụ, và kiểm tra chéo (QA) logic âm nhạc.
-* **DSP & Audio Engines (Công cụ thực thi âm thanh):** Các module xử lý tín hiệu số chuyên dụng (đóng vai trò **Tools** mà Agent gọi) để tách cao độ (Pitch Extraction), chỉnh phô (Auto-Tune), lượng tử hóa nhịp, tổng hợp MIDI thành Audio (SoundFont/VST/Audio Gen) và trộn đa track (Mixing/Export).
+Trong bài toán âm nhạc, một LLM thuần túy không thể tự xử lý sóng âm (waveform) ở mức sample hay kéo cao độ giọng hát mượt mà. Vì vậy, hệ thống áp dụng mô hình **Hybrid Multi-Agent** tách bạch 2 tầng thực thi:
+* **Core Orchestrator & LLM Agents (`Java 21 + Spring Boot 3.x`):** Tiếp nhận toàn bộ API/SSE từ Frontend, quản lý `Shared Project State` trên Redis, gọi Dual LLM (**Gemini + OpenAI**) để lập kế hoạch cấu trúc bài hát, viết tiến trình hợp âm (chord progression), phát triển giai điệu tượng trưng (MIDI / Note JSON), chọn nhạc cụ, và kiểm tra chéo (QA) logic âm nhạc.
+* **DSP & Audio Worker (`Python FastAPI` trong Docker + Pure-Java Fallback):** Microservice chuyên biệt đóng vai trò **Tools** mà Spring Boot gọi qua HTTP nội bộ (`AUDIO_WORKER_URL`) để tách nhiễu (`noisereduce`), trích xuất cao độ/BPM/Key (`librosa`), chỉnh phô (`Auto-Tune`), tổng hợp MIDI thành Audio (`FluidSynth` + SoundFont), và trộn đa track/Master Limiter (`pedalboard`/`FFmpeg`). Khi chạy cục bộ không bật Docker worker, Spring Boot có `JavaAudioFallbackService` đảm bảo hệ thống vẫn hoạt động trơn tru.
+
+```mermaid
+flowchart LR
+    FE["Frontend: React 19 + Vite + Web Audio + IndexedDB (:3000)"] -->|"HTTP /api/* & SSE"| BE["Core Backend: Java 21 + Spring Boot 3.x (:8000)"]
+    BE -->|"Spring Data Redis / In-Memory TTL"| Redis[("Redis 7-alpine (:6379)")]
+    BE -->|"HTTP /internal/audio/*"| Worker["Audio Worker: Python FastAPI DSP (:8001, Docker)"]
+    BE -->|"HTTPS (Dual LLM Adapter)"| LLM["Google Gemini API / OpenAI API"]
+```
 
 ---
 
@@ -22,76 +30,76 @@ Hệ thống kết hợp 3 mô hình: **Orchestrator** (điều phối trung tâ
 
 ```mermaid
 flowchart TD
-    User["User Audio & Request"] --> Orch["Orchestrator Agent (Dieu phoi & Cancel/Timeout)"]
-    Orch --> Analyzer["1. Audio Denoise & Analyzer Agent"]
-    Analyzer --> AT["2. Auto-Tune DSP Agent"]
-    AT --> Composer["3. Melody & Harmony Agent"]
+    User["User Audio & Request"] --> Orch["Orchestrator Agent (Java Spring Boot: Dieu phoi & Cancel/Timeout)"]
+    Orch -->|"HTTP -> audio-worker"| Analyzer["1. Audio Denoise & Analyzer Agent"]
+    Analyzer -->|"HTTP -> audio-worker"| AT["2. Auto-Tune DSP Agent"]
+    AT --> Composer["3. Melody & Harmony Agent (LLM)"]
     Composer --> Arranger["4. Arrangement Agent (Hybrid MIDI + Audio)"]
-    Composer --> Lyricist["5. Lyricist & AI Coach Agent"]
+    Composer --> Lyricist["5. Lyricist & AI Coach Agent (LLM)"]
     Arranger --> QA["6. Producer / QA & Mastering Agent"]
 
     QA -- "Loi hoa am / clipping (max 2 vong)" --> Composer
-    QA -- "Dat chuan hoac Best-effort Fallback" --> Render["On-Demand Audio & Auto-Master"]
+    QA -- "Dat chuan hoac Best-effort Fallback" --> Render["On-Demand Audio & Auto-Master (audio-worker)"]
     Render --> Orch
     Lyricist --> Orch
-    Orch --> Studio["Hybrid Music Studio UI"]
+    Orch -->|"SSE Events"| Studio["Hybrid Music Studio UI (React + Vite)"]
 ```
 
 ---
 
 ## 3. Vai trò & Đặc tả Chi tiết Từng Agent
 
-### 3.1. `Orchestrator Agent` (Nhạc trưởng / Điều phối viên)
+### 3.1. `Orchestrator Agent` (Nhạc trưởng / Điều phối viên — `AgentOrchestrator.java`)
 * **Vai trò:** Tiếp nhận yêu cầu từ người dùng (tạo mới toàn bộ, chuyển chế độ `Preserve`/`Enhance`, bật `Auto-Tune`, hỏi `AI Coach`, hoặc chỉ `Regenerate` 1 track) và kích hoạt đúng nhánh Agent cần thiết.
-* **Quản lý Timeout & Hủy (Cancel):** Áp đặt giới hạn **tối đa 60 giây** mỗi bước tạo nhạc, hỗ trợ hủy job ngay lập tức khi người dùng bấm Cancel và lưu trạng thái vào Redis.
+* **Quản lý Timeout & Hủy (Cancel):** Áp đặt giới hạn **tối đa 60 giây** mỗi bước tạo nhạc, hỗ trợ hủy job ngay lập tức khi người dùng bấm Cancel (`POST /api/jobs/{jobId}/cancel`), phát tiến trình qua SSE (`SseEmitter`) và lưu trạng thái vào Redis (hoặc In-Memory TTL fallback).
 
-### 3.2. `Audio Denoise & Analyzer Agent` (Tiền xử lý & Phân tích Âm thanh)
-* **Input:** Raw Audio (`WAV/MP3/...` từ Mic hoặc Upload).
-* **Tools sử dụng:**
-  * **AI Denoise / Vocal Isolation:** DeepFilterNet / RNNoise / Demucs (nhẹ) để tách tiếng ồn phòng hoặc nhạc nền lẫn vào, tạo bản `dry_denoised.wav` sạch nhưng giữ nguyên `raw_input.wav` cho việc đối chiếu.
-  * **Pitch & Rhythm Analyzer:** CREPE / pYIN / Basic-Pitch + librosa để bắt cao độ, BPM, Key/Scale.
-  * **AI Auto-Trim:** Phát hiện khoảng lặng thừa đầu/cuối và đề xuất điểm cắt khớp ô nhịp 1.
-* **Output cập nhật vào State:** `bpm`, `time_signature`, `detected_key`, `scale`, `raw_melody_notes`, `dry_denoised_url`.
+### 3.2. `Audio Denoise & Analyzer Agent` (Tiền xử lý & Phân tích Âm thanh — `audio-worker`)
+* **Input:** Raw Audio (`WAV/MP3/M4A/OGG/FLAC` từ Mic hoặc Upload).
+* **Tools sử dụng (tại `audio-worker` + fallback Java):**
+  * **AI Denoise / Vocal Isolation:** `noisereduce` / spectral gating để tách tiếng ồn phòng, tạo bản `dry_denoised.wav` sạch nhưng giữ nguyên `raw_input.wav` cho việc đối chiếu.
+  * **Pitch & Rhythm Analyzer:** `librosa` (`pyin` / beat tracking) để bắt cao độ, BPM (`40–220`), Key/Scale (`C..B`, `major`/`minor`) và `raw_melody_midi`.
+  * **AI Auto-Trim:** Phát hiện khoảng lặng thừa đầu/cuối và cắt gọn khớp ô nhịp.
+* **Output cập nhật vào State:** `bpm`, `time_signature`, `detected_key`, `detected_scale`, `raw_melody_midi`, `dry_denoised_ref`.
 
-### 3.3. `Auto-Tune DSP Agent` (Kỹ sư Chỉnh phô Giọng hát)
+### 3.3. `Auto-Tune DSP Agent` (Kỹ sư Chỉnh phô Giọng hát — `audio-worker`)
 * **Input:** `dry_denoised.wav` (hoặc `raw_input.wav`) + `detected_key` + Cấu hình Auto-Tune (`preset`, `retune_speed_ms`, `humanize`, `mix_percent`).
-* **Tools sử dụng:** Pitch-shifting & Formant-preserving DSP engine (WORLD Vocoder / PyTSMod / Rubberband).
+* **Tools sử dụng:** Pitch-shifting & resampling DSP (`librosa` / `scipy` tại `audio-worker`, kèm `key_to_pitch_class()` chuẩn hóa cả dấu thăng và giáng như `Eb`, `Ab`, `Bb`).
 * **Hoạt động:**
-  1. Nếu người dùng chọn chế độ **Nghe giọng mộc + Beat**: Bỏ qua Auto-Tune, đưa thẳng `dry_denoised.wav` vào mix để kiểm tra độ khớp tự nhiên.
-  2. Nếu bật Auto-Tune: Kéo nốt về `Scale` (hoặc theo hợp âm hiện tại) dựa trên `retune_speed_ms` và giữ độ rung theo `humanize`, bảo toàn formant giọng hát.
+  1. Nếu người dùng chọn chế độ **Nghe giọng mộc + Beat** (`off`): Bỏ qua Auto-Tune, đưa thẳng `dry_denoised.wav` vào mix để kiểm tra độ khớp tự nhiên.
+  2. Nếu bật Auto-Tune (`natural`, `balanced`, `modern`): Kéo nốt về `Scale` dựa trên `retune_speed_ms` (`0–200 ms`) và giữ độ rung theo `humanize`, bảo toàn tốc độ phát.
 
-### 3.4. `Melody & Harmony Agent` (Nhạc sĩ Sáng tác & Hòa âm)
-* **Input:** `raw_melody_notes`, `bpm`, `key`, `melody_mode` (`preserve` | `enhance`), `output_mode` (`accompaniment` | `full_song`), `motif_position` (`chorus` mặc định | `verse` | `auto`), `genre`, `mood`, `user_prompt`.
+### 3.4. `Melody & Harmony Agent` (`ComposerAgent.java`)
+* **Input:** `raw_melody_midi`, `bpm`, `key`, `melody_mode` (`preserve` | `enhance`), `output_mode` (`accompaniment` | `full_song`), `motif_position` (`chorus` mặc định | `verse` | `auto`), `genre`, `mood`, `user_prompt`.
 * **Nhiệm vụ theo chế độ:**
-  * `preserve`: Giữ nguyên `raw_melody_notes`, thiết kế `chord_progression` bám sát các nốt mạnh của giai điệu gốc.
+  * `preserve`: Giữ nguyên `raw_melody_midi`, thiết kế `chords` bám sát các nốt mạnh của giai điệu gốc.
   * `enhance`: Tinh chỉnh cao độ/tiết tấu mượt mà hơn nhưng giữ mô-típ nhận diện cốt lõi.
   * `full_song`: Mặc định đặt câu ngân nga làm điểm nhấn của **Chorus** (hoặc vị trí do người dùng/AI đề xuất), mở rộng thành cấu trúc `Intro – Verse – Chorus – Bridge – Outro`.
-* **Output:** `sections`, `chords_timeline`, `enhanced_melody_notes` (MIDI JSON).
+* **Output:** `sections`, `chords`, `lead` melody notes (MIDI JSON).
 
-### 3.5. `Arrangement Agent — Mô hình Hybrid (MIDI + Audio Clips)`
+### 3.5. `Arrangement Agent — Mô hình Hybrid (MIDI + Audio Clips)` (`ArrangerAgent.java`)
 Để người dùng vừa **sửa từng nốt trên Piano Roll**, vừa **cắt ghép/di chuyển đoạn âm thanh như một DAW thông thường**, hệ thống phối hợp 2 loại dữ liệu song song:
 
 1. **Symbolic MIDI Tracks (Cốt lõi — Drums, Bass, Harmony, Lead):**
-   * Agent sinh nốt MIDI theo từng đoạn bài hát và dùng **Sampler / SoundFont chất lượng cao** để phát tiếng nhạc cụ.
+   * Agent sinh nốt MIDI theo từng đoạn bài hát và dùng **Sampler / SoundFont (`FluidSynth` tại `audio-worker` + Web Audio synth trên trình duyệt)** để phát tiếng nhạc cụ.
    * *Ưu điểm:* Dung lượng cực nhẹ (chỉ vài KB JSON), sửa trực tiếp từng nốt trên Piano Roll, đổi nhạc cụ tức thì (Piano $\rightarrow$ Guitar), và tự cập nhật khi đổi hợp âm.
 2. **Audio Clip Tracks (Lớp bổ sung — Vocal, AI Texture/Audio Gen, Sample):**
    * Chứa bản thu Vocal/Hum và (tùy chọn) các lớp âm thanh tự nhiên/atmosphere sinh từ AI Audio hoặc sample cắt ghép.
-   * *Ưu điểm:* Trên Timeline Studio, người dùng thao tác **Split (cắt), Trim (kéo ngắn), Move (dịch thời gian), Fade In/Out, Loop** trên mọi clip (cả Audio Clip lẫn MIDI Clip) như các nền tảng làm nhạc phổ thông.
+   * *Ưu điểm:* Trên Timeline Studio, người dùng thao tác **Split (cắt), Trim (kéo ngắn), Move (dịch thời gian), Fade In/Out, Loop** trên mọi clip (cả Audio Clip lẫn MIDI Clip).
 
-### 3.6. `Lyricist & AI Music Coach Agent` (Viết lời & Tư vấn Sáng tác)
-* **Viết lời theo Beat:** Dựa vào `sections`, `bpm`, số nốt giai điệu và chủ đề/ngôn ngữ (Việt/Anh) để gợi ý lời bài hát khớp tiết tấu, hoặc hỗ trợ người dùng tự viết lời vào **Lyric Pad** ngay trên nền beat đang phát.
+### 3.6. `Lyricist & AI Music Coach Agent` (`CoachLyricistAgent.java`)
+* **Viết lời theo Beat:** Dựa vào `sections`, `bpm`, số nốt giai điệu và chủ đề/ngôn ngữ (`vi`/`en`/`bilingual`) để gợi ý lời bài hát khớp tiết tấu, hoặc hỗ trợ người dùng tự viết lời vào **Lyric Pad** ngay trên nền beat đang phát.
 * **AI Music Coach (Hỏi đáp hướng dẫn):** Đọc toàn bộ ngữ cảnh dự án hiện tại để trả lời câu hỏi của người dùng (VD: *"Nên đặt câu ngân nga ở Chorus hay Verse?"*, *"Sửa đoạn chuyển hợp âm này cho buồn hơn?"*). Không tự ý ghi đè bài nhạc khi chưa có xác nhận của người dùng.
 
-### 3.7. `Producer / QA & Auto-Mastering Agent` (Kiểm duyệt & Chống vỡ tiếng)
+### 3.7. `Producer / QA & Auto-Mastering Agent` (`QaReviewerAgent.java` + `audio-worker`)
 * **Kiểm duyệt Hòa âm (Maker–Checker):**
   * Kiểm tra tỷ lệ nốt khớp Key/Scale, dải tần Bass không đè Vocal, độ khớp độ dài các track, và đường cong năng lượng giữa `Verse` và `Chorus`.
   * Nếu lỗi nghiêm trọng $\rightarrow$ yêu cầu `Composer/Arranger` sửa lại (tối đa **2 vòng lặp**; nếu quá 2 vòng vẫn chưa hoàn hảo $\rightarrow$ trả về **Best-effort Fallback** kèm cảnh báo nhẹ).
 * **AI Auto-Mix & Anti-Clipping:**
   * Tính toán tự động mức Gain từng track, nén/lách tần số nhẹ để giọng mộc/Auto-Tune không bị nhạc nền át.
-  * Áp dụng **Master Limiter** giữ đỉnh tín hiệu đầu ra $\le -1.0\text{ dBFS}$ (`-14 LUFS`) và cảnh báo nếu người dùng chỉnh tay gây nguy cơ vỡ tiếng.
+  * Áp dụng **Master Limiter** (`pedalboard` / FFmpeg tại `audio-worker`, hoặc `JavaAudioFallbackService`) giữ đỉnh tín hiệu đầu ra $\le -1.0\text{ dBFS}$ (`-14 LUFS`) và cảnh báo nếu người dùng chỉnh tay gây nguy cơ vỡ tiếng.
 * **Vocal Overdub & AI Fit Check (Kiểm tra bản thu đè lên Beat):**
-  * Khi người dùng thu hát đè trực tiếp lên nền Beat đang phát (có bù trễ mic), Agent kết hợp cùng `Audio Analyzer` đo độ lệch nhịp (`timing offset ms`), độ phô cao độ so với Key/Hợp âm tại ô nhịp đó và cân bằng âm lượng.
-  * Trả về danh sách **Đề xuất chỉnh sửa kèm 1-Click Fix** (VD: dịch vị trí clip `±ms`, bật Auto-Tune sửa nốt cuối câu, hoặc cân Gain/EQ).
+  * Khi người dùng thu hát đè trực tiếp lên nền Beat đang phát (có bù trễ mic), Spring Boot gọi `POST /internal/audio/overdub-fit-check` trên `audio-worker` đo độ lệch nhịp (`timing_offset_ms`), độ phô cao độ (`pitch_issues`) và cân bằng âm lượng.
+  * Trả về danh sách **Đề xuất chỉnh sửa kèm 1-Click Fix** (VD: dịch vị trí clip `±ms`, bật Auto-Tune sửa nốt cuối câu, hoặc cân Gain).
 
 ---
 
@@ -101,12 +109,12 @@ flowchart TD
 Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn chế** nhưng vẫn phải đảm bảo **quên bấm Save mở lại vẫn còn**:
 
 1. **Tầng 1 — Browser `IndexedDB` Auto-Save (Chống quên lưu):**
-   * Frontend tự động lưu ngầm mỗi **5–10 giây** (hoặc ngay sau mỗi thao tác sửa/thu) toàn bộ `ProjectState` JSON và bản thu âm nén nhẹ (`OPUS/FLAC` chỉ ~200 KB–1 MB) vào `IndexedDB` của trình duyệt.
-   * Áp dụng cơ chế **Rolling Cap (giữ tối đa 3–5 dự án gần nhất)** để tránh phình dung lượng. Khi bạn tắt web hay tắt máy mà quên lưu, lần sau mở web lại sẽ hiện hộp thoại **"Khôi phục dự án gần nhất"** và đồng bộ ngược lại vào Redis!
-2. **Tầng 2 — Redis (In-Memory + TTL tự hết hạn):**
-   * Lưu `ProjectState`, lịch sử Undo (15–20 bước), Job Queue của Multi-Agent và cache preview nóng trong RAM với tốc độ mili-giây.
+   * Frontend tự động lưu ngầm mỗi **5–10 giây** (hoặc ngay sau mỗi thao tác sửa/thu) toàn bộ `ProjectState` JSON và bản thu âm vào `IndexedDB` của trình duyệt.
+   * Áp dụng cơ chế **Rolling Cap (giữ tối đa 5 dự án gần nhất)** để tránh phình dung lượng. Khi tắt web mở lại sẽ hiện hộp thoại **"Khôi phục dự án gần nhất"** và đồng bộ ngược lại vào Spring Boot / Redis (`PUT /api/projects/{id}/sync`).
+2. **Tầng 2 — Redis (In-Memory + TTL tự hết hạn) + In-Memory Fallback:**
+   * Spring Boot lưu `ProjectState`, lịch sử Undo (tối đa 20 bước), Job status và cache audio bytes tạm trong Redis (`Spring Data Redis`) với TTL tự dọn; tự động fallback về `ConcurrentHashMap` TTL nếu Redis chưa chạy.
 3. **File Dự án Di động `.aimusic` + MIDI-First:**
-   * Các track nhạc cụ lưu thuần túy dưới dạng **MIDI JSON (vài KB)**, render audio theo nhu cầu. Khi cần cất giữ lâu dài, bấm **Save `.aimusic`** để xuất 1 file gọn nhẹ (`1–3 MB`), không lưu hàng loạt WAV stems rác trên ổ cứng.
+   * Các track nhạc cụ lưu thuần túy dưới dạng **MIDI JSON (vài KB)**, render audio theo nhu cầu. Khi cần cất giữ lâu dài, bấm **Save `.aimusic`** để Spring Boot xuất 1 gói ZIP gọn nhẹ (`manifest.json`, `project.json`, `audio/*`), không lưu hàng loạt WAV stems rác trên ổ cứng.
 
 ### 4.2. Schema `Shared Project State`
 
@@ -115,6 +123,7 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
   "project_id": "proj_20261117_001",
   "version": 3,
   "config": {
+    "title": "Untitled Project",
     "melody_mode": "enhance",
     "output_mode": "full_song",
     "motif_position": "chorus",
@@ -123,7 +132,7 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
     "user_prompt": "Thêm tiếng piano nhẹ ở Intro và bùng nổ ở Chorus"
   },
   "audio_assets": {
-    "raw_input_ref": "mem://raw/input.flac",
+    "raw_input_ref": "mem://raw/input.wav",
     "dry_denoised_ref": "mem://processed/dry_denoised.wav",
     "tuned_vocal_ref": "mem://processed/vocal_autotuned.wav"
   },
@@ -133,7 +142,7 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
     "detected_key": "C",
     "detected_scale": "major",
     "raw_melody_midi": [
-      { "pitch": 60, "start_beat": 0.0, "duration": 1.0, "velocity": 85 }
+      { "pitch": 60, "start_beat": 0.0, "duration": 1.0, "velocity": 85, "confidence": 0.9 }
     ]
   },
   "autotune_settings": {
@@ -196,28 +205,26 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
 
 Để hỗ trợ yêu cầu Studio nâng cao (`FR-STU-07`, `FR-STU-08` và `FR-STU-11`), kiến trúc hỗ trợ 5 mức chạy lại mà không phá hỏng công sức chỉnh sửa của người dùng:
 
-1. **Đổi thông số Denoise / Auto-Tune / Nghe giọng mộc:** Chỉ chạy lại `Auto-Tune DSP Agent` hoặc đổi source về `dry_denoised_ref` $\rightarrow$ cập nhật mixer tức thì.
+1. **Đổi thông số Denoise / Auto-Tune / Nghe giọng mộc:** Chỉ gọi lại `audio-worker` (`/internal/audio/autotune` hoặc `/denoise`) hoặc đổi source về `dry_denoised_ref` $\rightarrow$ cập nhật mixer tức thì.
 2. **Cắt ghép / Kéo dịch Clip trên Timeline:** Cập nhật mảng `clips` trong State (không cần gọi LLM, hỗ trợ Undo ngay qua Redis & IndexedDB).
-3. **Thu đè lên Beat (Overdubbing) & AI Fit Check:** Ghi clip mới vào track Vocal (bù trễ mic) $\rightarrow$ chạy `Analyzer + Producer/Coach` trả về đề xuất chỉnh nhịp/cao độ/Gain $\rightarrow$ áp dụng các đề xuất người dùng bấm chọn.
-4. **Bấm Regenerate riêng 1 Track (VD: Bass):** `Orchestrator` khóa toàn bộ `sections`, `chords` và các track khác, chỉ gửi ngữ cảnh hiện tại cho `Arrangement Agent` sinh lại track `bass` $\rightarrow$ `QA Agent` kiểm tra khớp nhịp/hợp âm với các track đang khóa.
+3. **Thu đè lên Beat (Overdubbing) & AI Fit Check:** Ghi clip mới vào track Vocal (bù trễ mic) $\rightarrow$ chạy `Overdub Fit Check` trả về đề xuất chỉnh nhịp/cao độ/Gain $\rightarrow$ áp dụng các đề xuất người dùng bấm chọn.
+4. **Bấm Regenerate riêng 1 Track (VD: Bass):** `AgentOrchestrator` khóa toàn bộ `sections`, `chords` và các track khác, chỉ gửi ngữ cảnh hiện tại cho `ArrangerAgent` sinh lại track `bass` $\rightarrow$ `QaReviewerAgent` kiểm tra khớp nhịp/hợp âm với các track đang khóa.
 5. **Sửa Hợp âm trên Timeline / Sửa Nốt trên Piano Roll:**
    * Nếu sửa nốt trên Piano Roll: Cập nhật trực tiếp `tracks[x].notes` (không cần gọi LLM).
-   * Nếu sửa Hợp âm và bấm *Re-arrange*: Gọi `Arrangement Agent` cập nhật lại `bass` & `harmony` bám theo hợp âm mới (giữ nguyên các track đã bật `locked: true`).
+   * Nếu sửa Hợp âm và bấm *Re-arrange*: Gọi `ArrangerAgent` cập nhật lại `bass` & `harmony` bám theo hợp âm mới (giữ nguyên các track đã bật `locked: true`).
 
 ---
 
-## 6. Đề xuất Tech Stack & Dual LLM Provider (Gemini + OpenAI)
+## 6. Tech Stack & Dual LLM Provider (Option B)
 
-| Tầng hệ thống | Công nghệ đề xuất | Lý do lựa chọn |
+| Tầng hệ thống | Công nghệ sử dụng | Lý do lựa chọn |
 | :--- | :--- | :--- |
-| **Tầng chạy & Đóng gói (Infra)** | **Node.js v24** (Frontend) + **Docker Compose** (`FastAPI` + `redis:7-alpine`) | Máy đã có sẵn Node & Docker; chạy Backend Python DSP, FFmpeg, FluidSynth và Redis trong Docker giúp không cần cài rác lên ổ `C:`, dễ dọn dẹp và cô lập thư viện. |
-| **Frontend (Studio & UI)** | **Next.js / React + TypeScript** + **Web Audio API / Tone.js** + **`IndexedDB`** | Ghi âm mic, thu đè (Overdub), phát đa track đồng bộ, Timeline cắt ghép clip, Piano Roll và **Auto-Save ngầm chống mất bài khi quên lưu**. |
-| **Backend API & Realtime** | **Python (FastAPI)** + **WebSocket / SSE** | Hệ sinh thái xử lý âm thanh và AI trên Python mạnh nhất; đẩy tiến trình từng Agent & hỗ trợ nút Cancel job ngay lập tức. |
-| **State, Undo & Cache** | **Redis** (kèm TTL tự dọn) | Lưu `ProjectState`, Undo snapshots và Job Queue trong RAM cực nhanh, giải quyết bài toán không làm phình ổ cứng. |
-| **LLM Providers (Cloud API)** | **Google Gemini API** + **OpenAI API** (qua Adapter thống nhất) | Không tốn GB ổ đĩa chứa model local; linh hoạt chọn hoặc kết hợp Gemini (ngữ cảnh rộng, viết lời Việt tốt) và OpenAI (JSON có cấu trúc, điều phối). |
-| **Multi-Agent Orchestration** | **LangGraph** (hoặc Custom State Machine + `google-genai` / `openai` SDK) | Kiểm soát chặt `ProjectState`, hỗ trợ rẽ nhánh (`Preserve`/`Enhance`, tái tạo 1 track, AI Coach) và vòng lặp `QA Reviewer` có timeout 60s. |
-| **Denoise, Analysis & Auto-Tune DSP** | `DeepFilterNet` / `noisereduce` (Denoise), `librosa` + `basic-pitch`/`crepe` (Pitch-to-MIDI), `pyworld` / `rubberband` (Auto-Tune) | Chạy ổn định trên máy cá nhân, lọc nhiễu tốt và giữ formant giọng hát tự nhiên. |
-| **Rendering, Mastering & Export** | `FluidSynth` + SoundFont (`.sf2`), `pedalboard` (Spotify DSP: EQ/Compressor/Limiter), `ffmpeg`, `mido` / `pretty_midi` | Render MIDI nhẹ, áp dụng Anti-Clipping Limiter (`<= -1.0 dBFS`), xuất `.aimusic`, `WAV/MP3/Stems/MIDI`. |
+| **Tầng chạy & Đóng gói (Infra)** | **Node.js v24** (Vite Frontend) + **Java 21 / Maven 3.9+** (Spring Boot) + **Docker Compose** (`redis:7-alpine`, `audio-worker`, `backend`) | Tách bạch API/Orchestrator mạnh mẽ trên JVM khỏi Python Audio DSP trong Docker; dễ chạy local (`mvn spring-boot:run`) hoặc trọn bộ container. |
+| **Frontend (Studio & UI)** | **React 19 + Vite + TypeScript + Tailwind CSS + `react-router-dom`** + **Web Audio API** + **`IndexedDB`** | Khởi động/build siêu nhanh với Vite, proxy `/api` $\rightarrow$ `:8000`, ghi âm mic WAV PCM, phát đa track đồng bộ và **Auto-Save ngầm chống mất bài**. |
+| **Core Backend & Multi-Agent** | **Java 21 + Spring Boot 3.x** (`Web`, `SseEmitter`, `Spring Data Redis`, `java.net.http.HttpClient`, `javax.sound.midi`) | Quản lý hợp đồng API, điều phối 6 Agent song song/tuần tự (timeout 60s, cancel token, max 2 vòng QA), đóng gói `.mid`/`.aimusic` và cung cấp Pure-Java Audio Fallback. |
+| **Audio DSP Microservice (`audio-worker`)** | **Python FastAPI (`uvicorn`)** trong Docker (`noisereduce`, `librosa`, `pedalboard`, `mido`, `soundfile`, `pydub`, `scipy`, `FluidSynth`, `FFmpeg`) | Thư viện DSP & MIDI audio tốt nhất trên Python, đóng gói gọn nhẹ (không cài PyTorch/TensorFlow nặng máy). |
+| **State, Undo & Cache** | **Redis (`redis:7-alpine`)** kèm TTL tự dọn + `ConcurrentHashMap` TTL fallback | Lưu `ProjectState`, Undo snapshots (20 bước) và Job state trong RAM cực nhanh, giải quyết bài toán không làm phình ổ cứng. |
+| **LLM Providers (Cloud API)** | **Google Gemini API** + **OpenAI API** + **Deterministic Mock** (qua `LlmAdapter.java`) | Không tốn GB ổ đĩa chứa model local; linh hoạt chọn hoặc kết hợp Gemini và OpenAI qua `.env` hoặc HTTP headers từ Settings UI. |
 
 ---
 
@@ -227,36 +234,34 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
 
 1. **Cách lấy Gemini API Key (Google AI Studio):**
    * Truy cập **Google AI Studio**: `https://aistudio.google.com/` và đăng nhập bằng tài khoản Google.
-   * Chọn mục **Get API key** $\rightarrow$ bấm **Create API key** (chọn dự án Google Cloud có sẵn hoặc tạo mới).
-   * Sao chép key (dạng `AIza...`). Lưu ý: Gemini có gói Free Tier để thử nghiệm trước, khi chạy nhiều có thể bật Billing (Pay-as-you-go).
+   * Chọn mục **Get API key** $\rightarrow$ bấm **Create API key**.
+   * Sao chép key (dạng `AIza...`).
 2. **Cách lấy OpenAI API Key (OpenAI Platform):**
    * Truy cập **OpenAI Platform**: `https://platform.openai.com/` và đăng nhập.
-   * Vào mục **Dashboard $\rightarrow$ API keys** (hoặc Settings $\rightarrow$ API keys) $\rightarrow$ bấm **Create new secret key**.
-   * Đặt tên key, sao chép ngay key (dạng `sk-...`) vì OpenAI chỉ hiển thị một lần.
-   * Vào **Settings $\rightarrow$ Billing** để nạp credit tối thiểu (OpenAI API tính phí tách biệt với gói ChatGPT Plus).
+   * Vào mục **Dashboard $\rightarrow$ API keys** $\rightarrow$ bấm **Create new secret key** (`sk-...`).
 3. **Cách gắn vào dự án an toàn:**
-   * Tạo file `.env` ở thư mục gốc dự án (và đưa `.env` vào `.gitignore` để không bao giờ lộ key):
+   * Tạo file `.env` ở thư mục gốc dự án từ `.env.example` (đã có trong `.gitignore` để không bao giờ lộ key):
      ```env
      GEMINI_API_KEY=your_gemini_api_key_here
      OPENAI_API_KEY=your_openai_api_key_here
-     DEFAULT_LLM_PROVIDER=gemini   # hoặc openai
+     DEFAULT_LLM_PROVIDER=gemini
+     REDIS_URL=redis://localhost:6379
+     AUDIO_WORKER_URL=http://localhost:8001
      ```
-   * Trong giao diện Settings của ứng dụng cũng có thể cho phép chọn nhà cung cấp mặc định hoặc phân vai (VD: `Lyricist` dùng Gemini, `QA/Composer` dùng OpenAI hoặc Gemini).
+   * Trong giao diện `/settings` của ứng dụng cũng cho phép nhập key (lưu local trên trình duyệt và gửi qua `X-Gemini-Api-Key`, `X-OpenAI-Api-Key`, `X-LLM-Provider` headers) mà không cần restart Backend.
 
 ---
 
 ## 8. Lộ trình Triển khai Đề xuất (Phased Roadmap)
 
-Để kiểm soát rủi ro kỹ thuật và sớm có sản phẩm chạy thử, dự án nên triển khai theo **3 giai đoạn**:
-
 * **Phase 1 — MVP Core Pipeline:**
-  * Single-User Local App + Dual LLM Adapter (Gemini / OpenAI) + Auto-Save `IndexedDB` + Redis State/TTL.
-  * Record/Upload $\rightarrow$ `AI Denoise` + `Audio Analyzer Agent` (BPM, Key, Pitch) + nghe **Giọng mộc (Dry Check)**.
-  * `Auto-Tune Agent` (Quick Presets) + `Hum-to-Music` (*Preserve* + *Accompaniment Only*).
-  * Quick Preview (so sánh Giọng mộc + Beat / Auto-Tune / AI Mix) + Auto-Limiter + Tải MP3/WAV.
+  * Single-User Local App + Dual LLM Adapter (Gemini / OpenAI / Mock) + Auto-Save `IndexedDB` + Redis State/TTL.
+  * Record/Upload $\rightarrow$ `AI Denoise` + `Audio Analyzer` (BPM, Key, Pitch) + nghe **Giọng mộc (Dry Check)**.
+  * `Auto-Tune` (Quick Presets) + `Hum-to-Music` (*Preserve* + *Accompaniment Only*).
+  * Quick Preview (so sánh Giọng mộc + Beat / Auto-Tune / AI Mix) + Auto-Limiter ($\le -1.0\text{ dBFS}$) + Export WAV/MP3/MIDI/`.aimusic`.
 * **Phase 2 — Full Song, Hybrid Clips, Overdub & Lyric/Coach:**
-  * Bổ sung *AI Enhance Melody*, *Full Song Structure* (mặc định đặt mô-típ tại Chorus) + `Lyricist & AI Coach Agent`.
-  * Hybrid Studio: Multi-Track Mixer (`M/S`, `Lock`, `Volume`, `Pan`), cắt ghép/kéo dịch clip (`Split/Trim/Move`), **Thu đè Overdub + AI Fit Check**, Regenerate từng track, xuất Stems & `.aimusic`.
+  * *AI Enhance Melody*, *Full Song Structure* (mặc định đặt mô-típ tại Chorus) + `Lyricist & AI Coach Agent`.
+  * Hybrid Studio: Multi-Track Mixer (`M/S`, `Lock`, `Volume`, `Pan`), cắt ghép/kéo dịch clip (`Split/Trim/Move`), **Thu đè Overdub + AI Fit Check**, Regenerate từng track, xuất Stems.
   * `Producer / QA Agent` kiểm tra hòa âm tự động (max 2 vòng + Best-effort Fallback).
 * **Phase 3 — Pro DAW-lite & Auto-Tune Chuyên sâu:**
   * Giao diện **Piano Roll** chỉnh nốt MIDI trực tiếp, **Chord Timeline** cho phép sửa hợp âm từng ô nhịp.

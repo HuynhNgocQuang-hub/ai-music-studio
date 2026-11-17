@@ -1,12 +1,13 @@
-"""Phase 1 MVP End-to-End & Contract Verification Suite for AI Music Studio.
+"""Phase 1 MVP End-to-End & Contract Verification Suite for AI Music Studio (Option B).
 
-Validates backend API contracts, DSP constraints, Multi-Agent SSE job lifecycle,
-Master Limiter ceiling (<= -1.0 dBFS), Redis/In-Memory project pagination, and
-Frontend <-> Backend schema parity against docs/API_AND_UI_SPEC.md and docs/SRS.md.
+Validates Spring Boot backend API contracts, DSP constraints, Multi-Agent SSE job
+lifecycle, Master Limiter ceiling (<= -1.0 dBFS), Redis/In-Memory project pagination,
+and Frontend <-> Spring Boot <-> Audio Worker contract parity against
+docs/API_AND_UI_SPEC.md and docs/SRS.md.
 
 Execution modes:
-1. Live server mode: set E2E_BASE_URL=http://localhost:8000
-2. In-process FastAPI TestClient mode (default when E2E_BASE_URL is unset)
+1. Live server mode: set E2E_BASE_URL=http://localhost:8000 (Spring Boot + audio-worker)
+2. Static contract parity test runs standalone without a live server.
 """
 
 from __future__ import annotations
@@ -26,8 +27,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = REPO_ROOT / "backend"
+BACKEND_CONTROLLERS_DIR = BACKEND_DIR / "src" / "main" / "java" / "com" / "aimusic" / "studio" / "controller"
+AUDIO_WORKER_CLIENT_PATH = BACKEND_DIR / "src" / "main" / "java" / "com" / "aimusic" / "studio" / "audio" / "AudioWorkerClient.java"
+AUDIO_WORKER_MAIN_PATH = REPO_ROOT / "audio-worker" / "app" / "main.py"
 FRONTEND_CLIENT_PATH = REPO_ROOT / "frontend" / "src" / "lib" / "api" / "client.ts"
-BACKEND_API_DIR = BACKEND_DIR / "app" / "api"
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "").strip().rstrip("/")
 
@@ -160,24 +163,16 @@ def parse_sse_events(raw_text: str) -> list[dict[str, Any]]:
 
 @pytest.fixture(scope="module")
 def api_client():
-    """Return an httpx/TestClient-compatible client for the backend API."""
-    if BASE_URL:
-        import httpx
+    """Return an httpx client for the live Spring Boot backend (when E2E_BASE_URL is set)."""
+    if not BASE_URL:
+        pytest.skip(
+            "E2E_BASE_URL is unset; Spring Boot API/MockMvc tests run via 'mvn test' in backend/ "
+            "and audio-worker DSP tests run via 'pytest tests/test_worker.py' in audio-worker/."
+        )
 
-        with httpx.Client(base_url=BASE_URL, timeout=90.0) as client:
-            yield client
-        return
+    import httpx
 
-    if not (BACKEND_DIR / "app" / "main.py").exists():
-        pytest.skip("Backend app/main.py not present yet and E2E_BASE_URL is unset")
-
-    if str(BACKEND_DIR) not in sys.path:
-        sys.path.insert(0, str(BACKEND_DIR))
-
-    from fastapi.testclient import TestClient
-    from app.main import app  # type: ignore[import-not-found]
-
-    with TestClient(app) as client:
+    with httpx.Client(base_url=BASE_URL, timeout=90.0) as client:
         yield client
 
 
@@ -520,22 +515,24 @@ def test_projects_sync_and_pagination(api_client):
 
 
 def test_frontend_backend_api_contract_parity():
-    """Verify required Phase 1 API routes exist in both backend/app/api and frontend client."""
-    if not BACKEND_API_DIR.exists() or not FRONTEND_CLIENT_PATH.exists():
-        pytest.skip("Backend API dir or frontend client.ts not present yet")
+    """Verify required Phase 1 API routes exist across frontend client, Spring Boot controllers, and audio-worker."""
+    if not BACKEND_CONTROLLERS_DIR.exists() or not FRONTEND_CLIENT_PATH.exists():
+        pytest.skip("Spring Boot controllers dir or frontend client.ts not present yet")
 
     backend_source = "\n".join(
-        p.read_text(encoding="utf-8") for p in sorted(BACKEND_API_DIR.glob("*.py"))
+        p.read_text(encoding="utf-8") for p in sorted(BACKEND_CONTROLLERS_DIR.glob("*.java"))
     )
     frontend_source = FRONTEND_CLIENT_PATH.read_text(encoding="utf-8")
 
-    # Normalize {job_id} / ${jobId} / {id} path params for parity comparison
+    # Normalize {jobId} / ${jobId} / {id} path params for parity comparison
     required_endpoints = [
         "/api/health",
         "/api/audio/upload",
         "/api/audio/denoise",
         "/api/audio/analyze",
         "/api/audio/autotune",
+        "/api/audio/asset",
+        "/api/audio/preview",
         "/api/jobs/generate",
         "/api/jobs/regenerate-track",
         "/api/jobs/rearrange",
@@ -545,12 +542,15 @@ def test_frontend_backend_api_contract_parity():
         "/api/lyrics/suggest",
         "/api/coach/chat",
         "/api/projects",
+        "/api/projects/{id}",
         "/api/projects/{id}/sync",
+        "/api/projects/{id}/export/aimusic",
+        "/api/projects/import",
         "/api/projects/{id}/export/audio",
+        "/api/projects/{id}/export/midi",
     ]
 
     def normalize_paths(text: str) -> str:
-        # Replace ${varName} or {param_name} path params without matching code blocks
         text = re.sub(r"\$\{[a-zA-Z0-9_.()]+\}", "{id}", text)
         text = re.sub(r"\{[a-zA-Z0-9_]+\}", "{id}", text)
         return text
@@ -558,14 +558,12 @@ def test_frontend_backend_api_contract_parity():
     norm_backend = normalize_paths(backend_source)
     norm_frontend = normalize_paths(frontend_source)
 
-    # Backend routers typically use prefix="/api/audio" + "/upload" or full "/api/audio/upload"
     missing_frontend: list[str] = []
     missing_backend: list[str] = []
 
     for ep in required_endpoints:
         if ep not in norm_frontend:
             missing_frontend.append(ep)
-        # Check either full path or prefix + subroute presence in backend
         prefix, _, tail = ep.rpartition("/")
         has_full = ep in norm_backend
         has_split = (prefix in norm_backend) and (f"/{tail}" in norm_backend or ep.endswith("/projects"))
@@ -573,10 +571,16 @@ def test_frontend_backend_api_contract_parity():
             has_split = "/api/jobs" in norm_backend and "/{id}/events" in norm_backend
         elif ep == "/api/jobs/{id}/cancel":
             has_split = "/api/jobs" in norm_backend and "/{id}/cancel" in norm_backend
+        elif ep == "/api/projects/{id}":
+            has_split = "/api/projects" in norm_backend and "/{id}" in norm_backend
         elif ep == "/api/projects/{id}/sync":
             has_split = "/api/projects" in norm_backend and "/{id}/sync" in norm_backend
+        elif ep == "/api/projects/{id}/export/aimusic":
+            has_split = "/api/projects" in norm_backend and "/{id}/export/aimusic" in norm_backend
         elif ep == "/api/projects/{id}/export/audio":
             has_split = "/api/projects" in norm_backend and "/{id}/export/audio" in norm_backend
+        elif ep == "/api/projects/{id}/export/midi":
+            has_split = "/api/projects" in norm_backend and "/{id}/export/midi" in norm_backend
 
         if not (has_full or has_split):
             missing_backend.append(ep)
@@ -585,13 +589,27 @@ def test_frontend_backend_api_contract_parity():
         f"Endpoints missing from frontend/src/lib/api/client.ts: {missing_frontend}"
     )
     assert not missing_backend, (
-        f"Endpoints missing from backend/app/api/*.py: {missing_backend}"
+        f"Endpoints missing from Spring Boot controllers: {missing_backend}"
     )
 
-    # Verify asset playback route parity (/api/audio/asset vs stale /api/audio/stream)
     assert "/api/audio/asset" in frontend_source, (
-        "frontend/src/lib/api/client.ts resolveAudioUrl must target /api/audio/asset to match backend/app/api/audio.py"
+        "frontend/src/lib/api/client.ts resolveAudioUrl must target /api/audio/asset"
     )
     assert "/api/audio/stream" not in frontend_source, (
         "frontend/src/lib/api/client.ts still references non-existent /api/audio/stream"
     )
+
+    if AUDIO_WORKER_CLIENT_PATH.exists() and AUDIO_WORKER_MAIN_PATH.exists():
+        aw_client = AUDIO_WORKER_CLIENT_PATH.read_text(encoding="utf-8")
+        aw_main = AUDIO_WORKER_MAIN_PATH.read_text(encoding="utf-8")
+        internal_routes = [
+            "/health",
+            "/internal/audio/denoise",
+            "/internal/audio/analyze",
+            "/internal/audio/autotune",
+            "/internal/audio/export",
+            "/internal/audio/overdub-fit-check",
+        ]
+        for route in internal_routes:
+            assert route in aw_client, f"Missing worker call {route} in AudioWorkerClient.java"
+            assert route in aw_main, f"Missing worker endpoint {route} in audio-worker/app/main.py"

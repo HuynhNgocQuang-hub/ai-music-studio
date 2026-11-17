@@ -1,6 +1,6 @@
 # Phase 1 E2E & Contract Verification (`tests/e2e/`)
 
-Automated integration and contract verification suite for **AI Music Studio — Phase 1 (MVP)**, aligned with:
+Automated integration and contract verification suite for **AI Music Studio — Phase 1 (Option B)**, aligned with:
 - [`docs/SRS.md`](../../docs/SRS.md)
 - [`docs/MULTI_AGENT_ARCHITECTURE.md`](../../docs/MULTI_AGENT_ARCHITECTURE.md)
 - [`docs/API_AND_UI_SPEC.md`](../../docs/API_AND_UI_SPEC.md)
@@ -18,24 +18,30 @@ Automated integration and contract verification suite for **AI Music Studio — 
 | `test_job_cancel_endpoint` | `POST /api/jobs/{job_id}/cancel` returns `{"status": "cancelled"}` |
 | `test_export_wav_respects_master_limiter_minus_1_dbfs` | `POST /api/projects/{id}/export/audio` (`wav` & `mp3`, `apply_mastering=true`) enforces Master Limiter peak `<= -1.0 dBFS` |
 | `test_projects_sync_and_pagination` | `PUT /api/projects/{id}/sync` + `GET /api/projects?page=&limit=&search=&genre=` returns `{items, total, page, total_pages}` |
-| `test_frontend_backend_api_contract_parity` | Static parity check between `frontend/src/lib/api/client.ts` and `backend/app/api/*.py` against `docs/API_AND_UI_SPEC.md` |
+| `test_frontend_backend_api_contract_parity` | Static parity check across `frontend/src/lib/api/client.ts`, Spring Boot `controller/*.java`, `AudioWorkerClient.java`, and `audio-worker/app/main.py` |
 
 ## Running the Suite
 
-### Option 1 — Inside Docker / Backend Container (In-Process `TestClient`)
+### 1. Component Test Suites (No Running Server Required)
 
 ```bash
-docker compose run --rm backend pytest /app/../tests/e2e/test_phase1_e2e.py -v
+# Spring Boot Backend (MockMvc, Multi-Agent QA loop/fallback, Audio fallback & Master Limiter)
+cd backend && mvn test
+
+# Python Audio Worker (inside Docker image)
+docker build -t ai-music-audio-worker-test ./audio-worker
+docker run --rm ai-music-audio-worker-test pytest -v tests/test_worker.py
+
+# React Vite Frontend (TypeScript + Production Bundle)
+cd frontend && npm install && npx tsc --noEmit && npm run build
+
+# Static Contract Parity Test via audio-worker container
+docker run --rm -v "${PWD}:/workspace" ai-music-audio-worker-test pytest /workspace/tests/e2e/test_phase1_e2e.py -k test_frontend_backend_api_contract_parity -v
 ```
 
-Or when running inside the repo root with Python + backend dependencies installed:
+### 2. Live E2E Against a Running `docker compose up` Stack
 
 ```bash
-pytest tests/e2e/test_phase1_e2e.py -v
-```
-
-### Option 2 — Against a Running `docker compose up` Stack
-
-```bash
+docker compose up --build -d
 E2E_BASE_URL=http://localhost:8000 pytest tests/e2e/test_phase1_e2e.py -v
 ```
