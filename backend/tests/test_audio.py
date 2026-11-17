@@ -28,7 +28,7 @@ from app.core.schemas import (
     create_default_project,
 )
 from app.main import app
-from app.services.audio.autotune import apply_autotune, apply_preset
+from app.services.audio.autotune import apply_autotune, apply_preset, key_to_pitch_class, nearest_scale_midi
 from app.services.audio.denoise import (
     AudioValidationError,
     decode_wav_bytes,
@@ -173,6 +173,17 @@ def test_autotune_preserves_length_unit() -> None:
     tuned, tuned_sr = decode_wav_bytes(tuned_wav)
     assert tuned_sr == sr
     assert len(tuned) == len(orig)
+
+
+def test_autotune_flat_and_enharmonic_keys() -> None:
+    assert key_to_pitch_class("Eb") == 3
+    assert key_to_pitch_class("Ab") == 8
+    assert key_to_pitch_class("Bb") == 10
+    assert key_to_pitch_class("Db") == 1
+    assert key_to_pitch_class("Gb") == 6
+    # In Eb major (Eb=63, F=65, G=67, Ab=68, Bb=70, C=72, D=74), 63.1 snaps to 63 (Eb4), not 64 (E4)
+    assert nearest_scale_midi(63.1, "Eb", "major") == 63.0
+    assert nearest_scale_midi(70.2, "Bb", "major") == 70.0
 
 
 def test_master_limiter_enforces_minus_1_dbfs() -> None:

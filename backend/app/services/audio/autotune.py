@@ -56,9 +56,35 @@ def apply_preset(preset: str, key: str = "C", scale: str = "major") -> AutotuneS
     )
 
 
+_FLAT_AND_ENHARMONIC_TO_PC: dict[str, int] = {
+    "c": 0, "b#": 0,
+    "c#": 1, "db": 1,
+    "d": 2,
+    "d#": 3, "eb": 3,
+    "e": 4, "fb": 4,
+    "f": 5, "e#": 5,
+    "f#": 6, "gb": 6,
+    "g": 7,
+    "g#": 8, "ab": 8,
+    "a": 9,
+    "a#": 10, "bb": 10,
+    "b": 11, "cb": 11,
+}
+
+
+def key_to_pitch_class(key: str) -> int:
+    """Normalize sharp/flat/enharmonic key names (e.g. Eb, Bb, F#) to pitch class 0..11."""
+    cleaned = (key or "C").strip().lower()
+    if cleaned in _FLAT_AND_ENHARMONIC_TO_PC:
+        return _FLAT_AND_ENHARMONIC_TO_PC[cleaned]
+    if cleaned in [n.lower() for n in NOTE_NAMES]:
+        return [n.lower() for n in NOTE_NAMES].index(cleaned)
+    return 0
+
+
 def nearest_scale_midi(midi_val: float, key: str, scale: str) -> float:
     """Snap a fractional MIDI note to the nearest pitch in the target key/scale."""
-    root_pc = NOTE_NAMES.index(key) if key in NOTE_NAMES else 0
+    root_pc = key_to_pitch_class(key)
     intervals = SCALE_INTERVALS.get(scale, SCALE_INTERVALS["major"])
     allowed_pcs = {(root_pc + iv) % 12 for iv in intervals}
 

@@ -28,13 +28,20 @@ def create_app() -> FastAPI:
     application.include_router(audio_router)
     application.include_router(projects_router)
 
-    # Gracefully mount Multi-Agent jobs router if present
-    try:
-        from app.api.jobs import router as jobs_router  # type: ignore
-
-        application.include_router(jobs_router)
-    except ImportError:
-        pass
+    # Gracefully mount Multi-Agent jobs & studio/lyrics/coach routers if present
+    for module_name in ("app.api.jobs", "app.api.studio"):
+        try:
+            mod = __import__(module_name, fromlist=["router"])
+            if hasattr(mod, "router"):
+                application.include_router(mod.router)
+            for attr in ("studio_router", "lyrics_router", "coach_router"):
+                extra_r = getattr(mod, attr, None)
+                if extra_r is not None:
+                    application.include_router(extra_r)
+            for extra_r in getattr(mod, "extra_routers", ()):
+                application.include_router(extra_r)
+        except ImportError:
+            pass
 
     @application.get("/")
     def root() -> dict[str, str]:
