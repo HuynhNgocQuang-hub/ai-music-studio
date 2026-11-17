@@ -3,7 +3,7 @@
 
 - **Repository:** `https://github.com/HuynhNgocQuang-hub/ai-music-studio`
 - **Kiến trúc hiện tại:** Option B — **React 19 + Vite (`frontend/`)** + **Java 21 Spring Boot 3.x (`backend/`)** + **Python FastAPI DSP (`audio-worker/`)** + **Redis (`redis:7-alpine`)**
-- **Kế hoạch chi tiết:** [PHASE1_TEAM_PLAN.md](./PHASE1_TEAM_PLAN.md)
+- **Kế hoạch chi tiết:** [PHASE1_TEAM_PLAN.md](./PHASE1_TEAM_PLAN.md) | **Báo cáo Cross-Review & Live E2E:** [CROSS_REVIEW_REPORT.md](./CROSS_REVIEW_REPORT.md)
 - **Quy ước trạng thái:** `TODO` (Chờ làm) | `IN_PROGRESS` (Đang làm) | `IN_REVIEW` (Chờ AI khác check) | `BLOCKED` (Kẹt/Lỗi) | `DONE` (Đã pass test + review)
 
 ---
@@ -23,14 +23,28 @@
 | `OPTB-QA-01` | `docs-qa` | Phase A: Cập nhật `README.md`, `MULTI_AGENT_ARCHITECTURE.md`, `API_AND_UI_SPEC.md`, `PHASE1_TEAM_PLAN.md`, `TASK_BOARD.md` theo kiến trúc Option B | `README.md`, `docs/*.md` | `DONE` | Toàn bộ 5 tài liệu cập nhật cho Java 21 Spring Boot + React Vite + Python audio-worker + Redis |
 | `OPTB-QA-02` | `docs-qa` | Phase B: Cross-review 1:1 `frontend/src/lib/api/client.ts` + `types/project.ts` vs Spring Boot controllers/DTOs & `AudioWorkerClient.java` vs `audio-worker/app/main.py` | `docs/TASK_BOARD.md`, `tests/e2e/*` | `DONE` | Node & pytest contract parity pass: `22/22` public routes (`missFe=[]`, `missBe=[]`, `staleStream=false`), `6/6` internal worker routes (`missAwClient=[]`, `missAwMain=[]`); DTOs matched |
 | `OPTB-QA-03` | `docs-qa` | Phase B: Chạy `mvn test` (`backend/`), `npm install && npx tsc --noEmit && npm run build` (`frontend/`), `docker compose config -q`, `pytest` (`audio-worker` & `tests/e2e` parity) | `docs/TASK_BOARD.md`, `tests/e2e/*` | `DONE` | `mvn test`: 14/14 pass; `tsc` + `vite build`: exit 0; `docker compose config -q`: exit 0; Docker `audio-worker` pytest: 6/6 pass; `test_phase1_e2e.py` parity test pass |
+| `OPTB-QA-04` | `live-e2e-runner`, `review-be-by-fe`, `review-fe-by-be` | Phase C: Live E2E (`redis` + `audio-worker` + Spring Boot `:8000`) & Cross-Review chuyên sâu BE ↔ FE ↔ Worker | `docs/CROSS_REVIEW_REPORT.md`, `docs/TASK_BOARD.md` | `IN_REVIEW` | `audio-worker` pytest: `6/6` pass (`30.10s`); `mvn test`: `14/14` pass (`32.86s`); `tsc`+`vite build`: exit `0`; Live `test_phase1_e2e.py`: **`9/10` pass, `1` fail** (MP3 export `503` do `OPTB-BUG-01` HTTP/2 `h2c` -> Uvicorn `422`); mở `OPTB-BUG-01`..`OPTB-BUG-12` |
 
 ---
 
-## 2. Nhật ký Phát hiện & Sửa Bug Chéo (Option B Cross-Review)
+## 2. Nhật ký Phát hiện & Sửa Bug Chéo (Option B Cross-Review & Live E2E)
 
-| Bug ID | Người phát hiện | Giao cho Agent sửa | File & Dòng lỗi | Mô tả Bug | Trạng thái | Xác nhận sửa lại |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| *(Không có bug chặn hoặc lệch contract giữa `frontend`, `backend` Spring Boot và `audio-worker`)* | - | - | - | Ghi chú nhẹ (non-blocking): `frontend/src/pages/SettingsPage.tsx:45,84,118,188` còn giữ nhãn UI "Backend FastAPI"; `AudioController.renderPreviewWav` (`AudioController.java:385-395`) dùng trực tiếp `JavaAudioFallbackService` thay vì gọi `POST /internal/audio/render` trên `audio-worker` (`exportProjectAudio` có gọi `/internal/audio/export`). | `NOTE` | Không ảnh hưởng API contract hoặc vận hành |
+Chi tiết đầy đủ (`PASS` / `BUG` / `WARN`, stack trace & hướng sửa) xem tại [CROSS_REVIEW_REPORT.md](./CROSS_REVIEW_REPORT.md).
+
+| Bug ID | Mức độ | Người phát hiện | Giao cho Agent sửa | File & Dòng lỗi | Mô tả Bug | Trạng thái | Xác nhận sửa lại |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `OPTB-BUG-01` | `P0` | `live-e2e-runner` | `spring-backend` | `backend/.../audio/AudioWorkerClient.java:38-40,141-147,177-183` | `HttpClient` mặc định `HTTP_2` gửi `Upgrade: h2c` tới Uvicorn làm **tất cả** `POST /internal/audio/*` lỗi `422` và silent fallback về Java; `POST /export/audio` (`mp3`) trả `503` khi host thiếu `ffmpeg` (`test_phase1_e2e.py:451` FAIL). | `TODO` | Chờ thêm `.version(HTTP_1_1)` & re-test live E2E |
+| `OPTB-BUG-02` | `P1` | `review-be-by-fe` | `spring-backend` | `backend/.../agents/LlmAdapter.java:71-77,99-108,154-175` | `resolveProvider()` ưu tiên `roleProviders` cố định trước `effectiveDefaultProvider()` và bỏ qua `MOCK` trong vòng lặp, khiến `X-LLM-Provider: mock`/override bị phớt lờ khi `.env` có key; `SettingsPage` `agentProviders` chưa được gửi/nối vào `LlmAdapter.configure()`. | `TODO` | - |
+| `OPTB-BUG-03` | `P1` | `review-be-by-fe` | `spring-backend` | `backend/.../audio/JavaAudioFallbackService.java:710-717`; `AudioController.java:328-335` | `resolveAutotuneSettings` ép `enabled=false` khi `preset="off"` (chặn Auto-Tune Pro chỉnh `retuneSpeed`); `auto_follow_project_key=true` ghi đè key/scale user chọn và bỏ qua `pentatonic_*`. | `TODO` | - |
+| `OPTB-BUG-04` | `P1` | `review-be-by-fe`, `review-fe-by-be`, `live-e2e-runner` | `spring-backend` | `backend/.../controller/AudioController.java:385-395`; `JavaAudioFallbackService.java:969-978` | `GET /api/audio/preview` bỏ qua `audio-worker` `/internal/audio/render` và không phân biệt `raw`/`dry`/`autotune`/`preserve`/`enhance` (live probe trả `846764 B` giống nhau cho 4 mode). | `TODO` | - |
+| `OPTB-BUG-05` | `P2` | `review-fe-by-be` | `spring-backend` | `backend/.../controller/ProjectsController.java:195-202` | `collectAudioAssets` chỉ gửi 3 ref mặc định cho `audio-worker`, bỏ sót các clip `source` ref phụ (vd: overdub). | `TODO` | - |
+| `OPTB-BUG-06` | `P2` | `review-be-by-fe` | `spring-backend` / `react-vite` | `AgentOrchestrator.java:680-725`; `StudioPage.tsx:249,281` | SSE `error` phát `{job_id, code, message}` nhưng `StudioPage` chỉ đọc `evt.error`. | `TODO` | - |
+| `OPTB-BUG-07` | `P1` | `review-fe-by-be` | `react-vite` | `frontend/src/lib/audio/player.ts:224`; `CreatePage.tsx:370-396,484-499`; `StudioPage.tsx:331-347` | `syncFromProject` skip khi `this.buffers.has(slot)` làm buffer cũ bị cache khi re-denoise / re-autotune; `handleApplyAutotunePro` không gọi `syncFromProject`. | `TODO` | - |
+| `OPTB-BUG-08` | `P1` | `review-fe-by-be` | `react-vite` / `spring-backend` | `frontend/src/pages/CreatePage.tsx:576-585,1356-1379`; `client.ts:161-167` | Bước 4 `Preserve` và `Enhance` map chung `setABMode('ai_mix')`; `getQuickPreviewUrl` không được dùng; backend không điền `preserve_mix_ref`/`enhance_mix_ref`. | `TODO` | - |
+| `OPTB-BUG-09` | `P1` | `review-fe-by-be`, `review-be-by-fe` | `react-vite` | `frontend/src/pages/StudioPage.tsx:121-147,228-435`; `ProjectProvider.tsx:85-89` | `useEffect` phụ thuộc cả object `project` gây re-sync liên tục; các thao tác Studio gọi API backend mà không `saveNow(true)` lên Redis trước. | `TODO` | - |
+| `OPTB-BUG-10` | `P1` | `review-fe-by-be` | `react-vite` | `frontend/src/pages/StudioPage.tsx:307-321,1280-1289` | Nút Overdub `1-Click Fix` chỉ hiển thị notice (stub), và `wavBlob` thu đè bị bỏ qua không thêm vào clip/IndexedDB. | `TODO` | - |
+| `OPTB-BUG-11` | `P2` | `review-fe-by-be` | `react-vite` | `StudioPage.tsx:239-251,270-283`; `CreatePage.tsx:256,387,488,546` | SSE listeners trên `StudioPage` thiếu cleanup unmount & `onTransportError`; `CreatePage` đọc stale `project` closure sau `updateProject` và SSE `completed`. | `TODO` | - |
+| `OPTB-BUG-12` | `P2` | `review-fe-by-be` | `react-vite` | `frontend/src/lib/audio/player.ts:342,355,388-431`; `ProjectProvider.tsx:68-75` | Web Audio `loop` theo `vocalBuf.duration` thay vì `durationSec`, `scheduleMidiTracks` không loop & giới hạn 128 nốt; `persistDraft` nuốt lỗi sync Redis. | `TODO` | - |
 
 ---
 
