@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -68,7 +69,7 @@ public class LlmAdapter {
     private volatile String configuredGeminiKey;
     private volatile String configuredOpenaiKey;
     private volatile String configuredDefaultProvider;
-    private final Map<String, Provider> roleProviders = new LinkedHashMap<>(Map.of(
+    private final Map<String, Provider> roleProviders = new ConcurrentHashMap<>(Map.of(
             "composer", Provider.GEMINI,
             "lyricist", Provider.GEMINI,
             "coach", Provider.GEMINI,
@@ -158,8 +159,26 @@ public class LlmAdapter {
             if (p == Provider.MOCK) return Provider.MOCK;
             candidates.add(p);
         }
-        if (role != null) {
-            Provider rp = roleProviders.get(role.toLowerCase(Locale.ROOT));
+
+        LlmContextHolder.LlmOverrides ctx = LlmContextHolder.get();
+        String normRole = role != null ? role.toLowerCase(Locale.ROOT) : null;
+        if (ctx != null && normRole != null && ctx.agentProviders() != null) {
+            String roleOv = ctx.agentProviders().get(normRole);
+            if (roleOv != null && !roleOv.isBlank()) {
+                Provider rp = Provider.fromString(roleOv);
+                if (rp == Provider.MOCK) return Provider.MOCK;
+                candidates.add(rp);
+            }
+        }
+        // Explicit X-LLM-Provider request override takes precedence before hardcoded roleProviders
+        if (ctx != null && ctx.defaultProvider() != null && !ctx.defaultProvider().isBlank()) {
+            Provider hp = Provider.fromString(ctx.defaultProvider());
+            if (hp == Provider.MOCK) return Provider.MOCK;
+            candidates.add(hp);
+        }
+
+        if (normRole != null) {
+            Provider rp = roleProviders.get(normRole);
             if (rp != null) candidates.add(rp);
         }
         candidates.add(effectiveDefaultProvider());
@@ -168,7 +187,8 @@ public class LlmAdapter {
 
         Set<Provider> seen = new LinkedHashSet<>();
         for (Provider c : candidates) {
-            if (c == Provider.MOCK || !seen.add(c)) continue;
+            if (c == null || !seen.add(c)) continue;
+            if (c == Provider.MOCK) return Provider.MOCK;
             if (hasKey(c)) return c;
         }
         return Provider.MOCK;
@@ -179,6 +199,10 @@ public class LlmAdapter {
         out.put("gemini_configured", hasKey(Provider.GEMINI));
         out.put("openai_configured", hasKey(Provider.OPENAI));
         out.put("default", effectiveDefaultProvider().value());
+        LlmContextHolder.LlmOverrides ctx = LlmContextHolder.get();
+        if (ctx != null && ctx.agentProviders() != null && !ctx.agentProviders().isEmpty()) {
+            out.put("agent_providers", ctx.agentProviders());
+        }
         return out;
     }
 
@@ -194,6 +218,9 @@ public class LlmAdapter {
             if (selected == Provider.OPENAI) {
                 return callOpenai(prompt, systemPrompt, false);
             }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            log.warn("LLM provider {} interrupted; falling back to mock.", selected.value());
         } catch (Exception ex) {
             log.warn("LLM provider {} failed ({}); falling back to mock.", selected.value(), ex.getMessage());
         }
@@ -211,6 +238,9 @@ public class LlmAdapter {
                     : callOpenai(prompt, systemPrompt, true);
             Map<String, Object> parsed = extractJsonBlock(resp.text());
             return new LlmResponse(resp.provider(), resp.model(), resp.text(), parsed, false);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            log.warn("LLM JSON call via {} interrupted; falling back to mock.", selected.value());
         } catch (Exception ex) {
             log.warn("LLM JSON call via {} failed ({}); falling back to mock.", selected.value(), ex.getMessage());
         }

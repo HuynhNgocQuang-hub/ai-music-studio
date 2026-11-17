@@ -112,12 +112,35 @@ class ApiMockMvcTests {
                 .andExpect(jsonPath("$.bpm").value(115.0))
                 .andExpect(jsonPath("$.key").value("G"));
 
-        // 4. Autotune
+        // 4. Autotune (quick preset + Auto-Tune Pro custom overrides)
         mockMvc.perform(post("/api/audio/autotune")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"project_id\":\"" + pid + "\",\"preset\":\"balanced\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tuned_vocal_ref", startsWith("mem://processed/")));
+
+        mockMvc.perform(post("/api/audio/autotune")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "project_id": "%s",
+                                  "autotune_settings": {
+                                    "enabled": true,
+                                    "preset": "off",
+                                    "key": "D",
+                                    "scale": "pentatonic_minor",
+                                    "retune_speed_ms": 12.0,
+                                    "humanize": 0.2,
+                                    "mix_percent": 85.0,
+                                    "auto_follow_project_key": true
+                                  }
+                                }
+                                """.formatted(pid)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.autotune_settings.enabled").value(true))
+                .andExpect(jsonPath("$.autotune_settings.mix_percent").value(85.0))
+                .andExpect(jsonPath("$.autotune_settings.key").value("D"))
+                .andExpect(jsonPath("$.autotune_settings.scale").value("pentatonic_minor"));
 
         // 5. Multi-Agent Generate + SSE + Cancel
         MvcResult jobRes = mockMvc.perform(post("/api/jobs/generate")
@@ -174,10 +197,47 @@ class ApiMockMvcTests {
                 .andExpect(jsonPath("$.timing_offset_ms").isNumber())
                 .andExpect(jsonPath("$.gain_suggestion").isNotEmpty());
 
-        // 7. Preview & Export WAV / MIDI / .aimusic
-        mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "ai_mix"))
+        // 7. Preview (all modes differentiated) & Export WAV / MIDI / .aimusic
+        byte[] rawPreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "raw"))
                 .andExpect(status().isOk())
-                .andExpect(content().contentType("audio/wav"));
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        byte[] dryPreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "dry"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        byte[] dryBeatPreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "dry_beat"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        byte[] autotunePreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "autotune"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        byte[] preservePreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "preserve"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        byte[] enhancePreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "enhance"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        byte[] mixPreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "ai_mix"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        assertFalse(java.util.Arrays.equals(rawPreview, dryBeatPreview));
+        assertFalse(java.util.Arrays.equals(dryPreview, dryBeatPreview));
+        assertFalse(java.util.Arrays.equals(dryBeatPreview, mixPreview));
+        assertFalse(java.util.Arrays.equals(autotunePreview, mixPreview));
+        assertFalse(java.util.Arrays.equals(preservePreview, enhancePreview));
 
         mockMvc.perform(get("/api/audio/preview").param("project_id", pid).param("mode", "ai_mix"))
                 .andExpect(status().isOk())

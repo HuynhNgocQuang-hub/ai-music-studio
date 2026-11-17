@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 @RestController
 public class HealthController {
@@ -49,13 +50,25 @@ public class HealthController {
         LlmContextHolder.set(overrides);
         try {
             Map<String, Object> redisStatus = store.ping();
-            boolean workerHealthy = audioWorkerClient.isHealthy();
+            Optional<Map<String, Object>> workerHealth = audioWorkerClient.healthDetails();
+            boolean workerHealthy = workerHealth.isPresent();
+            Map<?, ?> workerEngines = workerHealth
+                    .map(m -> m.get("engines"))
+                    .filter(Map.class::isInstance)
+                    .map(Map.class::cast)
+                    .orElse(Map.of());
+
+            boolean workerFfmpeg = Boolean.TRUE.equals(workerEngines.get("ffmpeg"));
+            boolean workerFluidsynth = Boolean.TRUE.equals(workerEngines.get("fluidsynth"));
+            boolean workerSoundfont = workerEngines.containsKey("soundfont")
+                    ? Boolean.TRUE.equals(workerEngines.get("soundfont"))
+                    : workerFluidsynth;
 
             Map<String, Object> engines = new LinkedHashMap<>();
             engines.put("audio_worker_available", workerHealthy);
-            engines.put("ffmpeg_available", workerHealthy || isBinaryOnPath("ffmpeg"));
-            engines.put("fluidsynth_available", workerHealthy || isBinaryOnPath("fluidsynth"));
-            engines.put("soundfont_available", workerHealthy);
+            engines.put("ffmpeg_available", workerFfmpeg || isBinaryOnPath("ffmpeg"));
+            engines.put("fluidsynth_available", workerFluidsynth || isBinaryOnPath("fluidsynth"));
+            engines.put("soundfont_available", workerSoundfont);
             engines.put("java_fallback_available", true);
 
             Map<String, Object> llmStatus = llmAdapter.status();

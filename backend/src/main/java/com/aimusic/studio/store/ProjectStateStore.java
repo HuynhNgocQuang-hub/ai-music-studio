@@ -1,7 +1,9 @@
 package com.aimusic.studio.store;
 
 import com.aimusic.studio.config.AppProperties;
+import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.ProjectState;
+import com.aimusic.studio.model.TrackState;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -29,7 +31,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class ProjectStateStore {
@@ -50,6 +54,8 @@ public class ProjectStateStore {
     private final long audioTtlSeconds;
     private final RedisTemplate<String, byte[]> redisTemplate;
     private final AtomicBoolean redisAvailable = new AtomicBoolean(false);
+    private final AtomicLong lastRedisFailureNanos = new AtomicLong(0L);
+    private volatile long redisRetryIntervalNanos = TimeUnit.SECONDS.toNanos(5);
 
     private final ConcurrentHashMap<String, MemoryEntry> memoryData = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Deque<String>> memoryLists = new ConcurrentHashMap<>();
@@ -83,20 +89,53 @@ public class ProjectStateStore {
         try {
             String pong = redisTemplate.execute((RedisCallback<String>) RedisConnection::ping);
             boolean ok = pong != null && !pong.isBlank();
-            redisAvailable.set(ok);
             if (ok) {
+                markRedisUp();
                 log.info("Connected to Redis state store.");
+            } else {
+                redisAvailable.set(false);
             }
         } catch (Exception ex) {
-            redisAvailable.set(false);
+            markRedisDown(ex);
             log.info("Redis unreachable ({}); using In-Memory ConcurrentHashMap TTL fallback.", ex.getMessage());
         }
     }
 
+    private boolean shouldUseRedis() {
+        if (redisTemplate == null) {
+            return false;
+        }
+        if (redisAvailable.get()) {
+            return true;
+        }
+        long lastFail = lastRedisFailureNanos.get();
+        long now = System.nanoTime();
+        if (lastFail == 0L || (now - lastFail) >= redisRetryIntervalNanos) {
+            return lastRedisFailureNanos.compareAndSet(lastFail, now);
+        }
+        return false;
+    }
+
+    private void markRedisUp() {
+        lastRedisFailureNanos.set(0L);
+        if (redisAvailable.compareAndSet(false, true)) {
+            log.info("Redis connection recovered; resuming Redis state store.");
+        }
+    }
+
     private void markRedisDown(Exception ex) {
+        lastRedisFailureNanos.set(System.nanoTime());
         if (redisAvailable.compareAndSet(true, false)) {
             log.warn("Redis error ({}); falling back to in-memory TTL store.", ex.getMessage());
         }
+    }
+
+    public boolean isRedisAvailable() {
+        return redisAvailable.get();
+    }
+
+    public void setRedisRetryIntervalMs(long retryIntervalMs) {
+        this.redisRetryIntervalNanos = TimeUnit.MILLISECONDS.toNanos(Math.max(0L, retryIntervalMs));
     }
 
     private void memSet(String key, byte[] value, long ttlSeconds) {
@@ -158,13 +197,14 @@ public class ProjectStateStore {
         String key = "project:" + project.getProjectId();
         try {
             byte[] payload = objectMapper.writeValueAsBytes(project);
-            if (redisAvailable.get() && redisTemplate != null) {
+            if (shouldUseRedis()) {
                 try {
                     if (exp > 0) {
                         redisTemplate.opsForValue().set(key, payload, Duration.ofSeconds(exp));
                     } else {
                         redisTemplate.opsForValue().set(key, payload);
                     }
+                    markRedisUp();
                     return project;
                 } catch (Exception ex) {
                     markRedisDown(ex);
@@ -183,9 +223,10 @@ public class ProjectStateStore {
         }
         String key = "project:" + projectId;
         byte[] raw = null;
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 raw = redisTemplate.opsForValue().get(key);
+                markRedisUp();
             } catch (Exception ex) {
                 markRedisDown(ex);
             }
@@ -209,9 +250,10 @@ public class ProjectStateStore {
         String undoKey = "undo:" + projectId;
         boolean deleted = memDelete(key);
         memDelete(undoKey);
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 Long count = redisTemplate.delete(List.of(key, undoKey));
+                markRedisUp();
                 deleted = deleted || (count != null && count > 0);
             } catch (Exception ex) {
                 markRedisDown(ex);
@@ -222,20 +264,16 @@ public class ProjectStateStore {
 
     public PagedProjects listProjects(int page, int limit, String search, String genre, String keyFilter) {
         Set<String> keys = new LinkedHashSet<>();
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 Set<String> scanned = scanKeys("project:*");
+                markRedisUp();
                 keys.addAll(scanned);
             } catch (Exception ex) {
                 markRedisDown(ex);
             }
         }
-        if (!redisAvailable.get()) {
-            keys.addAll(memKeys("project:"));
-        } else {
-            // Also include any in-memory projects saved before fallback/reconnect
-            keys.addAll(memKeys("project:"));
-        }
+        keys.addAll(memKeys("project:"));
 
         List<ProjectState> all = new ArrayList<>();
         for (String k : keys) {
@@ -295,13 +333,14 @@ public class ProjectStateStore {
         String undoKey = "undo:" + projectId;
         try {
             String json = objectMapper.writeValueAsString(snapshot);
-            if (redisAvailable.get() && redisTemplate != null) {
+            if (shouldUseRedis()) {
                 try {
                     redisTemplate.opsForList().leftPush(undoKey, json.getBytes(StandardCharsets.UTF_8));
                     redisTemplate.opsForList().trim(undoKey, 0, cap - 1L);
                     if (projectTtlSeconds > 0) {
                         redisTemplate.expire(undoKey, Duration.ofSeconds(projectTtlSeconds));
                     }
+                    markRedisUp();
                     return;
                 } catch (Exception ex) {
                     markRedisDown(ex);
@@ -322,9 +361,10 @@ public class ProjectStateStore {
     public Optional<ProjectState> popUndo(String projectId) {
         String undoKey = "undo:" + projectId;
         String raw = null;
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 byte[] bytes = redisTemplate.opsForList().leftPop(undoKey);
+                markRedisUp();
                 if (bytes != null) {
                     raw = new String(bytes, StandardCharsets.UTF_8);
                 }
@@ -361,13 +401,14 @@ public class ProjectStateStore {
     public String saveAudioBytes(String ref, byte[] data, Long ttlSeconds) {
         String key = "audio:" + ref;
         long exp = ttlSeconds != null ? ttlSeconds : audioTtlSeconds;
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 if (exp > 0) {
                     redisTemplate.opsForValue().set(key, data, Duration.ofSeconds(exp));
                 } else {
                     redisTemplate.opsForValue().set(key, data);
                 }
+                markRedisUp();
                 return ref;
             } catch (Exception ex) {
                 markRedisDown(ex);
@@ -383,9 +424,10 @@ public class ProjectStateStore {
         }
         String key = "audio:" + ref;
         byte[] data = null;
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 data = redisTemplate.opsForValue().get(key);
+                markRedisUp();
             } catch (Exception ex) {
                 markRedisDown(ex);
             }
@@ -396,12 +438,44 @@ public class ProjectStateStore {
         return Optional.ofNullable(data);
     }
 
+    public Map<String, byte[]> collectAudioAssets(ProjectState project) {
+        Map<String, byte[]> map = new LinkedHashMap<>();
+        if (project == null) return map;
+        if (project.getAudioAssets() != null) {
+            putAudioIfPresent(map, project.getAudioAssets().getRawInputRef());
+            putAudioIfPresent(map, project.getAudioAssets().getDryDenoisedRef());
+            putAudioIfPresent(map, project.getAudioAssets().getTunedVocalRef());
+            putAudioIfPresent(map, project.getAudioAssets().getRenderedMixRef());
+            putAudioIfPresent(map, project.getAudioAssets().getAccompanimentRef());
+            putAudioIfPresent(map, project.getAudioAssets().getPreserveMixRef());
+            putAudioIfPresent(map, project.getAudioAssets().getEnhanceMixRef());
+        }
+        if (project.getTracks() != null) {
+            for (TrackState track : project.getTracks().values()) {
+                if (track == null || track.getClips() == null) continue;
+                for (AudioClip clip : track.getClips()) {
+                    if (clip != null) {
+                        putAudioIfPresent(map, clip.getSource());
+                    }
+                }
+            }
+        }
+        return map;
+    }
+
+    private void putAudioIfPresent(Map<String, byte[]> map, String ref) {
+        if (ref != null && !ref.isBlank() && !map.containsKey(ref)) {
+            getAudioBytes(ref).ifPresent(bytes -> map.put(ref, bytes));
+        }
+    }
+
     public boolean deleteAudioBytes(String ref) {
         String key = "audio:" + ref;
         boolean deleted = memDelete(key);
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 Boolean res = redisTemplate.delete(key);
+                markRedisUp();
                 deleted = deleted || Boolean.TRUE.equals(res);
             } catch (Exception ex) {
                 markRedisDown(ex);
@@ -416,9 +490,10 @@ public class ProjectStateStore {
         String key = "job:" + jobId;
         try {
             byte[] payload = objectMapper.writeValueAsBytes(data);
-            if (redisAvailable.get() && redisTemplate != null) {
+            if (shouldUseRedis()) {
                 try {
                     redisTemplate.opsForValue().set(key, payload, Duration.ofSeconds(ttlSeconds));
+                    markRedisUp();
                     return;
                 } catch (Exception ex) {
                     markRedisDown(ex);
@@ -433,9 +508,10 @@ public class ProjectStateStore {
     public Optional<Map<String, Object>> getJob(String jobId) {
         String key = "job:" + jobId;
         byte[] raw = null;
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 raw = redisTemplate.opsForValue().get(key);
+                markRedisUp();
             } catch (Exception ex) {
                 markRedisDown(ex);
             }
@@ -456,9 +532,10 @@ public class ProjectStateStore {
     public void setCancelFlag(String jobId, long ttlSeconds) {
         String key = "job_cancel:" + jobId;
         byte[] flag = "1".getBytes(StandardCharsets.UTF_8);
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 redisTemplate.opsForValue().set(key, flag, Duration.ofSeconds(ttlSeconds));
+                markRedisUp();
                 return;
             } catch (Exception ex) {
                 markRedisDown(ex);
@@ -469,9 +546,10 @@ public class ProjectStateStore {
 
     public boolean isCancelled(String jobId) {
         String key = "job_cancel:" + jobId;
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 byte[] val = redisTemplate.opsForValue().get(key);
+                markRedisUp();
                 if (val != null) return true;
             } catch (Exception ex) {
                 markRedisDown(ex);
@@ -487,7 +565,7 @@ public class ProjectStateStore {
             try {
                 String pong = redisTemplate.execute((RedisCallback<String>) RedisConnection::ping);
                 if (pong != null && !pong.isBlank()) {
-                    redisAvailable.set(true);
+                    markRedisUp();
                     Long dbSize = redisTemplate.execute((RedisCallback<Long>) conn -> conn.serverCommands().dbSize());
                     Map<String, Object> info = new LinkedHashMap<>();
                     info.put("connected", true);
@@ -527,7 +605,7 @@ public class ProjectStateStore {
                 }
             }
         }
-        if (redisAvailable.get() && redisTemplate != null) {
+        if (shouldUseRedis()) {
             try {
                 for (String pattern : List.of("audio:*", "job:*", "job_cancel:*")) {
                     Set<String> keys = scanKeys(pattern);
@@ -536,6 +614,7 @@ public class ProjectStateStore {
                         if (del != null) cleared += del.intValue();
                     }
                 }
+                markRedisUp();
             } catch (Exception ex) {
                 markRedisDown(ex);
             }
@@ -552,7 +631,6 @@ public class ProjectStateStore {
                 while (cursor.hasNext()) {
                     keys.add(new String(cursor.next(), StandardCharsets.UTF_8));
                 }
-            } catch (Exception ignored) {
             }
             return null;
         });
