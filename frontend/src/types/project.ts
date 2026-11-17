@@ -14,6 +14,7 @@ export interface MidiNote {
 }
 
 export interface ProjectConfig {
+  title?: string;
   melody_mode: MelodyMode;
   output_mode: OutputMode;
   motif_position: MotifPosition;
@@ -157,20 +158,17 @@ export interface ProjectState {
   qa_status: QAStatus;
 }
 
-// API DTOs matching docs/API_AND_UI_SPEC.md
+// API DTOs matching docs/API_AND_UI_SPEC.md & backend/app/core/schemas.py
 export interface UploadAudioResponse {
   project_id: string;
   raw_input_ref: string;
-  metadata?: {
-    filename?: string;
-    duration_sec?: number;
-    sample_rate?: number;
-    channels?: number;
-    format?: string;
-    size_bytes?: number;
-    low_volume_warning?: boolean;
-    clipping_warning?: boolean;
-  };
+  filename: string;
+  duration_sec: number;
+  sample_rate: number;
+  channels: number;
+  size_bytes: number;
+  format: string;
+  warnings: string[];
 }
 
 export interface DenoiseRequest {
@@ -181,10 +179,13 @@ export interface DenoiseRequest {
 
 export interface DenoiseResponse {
   project_id: string;
+  raw_input_ref: string;
   dry_denoised_ref: string;
-  trimmed_start_sec?: number;
-  trimmed_end_sec?: number;
-  noise_warning?: string | null;
+  trimmed_start_sec: number;
+  trimmed_end_sec: number;
+  duration_sec: number;
+  snr_db_estimate: number;
+  warnings: string[];
 }
 
 export interface AnalyzeRequest {
@@ -247,8 +248,12 @@ export interface JobSSEEvent {
   job_id?: string;
   agent?: string;
   step?: string;
+  stage?: string;
   progress?: number;
   iteration?: number;
+  max_iterations?: number;
+  feedback?: string;
+  issues?: string[];
   message?: string;
   project_state?: ProjectState;
   warning?: string;
@@ -315,21 +320,33 @@ export interface ProjectSummary {
   source?: 'draft' | 'saved';
   updated_at?: string;
   total_bars?: number;
+  version?: number;
+  has_audio?: boolean;
 }
 
 export interface PaginatedProjectsResponse {
   items: ProjectSummary[];
   total: number;
   page: number;
+  limit?: number;
   total_pages: number;
 }
 
 export interface HealthResponse {
   status: 'ok' | 'degraded' | 'error';
-  backend?: string;
-  redis?: { connected: boolean; mode?: string; used_memory_human?: string };
-  fluidsynth?: { available: boolean; soundfont?: string | null };
-  llm?: { gemini_configured?: boolean; openai_configured?: boolean; active_provider?: string };
+  app?: string;
+  version?: string;
+  redis?: { connected: boolean; backend?: string; used_memory_human?: string };
+  engines?: {
+    ffmpeg_available?: boolean;
+    fluidsynth_available?: boolean;
+    soundfont_available?: boolean;
+  };
+  llm_providers?: {
+    gemini_configured?: boolean;
+    openai_configured?: boolean;
+    default?: string;
+  };
 }
 
 export interface StudioLLMSettings {
@@ -357,6 +374,7 @@ export function createDefaultProjectState(projectId?: string): ProjectState {
     updated_at: now,
     source: 'draft',
     config: {
+      title: 'Untitled Session',
       melody_mode: 'preserve',
       output_mode: 'accompaniment',
       motif_position: 'chorus',

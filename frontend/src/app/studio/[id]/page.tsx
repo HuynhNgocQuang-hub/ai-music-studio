@@ -43,7 +43,12 @@ import {
   suggestLyrics,
   triggerBlobDownload,
 } from '@/lib/api/client';
-import { getAudioEngine, type TransportSnapshot, type VocalABMode } from '@/lib/audio/player';
+import {
+  encodeBlobToWav,
+  getAudioEngine,
+  type TransportSnapshot,
+  type VocalABMode,
+} from '@/lib/audio/player';
 import { getDraft, markDraftSaved } from '@/lib/storage/indexeddb';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import type {
@@ -304,10 +309,11 @@ export default function StudioPage() {
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
         engine.stop();
-        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+        const rawBlob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
         setStudioNotice('AI Fit Check đang phân tích bản thu Overdub...');
         try {
-          const res = await overdubFitCheck(project.project_id, blob);
+          const wavBlob = await encodeBlobToWav(rawBlob);
+          const res = await overdubFitCheck(project.project_id, wavBlob);
           setFitCheck(res);
           setCoachOpen(true);
           setStudioNotice('Đã hoàn tất AI Fit Check cho bản thu đè.');

@@ -96,8 +96,14 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     isDirtyRef.current = true;
     setProject((prev) => {
       const next = updater(prev);
+      const effectiveTitle = next.title || next.config.title || 'Untitled Session';
       return {
         ...next,
+        title: effectiveTitle,
+        config: {
+          ...next.config,
+          title: effectiveTitle,
+        },
         version: (prev.version || 1) + 1,
         updated_at: new Date().toISOString(),
       };
@@ -106,9 +112,18 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const loadProjectIntoSession = useCallback(
     (state: ProjectState, options: { dirty?: boolean } = {}) => {
+      const effectiveTitle = state.config?.title || state.title || 'Untitled Session';
+      const normalized: ProjectState = {
+        ...state,
+        title: effectiveTitle,
+        config: {
+          ...state.config,
+          title: effectiveTitle,
+        },
+      };
       isDirtyRef.current = options.dirty ?? false;
-      setProject(state);
-      void saveDraft(state, { dirty: options.dirty ?? false }).then((d) => {
+      setProject(normalized);
+      void saveDraft(normalized, { dirty: options.dirty ?? false }).then((d) => {
         if (d) setLastSavedAt(d.updated_at);
         setAutoSaveStatus('saved');
       });

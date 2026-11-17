@@ -143,9 +143,9 @@ export default function SettingsPage() {
             </div>
             <p className="mt-1.5 text-sm font-semibold text-white">
               {health?.redis?.connected
-                ? `Connected (${health.redis.used_memory_human || 'OK'})`
+                ? `Connected (${health.redis.used_memory_human || health.redis.backend || 'OK'})`
                 : health
-                ? `Fallback (${health.redis?.mode || 'In-Memory'})`
+                ? `Fallback (${health.redis?.backend || 'In-Memory'})`
                 : 'Unknown'}
             </p>
           </div>
@@ -155,17 +155,19 @@ export default function SettingsPage() {
               <span className="flex items-center gap-1.5">
                 <Cpu className="h-3.5 w-3.5" /> FluidSynth / DSP
               </span>
-              {health?.fluidsynth?.available ? (
+              {health?.engines?.fluidsynth_available ? (
                 <CheckCircle2 className="h-4 w-4 text-emerald-400" />
               ) : (
                 <Activity className="h-4 w-4 text-amber-400" />
               )}
             </div>
             <p className="mt-1.5 text-sm font-semibold text-white">
-              {health?.fluidsynth?.available
-                ? health.fluidsynth.soundfont || 'Available'
+              {health?.engines?.fluidsynth_available
+                ? health.engines.soundfont_available
+                  ? 'FluidSynth + SoundFont Ready'
+                  : 'FluidSynth (No SoundFont)'
                 : health
-                ? 'Synth Fallback Ready'
+                ? `Synth Fallback (${health.engines?.ffmpeg_available ? 'FFmpeg OK' : 'Pure DSP'})`
                 : 'Unknown'}
             </p>
           </div>

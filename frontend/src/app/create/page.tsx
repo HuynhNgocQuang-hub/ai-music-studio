@@ -37,7 +37,12 @@ import {
   uploadAudio,
   validateAudioFileClient,
 } from '@/lib/api/client';
-import { getAudioEngine, type TransportSnapshot, type VocalABMode } from '@/lib/audio/player';
+import {
+  encodeBlobToWav,
+  getAudioEngine,
+  type TransportSnapshot,
+  type VocalABMode,
+} from '@/lib/audio/player';
 import { saveAudioBlob } from '@/lib/storage/indexeddb';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import type {
@@ -196,28 +201,35 @@ export default function CreateWizardPage() {
           await saveAudioBlob(nextProjectId, 'raw_input', blob);
         }
 
-        let warningMsg: string | undefined;
-        if (uploadRes.metadata?.low_volume_warning) {
-          warningMsg = 'Âm lượng đầu vào hơi nhỏ (< -50 dBFS). Bạn có thể thu gần mic hơn.';
-        } else if (uploadRes.metadata?.clipping_warning) {
-          warningMsg = 'Phát hiện tín hiệu bị vỡ tiếng (clipping). Hãy giảm gain mic nếu cần.';
-        }
+        const warningMsg =
+          uploadRes.warnings && uploadRes.warnings.length > 0
+            ? uploadRes.warnings.join(' ')
+            : undefined;
 
         setFileMeta({
-          name: uploadRes.metadata?.filename || filename,
-          durationSec: uploadRes.metadata?.duration_sec || dur,
+          name: uploadRes.filename || filename,
+          durationSec: uploadRes.duration_sec || dur,
           warning: warningMsg,
         });
 
-        updateProject((prev) => ({
-          ...prev,
-          project_id: nextProjectId,
-          title: prev.title === 'Untitled Session' ? filename.replace(/\.[^.]+$/, '') : prev.title,
-          audio_assets: {
-            ...prev.audio_assets,
-            raw_input_ref: uploadRes.raw_input_ref,
-          },
-        }));
+        const derivedTitle = filename.replace(/\.[^.]+$/, '');
+        updateProject((prev) => {
+          const nextTitle =
+            !prev.title || prev.title === 'Untitled Session' ? derivedTitle : prev.title;
+          return {
+            ...prev,
+            project_id: nextProjectId,
+            title: nextTitle,
+            config: {
+              ...prev.config,
+              title: nextTitle,
+            },
+            audio_assets: {
+              ...prev.audio_assets,
+              raw_input_ref: uploadRes.raw_input_ref,
+            },
+          };
+        });
 
         // Run AI Denoise + Auto-Trim automatically
         setDenoising(true);
@@ -237,8 +249,9 @@ export default function CreateWizardPage() {
           },
         }));
 
-        if (denoiseRes.noise_warning) {
-          setFileMeta((m) => (m ? { ...m, warning: denoiseRes.noise_warning ?? m.warning } : m));
+        if (denoiseRes.warnings && denoiseRes.warnings.length > 0) {
+          const denoiseWarn = denoiseRes.warnings.join(' ');
+          setFileMeta((m) => (m ? { ...m, warning: denoiseWarn } : m));
         }
 
         // Load denoised buffer for instant A/B Dry Check
@@ -324,8 +337,15 @@ export default function CreateWizardPage() {
         stream.getTracks().forEach((t) => t.stop());
         void audioCtx.close();
 
-        const blob = new Blob(micChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        void processAudioInput(blob, `mic_hum_${Date.now()}.webm`);
+        const rawBlob = new Blob(micChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        void (async () => {
+          try {
+            const wavBlob = await encodeBlobToWav(rawBlob);
+            await processAudioInput(wavBlob, `mic_hum_${Date.now()}.wav`);
+          } catch {
+            setStepError('Không thể mã hóa bản thu Mic sang định dạng WAV.');
+          }
+        })();
       };
 
       mediaRecorderRef.current = recorder;
@@ -510,8 +530,9 @@ export default function CreateWizardPage() {
           if (typeof evt.progress === 'number') {
             setJobProgress(evt.progress);
           }
-          if (evt.type === 'fallback_warning' && evt.warning) {
-            setJobWarning(evt.warning);
+          if (evt.type === 'fallback_warning') {
+            const warningText = evt.warning || evt.message;
+            if (warningText) setJobWarning(warningText);
           }
           if (evt.type === 'error') {
             setStepError(evt.error || evt.message || 'Multi-Agent Job gặp lỗi.');
