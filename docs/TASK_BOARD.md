@@ -3,7 +3,7 @@
 
 - **Repository:** `https://github.com/HuynhNgocQuang-hub/ai-music-studio`
 - **Kiến trúc hiện tại:** Option B — **React 19 + Vite (`frontend/`)** + **Java 21 Spring Boot 3.x (`backend/`)** + **Python FastAPI DSP (`audio-worker/`)** + **Redis (`redis:7-alpine`)**
-- **Kế hoạch chi tiết:** [PHASE1_TEAM_PLAN.md](./PHASE1_TEAM_PLAN.md) | **Báo cáo Cross-Review & Live E2E:** [CROSS_REVIEW_REPORT.md](./CROSS_REVIEW_REPORT.md)
+- **Kế hoạch chi tiết:** [PHASE1_TEAM_PLAN.md](./PHASE1_TEAM_PLAN.md) | **Báo cáo Cross-Review & Live E2E:** [CROSS_REVIEW_REPORT.md](./CROSS_REVIEW_REPORT.md) | **Báo cáo Phase 2 & 3:** [PHASE2_3_REPORT.md](./PHASE2_3_REPORT.md) | **Full Integration Audit:** [FULL_INTEGRATION_AUDIT.md](./FULL_INTEGRATION_AUDIT.md)
 - **Quy ước trạng thái:** `TODO` (Chờ làm) | `IN_PROGRESS` (Đang làm) | `IN_REVIEW` (Chờ AI khác check) | `BLOCKED` (Kẹt/Lỗi) | `DONE` (Đã pass test + review)
 
 ---
@@ -28,6 +28,7 @@
 | `P23-FE-01` | `p23-frontend` | Phase 2 & 3 Frontend: `TimelineEditor.tsx` (Split/Trim/Offset/Fade/Section/Chord/`texture`), `PianoRollEditor.tsx` (C1–C7, Scale highlight, Quantize, audition), `MultiTrackAudioEngine` clip/note upgrade, Karaoke Sync, `structure_preset`, fix `P23-BUG-01`/`02`/`WARN-01` | `frontend/*` | `DONE` | Merged (`f2c76aa`, `d26f7f0` / `3d3bf2b`); `npx tsc --noEmit && npm run build` exit `0` (`2157 modules`, `5.57s`) |
 | `P23-WRK-01` | `fix-renderer` | Guard `_render_audio_track` trong `audio-worker/app/services/renderer.py` chỉ fallback vocal khi `track_name == "vocal"` (`texture` rỗng giữ im lặng) + unit test | `audio-worker/app/services/renderer.py`, `audio-worker/tests/test_worker.py` | `DONE` | Merged (`c5ea40a` / `aa324d9`); Docker daemon đang tắt nên chờ chạy lại `test_worker.py` khi Docker bật |
 | `P23-QA-01` | `p23-qa` | Tạo `tests/e2e/test_phase2_3_e2e.py`, Cross-Review Phase 2/3, chạy `mvn test`, `tsc`+`vite build`, Live Spring Boot `:8000` E2E (`8/8` pass), viết `docs/PHASE2_3_REPORT.md` | `tests/e2e/test_phase2_3_e2e.py`, `docs/PHASE2_3_REPORT.md`, `docs/TASK_BOARD.md` | `DONE` | Xem [PHASE2_3_REPORT.md](./PHASE2_3_REPORT.md): `mvn test` `24/24`, `tsc`+`vite` exit `0`, Live `:8000` `8/8` pass, `P23-BUG-01..03` & `WARN-01..02` đều `FIXED` |
+| `AUDIT-01` | `audit-runner`, `audit-srs-fe-be` | Full Integration Audit: `mvn test`, `tsc`+`vite build`, `docker compose config -q`, Live Integration qua Vite Proxy (`:3000/api/*` -> `:8000`), và đối chiếu toàn bộ SRS FE ↔ BE ↔ Worker | `docs/FULL_INTEGRATION_AUDIT.md`, `docs/TASK_BOARD.md` | `DONE` | Xem [FULL_INTEGRATION_AUDIT.md](./FULL_INTEGRATION_AUDIT.md): `mvn test` `24/24`, `tsc`+`vite` exit `0`, `compose config` exit `0`, Live Vite Proxy `9/9` pass (ports `:8000`/`:3000` clean); Docker daemon tắt nên pytest trong container `audio-worker` deferred; phát hiện `AUDIT-BUG-01..03` & `WARN-01..08` |
 
 ---
 
@@ -49,6 +50,18 @@ Chi tiết đầy đủ (`PASS` / `BUG` / `WARN`, stack trace & bằng chứng x
 | `OPTB-BUG-10` | `P1` | `review-fe-by-be` | `fix-react` | `frontend/src/pages/StudioPage.tsx:307-321,1280-1289` | Nút Overdub `1-Click Fix` chỉ hiển thị notice (stub), và `wavBlob` thu đè bị bỏ qua không thêm vào clip/IndexedDB. | `FIXED` | Lưu `wavBlob` vào IndexedDB (`overdub`), thêm `AudioClip` vào `tracks.vocal.clips`, nối thật `shift_timing`/`apply_autotune`/`adjust_gain` (`fc46128`). |
 | `OPTB-BUG-11` | `P2` | `review-fe-by-be` | `fix-react` | `StudioPage.tsx:239-251,270-283`; `CreatePage.tsx:256,387,488,546` | SSE listeners trên `StudioPage` thiếu cleanup unmount & `onTransportError`; `CreatePage` đọc stale `project` closure sau `updateProject` và SSE `completed`. | `FIXED` | Dọn SSE listeners khi unmount + `onTransportError` + `latestProjectRef`/`evt.project_state` (`fc46128`); `tsc` + `vite build` exit `0`. |
 | `OPTB-BUG-12` | `P2` | `review-fe-by-be` | `fix-react` | `frontend/src/lib/audio/player.ts:342,355,388-431`; `ProjectProvider.tsx:68-75` | Web Audio `loop` theo `vocalBuf.duration` thay vì `durationSec`, `scheduleMidiTracks` không loop & giới hạn 128 nốt; `persistDraft` nuốt lỗi sync Redis. | `FIXED` | Loop theo `durationSec` + re-trigger MIDI + bỏ cap 128 nốt + surface `syncError` (`fc46128`); `tsc` + `vite build` exit `0`. |
+
+---
+
+## 2.1. Nhật ký Audit Toàn diện (Open Issues — `AUDIT-BUG-01..03`)
+
+Chi tiết đầy đủ (`PASS` / `BUG` / `WARN` theo từng mã SRS) xem tại [FULL_INTEGRATION_AUDIT.md](./FULL_INTEGRATION_AUDIT.md).
+
+| Bug ID | Mức độ | Người phát hiện | Giao cho Agent sửa | File & Dòng lỗi | Mô tả Bug | Trạng thái | Xác nhận sửa lại |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `AUDIT-BUG-01` | `P1` | `audit-srs-fe-be` | `frontend` / `audio-worker` | `StudioPage.tsx:447-459`, `indexeddb.ts:224`, `JavaAudioFallbackService.java:1157`, `renderer.py:263-271`, `StudioController.java:153-165` | Overdub clips lưu cục bộ `idb://overdub/...` trong 1 slot duy nhất (overdub sau đè overdub trước, chưa upload `/api/audio/clip-upload`), làm mất tiếng overdub khi export Java hoặc phát nhầm giọng hum gốc trong `audio-worker` (`renderer.py` fallback `_vocal_ref_candidates`). | `OPEN` | Chờ fix |
+| `AUDIT-BUG-02` | `P1` | `audit-srs-fe-be` | `frontend` / `backend` / `audio-worker` | `CreatePage.tsx:498-501`, `JavaAudioFallbackService.java:1127`, `renderer.py:225`, `player.ts:688-691` | Chuyển Auto-Tune từ preset khác về `'off'` trên `CreatePage` return sớm không gọi `/api/audio/autotune` (`enabled=false`), trong khi BE/Worker/Player ưu tiên `tuned_vocal_ref` khi non-null mà không check `autotune_settings.enabled`. | `OPEN` | Chờ fix |
+| `AUDIT-BUG-03` | `P2` | `audit-srs-fe-be` | `frontend` | `ProjectProvider.tsx:42-43,102-118`, `StudioPage.tsx:571-572` | Gọi `mutateWithUndo(...); await saveNow(true);` cùng tick đọc `latestProjectRef.current` cũ (chỉ cập nhật sau render). | `OPEN` | Chờ fix |
 
 ---
 
