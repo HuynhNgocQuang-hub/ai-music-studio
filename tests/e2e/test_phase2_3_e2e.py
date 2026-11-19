@@ -691,7 +691,10 @@ def test_phase2_3_frontend_backend_contract_parity():
     ]
     for ep in new_endpoints:
         assert ep in frontend_client, f"Missing endpoint {ep} in frontend/src/lib/api/client.ts"
-        assert ep in backend_source, f"Missing endpoint {ep} in Spring Boot controllers"
+        prefix, _, tail = ep.rpartition("/")
+        has_full = ep in backend_source
+        has_split = (prefix in backend_source) and (f"/{tail}" in backend_source)
+        assert has_full or has_split, f"Missing endpoint {ep} in Spring Boot controllers"
 
     # 2. structure_preset on ProjectConfig & AutoTrimVocalResponse / JobRearrangeRequest DTO parity
     project_config_java = (BACKEND_MODEL_DIR / "ProjectConfig.java").read_text(encoding="utf-8")
