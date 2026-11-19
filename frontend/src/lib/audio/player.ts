@@ -1,4 +1,4 @@
-import type { MidiNote, ProjectState } from '@/types/project';
+import type { AudioClip, MidiNote, ProjectState } from '@/types/project';
 import { resolveAudioUrl } from '@/lib/api/client';
 
 export type VocalABMode = 'raw' | 'dry' | 'autotune' | 'preserve' | 'enhance' | 'ai_mix';
@@ -11,12 +11,18 @@ export interface TrackChannelConfig {
   pan: number; // -1.0 .. 1.0
 }
 
+export interface LoopRegionBars {
+  startBar: number;
+  endBar: number;
+}
+
 export interface TransportSnapshot {
   isPlaying: boolean;
   currentTimeSec: number;
   durationSec: number;
   bpm: number;
   loopEnabled: boolean;
+  loopRegionBars: LoopRegionBars | null;
   abMode: VocalABMode;
   masterPeakDb: number;
 }
@@ -56,12 +62,36 @@ export class MultiTrackAudioEngine {
   private durationSec = 8;
   private bpm = 100;
   private loopEnabled = false;
+  private loopRegionBars: LoopRegionBars | null = null;
   private abMode: VocalABMode = 'dry';
   private rafId: number | null = null;
   private loopTimer: number | null = null;
   private listeners: Set<TransportListener> = new Set();
   private currentProject: ProjectState | null = null;
   private metronomeTimer: number | null = null;
+
+  private getBeatsPerBar(): number {
+    return this.currentProject?.analysis.time_signature === '3/4' ? 3 : 4;
+  }
+
+  private getSecPerBeat(): number {
+    return 60 / Math.max(40, Math.min(220, this.bpm || 100));
+  }
+
+  private getSecPerBar(): number {
+    return this.getBeatsPerBar() * this.getSecPerBeat();
+  }
+
+  private getActiveLoopBoundsSec(): { startSec: number; endSec: number } {
+    if (!this.loopRegionBars) {
+      return { startSec: 0, endSec: this.durationSec };
+    }
+    const secPerBar = this.getSecPerBar();
+    const startSec = Math.max(0, Math.min(this.durationSec - 0.1, (this.loopRegionBars.startBar - 1) * secPerBar));
+    const rawEnd = (this.loopRegionBars.endBar - 1) * secPerBar;
+    const endSec = Math.max(startSec + 0.1, Math.min(this.durationSec, rawEnd));
+    return { startSec, endSec };
+  }
 
   private ensureContext(): AudioContext {
     if (!this.ctx) {
@@ -130,6 +160,7 @@ export class MultiTrackAudioEngine {
       durationSec: this.durationSec,
       bpm: this.bpm,
       loopEnabled: this.loopEnabled,
+      loopRegionBars: this.loopRegionBars,
       abMode: this.abMode,
       masterPeakDb: this.measureMasterPeakDb(),
     };
@@ -141,7 +172,12 @@ export class MultiTrackAudioEngine {
     }
     const elapsed = this.ctx.currentTime - this.startContextTime;
     if (this.loopEnabled && this.durationSec > 0) {
-      return elapsed % this.durationSec;
+      const { startSec, endSec } = this.getActiveLoopBoundsSec();
+      const span = Math.max(0.05, endSec - startSec);
+      if (elapsed >= startSec) {
+        return startSec + ((elapsed - startSec) % span);
+      }
+      return Math.max(0, elapsed);
     }
     return Math.min(elapsed, this.durationSec);
   }
@@ -227,6 +263,7 @@ export class MultiTrackAudioEngine {
 
     // Update channel mute/solo/volume/pan
     for (const [trackId, track] of Object.entries(project.tracks)) {
+      if (!track) continue;
       this.setChannelConfig({
         id: trackId,
         mute: Boolean(track.mute),
@@ -248,6 +285,19 @@ export class MultiTrackAudioEngine {
       ['enhance', project.audio_assets.enhance_mix_ref],
       ['accompaniment', project.audio_assets.accompaniment_ref],
     ];
+
+    // Also include any custom clip sources from audio tracks (e.g. texture or imported clips)
+    const seenSources = new Set<string>(refs.map(([, r]) => r || '').filter(Boolean));
+    for (const track of Object.values(project.tracks)) {
+      if (!track || track.type !== 'audio') continue;
+      for (const clip of track.clips || []) {
+        if (!clip.source || clip.source.startsWith('idb://') || clip.source === 'overdub') continue;
+        if (!seenSources.has(clip.source)) {
+          seenSources.add(clip.source);
+          refs.push([clip.source, clip.source]);
+        }
+      }
+    }
 
     let reloadedForced = false;
     await Promise.all(
@@ -285,11 +335,57 @@ export class MultiTrackAudioEngine {
     }
     if (this.currentProject) {
       const bars = this.currentProject.song_structure.total_bars || 8;
-      const beatsPerBar = this.currentProject.analysis.time_signature === '3/4' ? 3 : 4;
-      const midiDur = (bars * beatsPerBar * 60) / (this.bpm || 100);
+      const secPerBar = this.getSecPerBar();
+      const midiDur = bars * secPerBar;
       if (midiDur > maxDur) maxDur = midiDur;
+
+      for (const [trackId, track] of Object.entries(this.currentProject.tracks)) {
+        if (!track || track.type !== 'audio') continue;
+        for (const clip of track.clips || []) {
+          const buf = this.resolveBufferForClip(clip, trackId);
+          const clipStart = Math.max(0, (clip.start_bar - 1) * secPerBar + (clip.offset_ms ?? 0) / 1000);
+          const rawEnd = clip.trim_end_sec ?? buf?.duration ?? 4;
+          const clipDur = Math.max(0, rawEnd - (clip.trim_start_sec || 0));
+          if (clipStart + clipDur > maxDur) maxDur = clipStart + clipDur;
+        }
+      }
     }
     this.durationSec = Math.max(maxDur, 4);
+  }
+
+  public getClipBufferDuration(clip: AudioClip, trackId = 'vocal'): number | null {
+    const buf = this.resolveBufferForClip(clip, trackId);
+    return buf ? buf.duration : null;
+  }
+
+  private resolveBufferForClip(clip: AudioClip, trackId: string): AudioBuffer | undefined {
+    const src = clip.source || '';
+    if (trackId === 'vocal') {
+      if (src.startsWith('idb://overdub') || clip.id.startsWith('clip_overdub_') || src.includes('overdub')) {
+        return this.buffers.get(src) || this.buffers.get('overdub');
+      }
+      const assets = this.currentProject?.audio_assets;
+      const isMainVocalSource =
+        !src ||
+        src === 'vocal' ||
+        src === assets?.raw_input_ref ||
+        src === assets?.dry_denoised_ref ||
+        src === assets?.tuned_vocal_ref;
+
+      if (isMainVocalSource) {
+        if (this.abMode === 'raw' && this.buffers.has('raw')) return this.buffers.get('raw');
+        if (this.abMode === 'dry' && this.buffers.has('dry')) return this.buffers.get('dry');
+        if ((this.abMode === 'autotune' || this.abMode === 'ai_mix') && this.buffers.has('autotune')) {
+          return this.buffers.get('autotune');
+        }
+      }
+      if (this.buffers.has(src)) return this.buffers.get(src);
+      const fallbackKey = this.pickActiveVocalBufferKey();
+      return fallbackKey ? this.buffers.get(fallbackKey) : undefined;
+    }
+
+    if (this.buffers.has(src)) return this.buffers.get(src);
+    return undefined;
   }
 
   public setChannelConfig(cfg: TrackChannelConfig): void {
@@ -336,6 +432,23 @@ export class MultiTrackAudioEngine {
     }
   }
 
+  public setLoopRegionBars(startBar: number | null, endBar: number | null): void {
+    if (startBar === null || endBar === null || endBar <= startBar) {
+      this.loopRegionBars = null;
+    } else {
+      const clampedStart = Math.max(1, startBar);
+      const clampedEnd = Math.max(clampedStart + 1, endBar);
+      this.loopRegionBars = { startBar: clampedStart, endBar: clampedEnd };
+    }
+    if (this.isPlayingState && this.loopEnabled) {
+      const cur = this.getCurrentTimeSec();
+      this.stopSourcesOnly();
+      this.startFromOffset(cur);
+    } else {
+      this.emit();
+    }
+  }
+
   public setBpm(bpm: number): void {
     this.bpm = Math.max(40, Math.min(220, bpm));
     this.recomputeDuration();
@@ -343,7 +456,13 @@ export class MultiTrackAudioEngine {
   }
 
   public play(fromSec?: number): void {
-    const offset = fromSec !== undefined ? fromSec : this.pauseOffsetSec;
+    let offset = fromSec !== undefined ? fromSec : this.pauseOffsetSec;
+    if (fromSec === undefined && this.loopEnabled && this.loopRegionBars) {
+      const { startSec, endSec } = this.getActiveLoopBoundsSec();
+      if (offset < startSec || offset >= endSec) {
+        offset = startSec;
+      }
+    }
     this.startFromOffset(offset);
   }
 
@@ -375,6 +494,11 @@ export class MultiTrackAudioEngine {
     }
   }
 
+  public seekToBar(bar: number): void {
+    const sec = Math.max(0, (Math.max(1, bar) - 1) * this.getSecPerBar());
+    this.seek(sec);
+  }
+
   private startFromOffset(offsetSec: number): void {
     const ctx = this.ensureContext();
     this.stopSourcesOnly();
@@ -384,93 +508,88 @@ export class MultiTrackAudioEngine {
     this.startContextTime = scheduleAnchor - offsetSec;
     this.isPlayingState = true;
 
-    // 1. Schedule vocal / active A/B audio buffer
-    const vocalKey = this.pickActiveBufferKey();
-    const vocalBuf = vocalKey ? this.buffers.get(vocalKey) : undefined;
-    const isFullMixSlot =
-      vocalKey === 'ai_mix' || vocalKey === 'preserve' || vocalKey === 'enhance';
-    if (vocalBuf && offsetSec < vocalBuf.duration) {
-      const src = ctx.createBufferSource();
-      src.buffer = vocalBuf;
-      if (this.loopEnabled && vocalBuf.duration >= this.durationSec - 0.05) {
-        src.loop = true;
-        src.loopStart = 0;
-        src.loopEnd = this.durationSec;
-      } else {
-        src.loop = false;
-      }
-      const { gain } = this.getOrCreateChannelNodes('vocal');
-      src.connect(gain);
-      src.start(scheduleAnchor, offsetSec);
-      if (!src.loop && vocalBuf.duration > this.durationSec) {
-        src.stop(scheduleAnchor + Math.max(0.01, this.durationSec - offsetSec));
-      }
-      this.activeSources.push(src);
-    }
+    const { startSec: loopStartSec, endSec: loopEndSec } = this.getActiveLoopBoundsSec();
+    const playbackEndSec = this.loopEnabled ? loopEndSec : this.durationSec;
 
-    // 1b. Schedule recorded overdub clip if present on vocal track
-    if (!isFullMixSlot && this.buffers.has('overdub') && this.currentProject) {
-      const overdubClips = (this.currentProject.tracks.vocal?.clips || []).filter(
-        (c) => c.id.startsWith('clip_overdub_') || c.source.includes('overdub')
-      );
-      const latestClip = overdubClips[overdubClips.length - 1];
-      const overdubBuf = this.buffers.get('overdub');
-      if (latestClip && overdubBuf) {
-        const clipStartSec = Math.max(0, (latestClip.offset_ms ?? 0) / 1000);
-        const relOffset = offsetSec - clipStartSec;
-        if (relOffset < overdubBuf.duration) {
-          const ovSrc = ctx.createBufferSource();
-          ovSrc.buffer = overdubBuf;
-          ovSrc.loop = false;
+    const vocalClips = this.currentProject?.tracks.vocal?.clips || [];
+    const textureClips = this.currentProject?.tracks.texture?.clips || [];
+    const hasExplicitClips = vocalClips.length > 0 || textureClips.length > 0;
+
+    // 1. Check whether we should play a pre-rendered full mix buffer (CreatePage Step 4 or unmodified Studio)
+    const activeKey = this.pickActiveBufferKey();
+    const isPreRenderedFullMix =
+      activeKey === 'preserve' ||
+      activeKey === 'enhance' ||
+      (activeKey === 'ai_mix' && !hasExplicitClips && this.buffers.has('ai_mix'));
+
+    if (isPreRenderedFullMix && activeKey) {
+      const fullBuf = this.buffers.get(activeKey);
+      if (fullBuf && offsetSec < Math.min(fullBuf.duration, playbackEndSec)) {
+        const src = ctx.createBufferSource();
+        src.buffer = fullBuf;
+        src.loop = false;
+        const { gain } = this.getOrCreateChannelNodes('vocal');
+        src.connect(gain);
+        const playDur = Math.max(0.01, Math.min(fullBuf.duration, playbackEndSec) - offsetSec);
+        src.start(scheduleAnchor, offsetSec, playDur);
+        this.activeSources.push(src);
+      }
+    } else if (this.currentProject) {
+      // 1a. Vocal track: schedule every AudioClip when present, otherwise fallback to active vocal slot
+      if (vocalClips.length > 0) {
+        for (const clip of vocalClips) {
+          this.scheduleAudioClip(ctx, clip, 'vocal', scheduleAnchor, offsetSec, playbackEndSec);
+        }
+      } else {
+        const vocalKey = this.pickActiveVocalBufferKey();
+        const vocalBuf = vocalKey ? this.buffers.get(vocalKey) : undefined;
+        if (vocalBuf && offsetSec < Math.min(vocalBuf.duration, playbackEndSec)) {
+          const src = ctx.createBufferSource();
+          src.buffer = vocalBuf;
+          src.loop = false;
           const { gain } = this.getOrCreateChannelNodes('vocal');
-          ovSrc.connect(gain);
-          if (relOffset >= 0) {
-            ovSrc.start(scheduleAnchor, relOffset);
-          } else {
-            ovSrc.start(scheduleAnchor + Math.abs(relOffset), 0);
-          }
-          this.activeSources.push(ovSrc);
+          src.connect(gain);
+          const playDur = Math.max(0.01, Math.min(vocalBuf.duration, playbackEndSec) - offsetSec);
+          src.start(scheduleAnchor, offsetSec, playDur);
+          this.activeSources.push(src);
         }
       }
-    }
 
-    // 2. If not playing a full pre-rendered mix, play accompaniment or MIDI synth tracks
-    if (!isFullMixSlot) {
+      // 1b. Texture & any additional audio tracks: schedule every AudioClip
+      for (const [trackId, track] of Object.entries(this.currentProject.tracks)) {
+        if (!track || track.type !== 'audio' || trackId === 'vocal') continue;
+        for (const clip of track.clips || []) {
+          this.scheduleAudioClip(ctx, clip, trackId, scheduleAnchor, offsetSec, playbackEndSec);
+        }
+      }
+
+      // 2. Accompaniment buffer or Web Audio MIDI synthesizer tracks
       if (
         (this.abMode === 'dry' || this.abMode === 'autotune' || this.abMode === 'raw') &&
         this.buffers.has('accompaniment')
       ) {
         const accBuf = this.buffers.get('accompaniment')!;
-        if (offsetSec < accBuf.duration) {
+        if (offsetSec < Math.min(accBuf.duration, playbackEndSec)) {
           const accSrc = ctx.createBufferSource();
           accSrc.buffer = accBuf;
-          if (this.loopEnabled && accBuf.duration >= this.durationSec - 0.05) {
-            accSrc.loop = true;
-            accSrc.loopStart = 0;
-            accSrc.loopEnd = this.durationSec;
-          } else {
-            accSrc.loop = false;
-          }
+          accSrc.loop = false;
           const { gain } = this.getOrCreateChannelNodes('harmony');
           accSrc.connect(gain);
-          accSrc.start(scheduleAnchor, offsetSec);
-          if (!accSrc.loop && accBuf.duration > this.durationSec) {
-            accSrc.stop(scheduleAnchor + Math.max(0.01, this.durationSec - offsetSec));
-          }
+          const playDur = Math.max(0.01, Math.min(accBuf.duration, playbackEndSec) - offsetSec);
+          accSrc.start(scheduleAnchor, offsetSec, playDur);
           this.activeSources.push(accSrc);
         }
-      } else if (this.currentProject) {
-        // Lightweight Web Audio MIDI synthesizer fallback for MIDI tracks
-        this.scheduleMidiTracks(scheduleAnchor, offsetSec);
+      } else {
+        this.scheduleMidiTracks(scheduleAnchor, offsetSec, playbackEndSec);
       }
     }
 
-    // Re-trigger loop boundary seamlessly at this.durationSec (covers MIDI tracks & short vocal buffers)
-    if (this.loopEnabled && this.durationSec > 0) {
-      const remainingMs = Math.max(40, (this.durationSec - offsetSec) * 1000);
+    // Re-trigger loop boundary seamlessly at loopEndSec -> loopStartSec
+    if (this.loopEnabled && playbackEndSec > loopStartSec) {
+      const remainingMs = Math.max(30, (playbackEndSec - offsetSec) * 1000);
       this.loopTimer = window.setTimeout(() => {
         if (this.isPlayingState && this.loopEnabled) {
-          this.startFromOffset(0);
+          this.startFromOffset(loopStartSec);
         }
       }, remainingMs);
     }
@@ -478,6 +597,101 @@ export class MultiTrackAudioEngine {
     this.applyChannelRouting();
     this.startAnimationLoop();
     this.emit();
+  }
+
+  private scheduleAudioClip(
+    ctx: AudioContext,
+    clip: AudioClip,
+    trackId: string,
+    anchorTime: number,
+    offsetSec: number,
+    playbackEndSec: number
+  ): void {
+    const buf = this.resolveBufferForClip(clip, trackId);
+    if (!buf) return;
+
+    const secPerBar = this.getSecPerBar();
+    const trimStart = Math.max(0, Math.min(buf.duration, clip.trim_start_sec || 0));
+    const trimEnd =
+      clip.trim_end_sec !== undefined && clip.trim_end_sec !== null
+        ? Math.min(buf.duration, Math.max(trimStart, clip.trim_end_sec))
+        : buf.duration;
+    const segDur = trimEnd - trimStart;
+    if (segDur <= 0.01) return;
+
+    const rawTimelineStart =
+      (Math.max(1, clip.start_bar || 1) - 1) * secPerBar + (clip.offset_ms ?? 0) / 1000;
+
+    let effectiveTimelineStart = rawTimelineStart;
+    let effectiveBufStart = trimStart;
+    let effectiveDur = segDur;
+
+    if (rawTimelineStart < 0) {
+      const skip = -rawTimelineStart;
+      effectiveTimelineStart = 0;
+      effectiveBufStart += skip;
+      effectiveDur -= skip;
+    }
+
+    if (effectiveDur <= 0.01 || effectiveTimelineStart >= playbackEndSec) return;
+
+    const clippedDur = Math.min(effectiveDur, playbackEndSec - effectiveTimelineStart);
+    if (effectiveTimelineStart + clippedDur <= offsetSec) return;
+
+    const alreadyElapsed = Math.max(0, offsetSec - effectiveTimelineStart);
+    const playWhen = anchorTime + Math.max(0, effectiveTimelineStart - offsetSec);
+    const bufOffset = effectiveBufStart + alreadyElapsed;
+    const playDur = clippedDur - alreadyElapsed;
+    if (playDur <= 0.01 || bufOffset >= trimEnd) return;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = false;
+
+    const clipGain = ctx.createGain();
+    const fadeInSec = Math.min(effectiveDur * 0.5, Math.max(0, (clip.fade_in_ms ?? 0) / 1000));
+    const fadeOutSec = Math.min(effectiveDur * 0.5, Math.max(0, (clip.fade_out_ms ?? 0) / 1000));
+    const fullClipEndRel = effectiveDur;
+    const fadeOutStartRel = Math.max(fadeInSec, fullClipEndRel - fadeOutSec);
+
+    // Compute exact gain envelope accounting for playhead offset inside the clip
+    const startGain =
+      fadeInSec > 0 && alreadyElapsed < fadeInSec
+        ? Math.max(0.0001, alreadyElapsed / fadeInSec)
+        : alreadyElapsed > fadeOutStartRel && fadeOutSec > 0
+        ? Math.max(0.0001, (fullClipEndRel - alreadyElapsed) / fadeOutSec)
+        : 1.0;
+
+    clipGain.gain.setValueAtTime(startGain, playWhen);
+    if (fadeInSec > 0 && alreadyElapsed < fadeInSec) {
+      clipGain.gain.linearRampToValueAtTime(1.0, playWhen + (fadeInSec - alreadyElapsed));
+    }
+    const fadeOutAt = playWhen + (fadeOutStartRel - alreadyElapsed);
+    const clipEndAt = playWhen + playDur;
+    if (fadeOutSec > 0 && fadeOutAt < clipEndAt) {
+      if (fadeOutAt > playWhen) {
+        clipGain.gain.setValueAtTime(1.0, fadeOutAt);
+      }
+      clipGain.gain.linearRampToValueAtTime(0.0001, clipEndAt);
+    }
+
+    const { gain } = this.getOrCreateChannelNodes(trackId);
+    src.connect(clipGain);
+    clipGain.connect(gain);
+    src.start(playWhen, bufOffset, playDur);
+    this.activeSources.push(src);
+  }
+
+  private pickActiveVocalBufferKey(): string | null {
+    if (this.abMode === 'raw' && this.buffers.has('raw')) return 'raw';
+    if (this.abMode === 'dry' && this.buffers.has('dry')) return 'dry';
+    if ((this.abMode === 'autotune' || this.abMode === 'ai_mix') && this.buffers.has('autotune')) {
+      return 'autotune';
+    }
+    if (this.buffers.has('autotune')) return 'autotune';
+    if (this.buffers.has('dry')) return 'dry';
+    if (this.buffers.has('raw')) return 'raw';
+    return null;
   }
 
   private pickActiveBufferKey(): string | null {
@@ -493,20 +707,12 @@ export class MultiTrackAudioEngine {
       if (this.buffers.has('ai_mix')) return 'ai_mix';
       if (this.buffers.has('autotune')) return 'autotune';
     }
-    if (this.abMode === 'autotune') {
-      if (this.buffers.has('autotune')) return 'autotune';
-    }
-    if (this.abMode === 'dry') {
-      if (this.buffers.has('dry')) return 'dry';
-    }
-    if (this.buffers.has('raw')) return 'raw';
-    if (this.buffers.has('dry')) return 'dry';
-    return null;
+    return this.pickActiveVocalBufferKey();
   }
 
-  private scheduleMidiTracks(anchorTime: number, offsetSec: number): void {
+  private scheduleMidiTracks(anchorTime: number, offsetSec: number, maxEndSec = this.durationSec): void {
     if (!this.ctx || !this.currentProject) return;
-    const secPerBeat = 60 / (this.bpm || 100);
+    const secPerBeat = this.getSecPerBeat();
     const tracks = this.currentProject.tracks;
 
     const midiEntries: Array<[string, MidiNote[], OscillatorType]> = [
@@ -522,12 +728,15 @@ export class MultiTrackAudioEngine {
 
       for (const note of notes) {
         const noteStartSec = note.start_beat * secPerBeat;
-        if (noteStartSec >= this.durationSec) continue;
+        if (noteStartSec >= maxEndSec) continue;
         const rawDurSec = Math.max(0.06, note.duration * secPerBeat);
-        const noteDurSec = Math.min(rawDurSec, Math.max(0.06, this.durationSec - noteStartSec));
+        const noteDurSec = Math.min(rawDurSec, Math.max(0.06, maxEndSec - noteStartSec));
         if (noteStartSec + noteDurSec <= offsetSec) continue;
 
+        const alreadyIntoNote = Math.max(0, offsetSec - noteStartSec);
+        const remainingDur = Math.max(0.04, noteDurSec - alreadyIntoNote);
         const playAt = anchorTime + Math.max(0, noteStartSec - offsetSec);
+
         const osc = this.ctx.createOscillator();
         const env = this.ctx.createGain();
         osc.type = wave;
@@ -536,15 +745,47 @@ export class MultiTrackAudioEngine {
         const velGain = Math.min(0.25, ((note.velocity || 80) / 127) * 0.22);
         env.gain.setValueAtTime(0.0001, playAt);
         env.gain.linearRampToValueAtTime(velGain, playAt + 0.01);
-        env.gain.exponentialRampToValueAtTime(0.0001, playAt + (trackId === 'drums' ? 0.09 : noteDurSec));
+        env.gain.exponentialRampToValueAtTime(
+          0.0001,
+          playAt + (trackId === 'drums' ? Math.min(0.09, remainingDur) : remainingDur)
+        );
 
         osc.connect(env);
         env.connect(gain);
         osc.start(playAt);
-        osc.stop(playAt + noteDurSec + 0.02);
+        osc.stop(playAt + remainingDur + 0.02);
         this.activeOscillators.push(osc);
       }
     }
+  }
+
+  /**
+   * Immediately audition a single MIDI note (used by Piano Roll keyboard & note editing).
+   */
+  public auditionMidiNote(pitch: number, trackId = 'harmony'): void {
+    const ctx = this.ensureContext();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+
+    const waveMap: Record<string, OscillatorType> = {
+      bass: 'triangle',
+      harmony: 'sine',
+      lead: 'sawtooth',
+      drums: 'square',
+    };
+    osc.type = waveMap[trackId] || 'triangle';
+    osc.frequency.value = trackId === 'drums' ? (pitch <= 40 ? 90 : 220) : midiToFreq(pitch);
+
+    const dur = trackId === 'drums' ? 0.12 : 0.35;
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(0.22, now + 0.01);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    osc.connect(env);
+    env.connect(this.masterGain!);
+    osc.start(now);
+    osc.stop(now + dur + 0.02);
   }
 
   private stopSourcesOnly(): void {

@@ -1,8 +1,11 @@
 import type {
   AnalyzeRequest,
   AnalyzeResponse,
+  AutoMixResponse,
+  AutoTrimVocalResponse,
   AutotuneRequest,
   AutotuneResponse,
+  ClipUploadResponse,
   CoachChatRequest,
   CoachChatResponse,
   DenoiseRequest,
@@ -236,6 +239,26 @@ export async function autotuneAudio(payload: AutotuneRequest): Promise<AutotuneR
   });
 }
 
+export async function uploadTrackClip(
+  projectId: string,
+  file: File | Blob,
+  trackId = 'texture'
+): Promise<ClipUploadResponse> {
+  const formData = new FormData();
+  formData.append('project_id', projectId);
+  formData.append('track_id', trackId);
+  const filename = file instanceof File ? file.name : `${trackId}_clip.wav`;
+  formData.append('file', file, filename);
+  const res = await requestJson<ClipUploadResponse>('/api/audio/clip-upload', {
+    method: 'POST',
+    body: formData,
+  });
+  return {
+    ...res,
+    project_state: hydrateProjectTitle(res.project_state),
+  };
+}
+
 // ============================================================
 // 3.2 Multi-Agent Jobs & Realtime SSE Progress
 // ============================================================
@@ -349,6 +372,47 @@ export async function overdubFitCheck(
     method: 'POST',
     body: formData,
   });
+}
+
+export async function autoTrimVocal(projectId: string): Promise<AutoTrimVocalResponse> {
+  const raw = await requestJson<AutoTrimVocalResponse | (ProjectState & { summary?: string })>(
+    '/api/studio/auto-trim-vocal',
+    {
+      method: 'POST',
+      body: JSON.stringify({ project_id: projectId }),
+    }
+  );
+  if ('project_state' in raw && raw.project_state) {
+    return {
+      ...raw,
+      project_state: hydrateProjectTitle(raw.project_state),
+    };
+  }
+  return {
+    project_state: hydrateProjectTitle(raw as ProjectState),
+    summary: raw.summary,
+  };
+}
+
+export async function autoMixProject(projectId: string): Promise<AutoMixResponse> {
+  const raw = await requestJson<AutoMixResponse | (ProjectState & { summary?: string; mix_notes?: string[] })>(
+    '/api/studio/auto-mix',
+    {
+      method: 'POST',
+      body: JSON.stringify({ project_id: projectId }),
+    }
+  );
+  if ('project_state' in raw && raw.project_state) {
+    return {
+      ...raw,
+      project_state: hydrateProjectTitle(raw.project_state),
+    };
+  }
+  return {
+    project_state: hydrateProjectTitle(raw as ProjectState),
+    summary: raw.summary,
+    mix_notes: raw.mix_notes,
+  };
 }
 
 export async function suggestLyrics(payload: LyricsSuggestRequest): Promise<LyricsSuggestResponse> {
