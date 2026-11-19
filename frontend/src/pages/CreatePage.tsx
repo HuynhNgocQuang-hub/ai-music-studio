@@ -29,6 +29,8 @@ import {
   denoiseAudio,
   exportAudio,
   getQuickPreviewUrl,
+  MAX_HUM_DURATION_SEC,
+  MAX_VOCAL_DURATION_SEC,
   MIN_AUDIO_DURATION_SEC,
   startGenerateJob,
   subscribeJobEvents,
@@ -58,7 +60,7 @@ import type {
 const GENRES = ['Pop', 'Ballad', 'Lo-fi', 'R&B', 'Hip-hop', 'EDM', 'Acoustic', 'Rock'];
 const MOODS = ['Uplifting', 'Emotional', 'Chill', 'Energetic', 'Melancholic', 'Romantic'];
 const KEYS = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
-const SCALES = ['major', 'minor', 'pentatonic_major', 'pentatonic_minor'];
+const SCALES = ['major', 'minor', 'pentatonic_major', 'pentatonic_minor', 'chromatic'];
 
 const AUTOTUNE_PRESETS: Array<{
   id: AutoTunePreset;
@@ -93,7 +95,12 @@ export default function CreateWizardPage() {
 
   // Step 1: Mic / Upload + Denoise
   const [inputMode, setInputMode] = useState<'mic' | 'upload'>('mic');
+  const [audioUploadMode, setAudioUploadMode] = useState<'hum' | 'vocal'>('hum');
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedMicId, setSelectedMicId] = useState<string>('');
   const [isRecording, setIsRecording] = useState(false);
+  const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordSec, setRecordSec] = useState(0);
   const [countInEnabled, setCountInEnabled] = useState(true);
   const [countInBeat, setCountInBeat] = useState<number | null>(null);
@@ -130,6 +137,33 @@ export default function CreateWizardPage() {
   const recordTimerRef = useRef<number | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const analyserRafRef = useRef<number | null>(null);
+  const isRecordingPausedRef = useRef(false);
+
+  const refreshMicDevices = useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const inputs = devices.filter((d) => d.kind === 'audioinput');
+      setMicDevices(inputs);
+      setSelectedMicId((curr) =>
+        curr && inputs.some((d) => d.deviceId === curr) ? curr : inputs[0]?.deviceId || ''
+      );
+    } catch {
+      // ignore enumerateDevices errors
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMicDevices();
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
+      const onDeviceChange = () => void refreshMicDevices();
+      navigator.mediaDevices.addEventListener('devicechange', onDeviceChange);
+      return () => {
+        navigator.mediaDevices.removeEventListener('devicechange', onDeviceChange);
+      };
+    }
+    return undefined;
+  }, [refreshMicDevices]);
 
   useEffect(() => {
     const unsub = engine.subscribe(setTransport);
@@ -194,12 +228,22 @@ export default function CreateWizardPage() {
           setUploading(false);
           return;
         }
+        const maxDur = audioUploadMode === 'vocal' ? MAX_VOCAL_DURATION_SEC : MAX_HUM_DURATION_SEC;
+        if (dur > maxDur) {
+          setStepError(
+            audioUploadMode === 'vocal'
+              ? `Đoạn Vocal quá dài (${dur.toFixed(1)}s). Tối đa 5 phút (300 giây).`
+              : `Đoạn ngân nga quá dài (${dur.toFixed(1)}s). Chế độ Hum tối đa 60 giây — hãy chuyển sang chế độ Vocal (<= 5 phút) nếu cần dài hơn.`
+          );
+          setUploading(false);
+          return;
+        }
 
         const currentId = latestProjectRef.current.project_id;
         await engine.loadAudioFromBlob('raw', blob);
         await saveAudioBlob(currentId, 'raw_input', blob);
 
-        const uploadRes = await uploadAudio(blob, filename, currentId);
+        const uploadRes = await uploadAudio(blob, filename, currentId, audioUploadMode);
         const nextProjectId = uploadRes.project_id || currentId;
         if (nextProjectId !== currentId) {
           await saveAudioBlob(nextProjectId, 'raw_input', blob);
@@ -289,7 +333,7 @@ export default function CreateWizardPage() {
         setDenoising(false);
       }
     },
-    [autoTrim, enableDenoise, engine, updateProject]
+    [audioUploadMode, autoTrim, enableDenoise, engine, updateProject]
   );
 
   const handleFileUpload = async (file: File) => {
@@ -309,8 +353,16 @@ export default function CreateWizardPage() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
       micStreamRef.current = stream;
+      void refreshMicDevices();
 
       // Setup live VU meter
       const audioCtx = new AudioContext();
@@ -320,9 +372,13 @@ export default function CreateWizardPage() {
       source.connect(analyser);
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       const updateVu = () => {
-        analyser.getByteFrequencyData(dataArray);
-        const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-        setVuLevel(Math.min(100, Math.round((avg / 128) * 100)));
+        if (!isRecordingPausedRef.current) {
+          analyser.getByteFrequencyData(dataArray);
+          const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+          setVuLevel(Math.min(100, Math.round((avg / 128) * 100)));
+        } else {
+          setVuLevel(0);
+        }
         analyserRafRef.current = requestAnimationFrame(updateVu);
       };
       updateVu();
@@ -346,6 +402,8 @@ export default function CreateWizardPage() {
       recorder.onstop = () => {
         if (recordTimerRef.current) clearInterval(recordTimerRef.current);
         if (analyserRafRef.current) cancelAnimationFrame(analyserRafRef.current);
+        isRecordingPausedRef.current = false;
+        setIsRecordingPaused(false);
         setVuLevel(0);
         stream.getTracks().forEach((t) => t.stop());
         void audioCtx.close();
@@ -363,10 +421,14 @@ export default function CreateWizardPage() {
 
       mediaRecorderRef.current = recorder;
       recorder.start();
+      isRecordingPausedRef.current = false;
+      setIsRecordingPaused(false);
       setIsRecording(true);
       setRecordSec(0);
       recordTimerRef.current = window.setInterval(() => {
-        setRecordSec((s) => s + 1);
+        if (!isRecordingPausedRef.current) {
+          setRecordSec((s) => s + 1);
+        }
       }, 1000);
     } catch {
       setStepError(
@@ -375,10 +437,26 @@ export default function CreateWizardPage() {
     }
   };
 
+  const togglePauseRecording = () => {
+    const rec = mediaRecorderRef.current;
+    if (!rec) return;
+    if (rec.state === 'recording') {
+      rec.pause();
+      isRecordingPausedRef.current = true;
+      setIsRecordingPaused(true);
+    } else if (rec.state === 'paused') {
+      rec.resume();
+      isRecordingPausedRef.current = false;
+      setIsRecordingPaused(false);
+    }
+  };
+
   const stopRecording = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
+    isRecordingPausedRef.current = false;
+    setIsRecordingPaused(false);
     setIsRecording(false);
   };
 
@@ -419,32 +497,46 @@ export default function CreateWizardPage() {
   // Step 2: Analyze + Auto-Tune
   const goToStep2AndAnalyze = async () => {
     setStep(2);
-    if (!project.audio_assets.dry_denoised_ref && !project.audio_assets.raw_input_ref) return;
+    const current = latestProjectRef.current;
+    if (!current.audio_assets.dry_denoised_ref && !current.audio_assets.raw_input_ref) return;
     setAnalyzing(true);
     setStepError(null);
     try {
       const sourceRef =
-        project.audio_assets.dry_denoised_ref || project.audio_assets.raw_input_ref || '';
+        current.audio_assets.dry_denoised_ref || current.audio_assets.raw_input_ref || '';
       const res = await analyzeAudio({
-        project_id: project.project_id,
+        project_id: current.project_id,
         source_ref: sourceRef,
+        ...(current.analysis.bpm_locked ? { bpm_override: current.analysis.bpm } : {}),
+        ...(current.analysis.key_locked
+          ? {
+              key_override: current.analysis.detected_key,
+              scale_override: current.analysis.detected_scale,
+            }
+          : {}),
       });
-      updateProject((prev) => ({
-        ...prev,
-        analysis: {
-          bpm: res.bpm,
-          time_signature: res.time_signature || prev.analysis.time_signature || '4/4',
-          detected_key: res.key,
-          detected_scale: res.scale,
-          key_confidence: res.key_confidence ?? 0.85,
-          bars: res.bars ?? Math.max(4, Math.round(((fileMeta?.durationSec || 8) * res.bpm) / 240)),
-          raw_melody_midi: res.raw_melody_midi || [],
-        },
-        autotune_settings: prev.autotune_settings.auto_follow_project_key
-          ? { ...prev.autotune_settings, key: res.key, scale: res.scale }
-          : prev.autotune_settings,
-      }));
-      engine.setBpm(res.bpm);
+      updateProject((prev) => {
+        const resolvedBpm = prev.analysis.bpm_locked ? prev.analysis.bpm : res.bpm;
+        const resolvedKey = prev.analysis.key_locked ? prev.analysis.detected_key : res.key;
+        const resolvedScale = prev.analysis.key_locked ? prev.analysis.detected_scale : res.scale;
+        return {
+          ...prev,
+          analysis: {
+            ...prev.analysis,
+            bpm: resolvedBpm,
+            time_signature: res.time_signature || prev.analysis.time_signature || '4/4',
+            detected_key: resolvedKey,
+            detected_scale: resolvedScale,
+            key_confidence: res.key_confidence ?? 0.85,
+            bars: res.bars ?? Math.max(4, Math.round(((fileMeta?.durationSec || 8) * resolvedBpm) / 240)),
+            raw_melody_midi: res.raw_melody_midi || [],
+          },
+          autotune_settings: prev.autotune_settings.auto_follow_project_key
+            ? { ...prev.autotune_settings, key: resolvedKey, scale: resolvedScale }
+            : prev.autotune_settings,
+        };
+      });
+      engine.setBpm(current.analysis.bpm_locked ? current.analysis.bpm : res.bpm);
     } catch (err) {
       setStepError(err instanceof ApiError ? err.detail : 'Không thể phân tích audio.');
     } finally {
@@ -464,7 +556,7 @@ export default function CreateWizardPage() {
       const computedBpm = Math.max(40, Math.min(220, Math.round(60000 / avgMs)));
       updateProject((prev) => ({
         ...prev,
-        analysis: { ...prev.analysis, bpm: computedBpm },
+        analysis: { ...prev.analysis, bpm: computedBpm, bpm_locked: true },
       }));
       engine.setBpm(computedBpm);
     }
@@ -482,22 +574,31 @@ export default function CreateWizardPage() {
 
   const handleSelectAutotunePreset = async (preset: (typeof AUTOTUNE_PRESETS)[number]) => {
     const current = latestProjectRef.current;
+    const isOff = preset.id === 'off';
     const nextSettings: AutotuneSettings = {
       ...current.autotune_settings,
-      enabled: preset.id !== 'off',
+      enabled: !isOff,
       preset: preset.id,
       key: current.analysis.detected_key,
       scale: current.analysis.detected_scale,
       retune_speed_ms: preset.retune_speed_ms,
       humanize: preset.humanize,
-      mix_percent: preset.mix_percent,
+      mix_percent: isOff ? 0 : preset.mix_percent,
     };
 
-    updateProject((prev) => ({ ...prev, autotune_settings: nextSettings }));
+    updateProject((prev) => ({
+      ...prev,
+      autotune_settings: nextSettings,
+      ...(isOff
+        ? {
+            audio_assets: { ...prev.audio_assets, tuned_vocal_ref: null },
+          }
+        : {}),
+    }));
 
-    if (preset.id === 'off') {
+    if (isOff) {
+      engine.invalidateSlots(['autotune']);
       engine.setABMode('dry');
-      return;
     }
 
     setTuning(true);
@@ -507,19 +608,14 @@ export default function CreateWizardPage() {
         project_id: current.project_id,
         autotune_settings: nextSettings,
       });
-      const latest = latestProjectRef.current;
-      const updated: ProjectState = {
-        ...latest,
-        autotune_settings: nextSettings,
-        audio_assets: { ...latest.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
-      };
-      updateProject((prev) => ({
+      const nextTunedRef = isOff ? null : res.tuned_vocal_ref;
+      const updated = updateProject((prev) => ({
         ...prev,
         autotune_settings: nextSettings,
-        audio_assets: { ...prev.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
+        audio_assets: { ...prev.audio_assets, tuned_vocal_ref: nextTunedRef },
       }));
-      await engine.syncFromProject(updated, { forceSlots: ['autotune'] });
-      engine.setABMode('autotune');
+      await engine.syncFromProject(updated, isOff ? undefined : { forceSlots: ['autotune'] });
+      engine.setABMode(isOff ? 'dry' : 'autotune');
     } catch (err) {
       setStepError(err instanceof ApiError ? err.detail : 'Lỗi áp dụng Auto-Tune.');
     } finally {
@@ -720,47 +816,89 @@ export default function CreateWizardPage() {
                 Hỗ trợ WAV, MP3, M4A, OGG, FLAC (tối thiểu 3 giây, tối đa 50 MB).
               </p>
             </div>
-            <div className="inline-flex rounded-xl border border-slate-800 bg-[#0b0d14] p-1">
-              <button
-                type="button"
-                onClick={() => setInputMode('mic')}
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                  inputMode === 'mic' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Mic className="h-3.5 w-3.5" />
-                Ghi âm Mic
-              </button>
-              <button
-                type="button"
-                onClick={() => setInputMode('upload')}
-                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                  inputMode === 'upload' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Upload className="h-3.5 w-3.5" />
-                Upload File
-              </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Mode toggle: Hum <= 60s vs Vocal <= 5 min */}
+              <div className="inline-flex rounded-xl border border-slate-800 bg-[#0b0d14] p-1">
+                <button
+                  type="button"
+                  onClick={() => setAudioUploadMode('hum')}
+                  className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                    audioUploadMode === 'hum' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Hum (&le; 60s)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAudioUploadMode('vocal')}
+                  className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                    audioUploadMode === 'vocal' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Vocal (&le; 5 phút)
+                </button>
+              </div>
+              <div className="inline-flex rounded-xl border border-slate-800 bg-[#0b0d14] p-1">
+                <button
+                  type="button"
+                  onClick={() => setInputMode('mic')}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                    inputMode === 'mic' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Mic className="h-3.5 w-3.5" />
+                  Ghi âm Mic
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInputMode('upload')}
+                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                    inputMode === 'upload' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  Upload File
+                </button>
+              </div>
             </div>
           </div>
 
           {inputMode === 'mic' ? (
             <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-4">
-                <label className="flex items-center gap-2 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={countInEnabled}
-                    onChange={(e) => setCountInEnabled(e.target.checked)}
-                    className="rounded border-slate-600 bg-slate-800 text-indigo-500"
-                  />
-                  <span>Đếm nhịp 1 ô nhịp trước khi thu (Count-in Metronome)</span>
-                </label>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={countInEnabled}
+                      onChange={(e) => setCountInEnabled(e.target.checked)}
+                      className="rounded border-slate-600 bg-slate-800 text-indigo-500"
+                    />
+                    <span>Đếm nhịp 1 ô nhịp trước khi thu (Count-in Metronome)</span>
+                  </label>
+                  <select
+                    aria-label="Chọn thiết bị Microphone"
+                    disabled={isRecording}
+                    value={selectedMicId}
+                    onChange={(e) => setSelectedMicId(e.target.value)}
+                    className="max-w-[220px] rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-200 disabled:opacity-50"
+                  >
+                    {micDevices.length === 0 ? (
+                      <option value="">Microphone mặc định</option>
+                    ) : (
+                      micDevices.map((d, idx) => (
+                        <option key={d.deviceId || idx} value={d.deviceId}>
+                          {d.label || `Microphone ${idx + 1}`}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
                 <span className="font-mono text-sm font-semibold text-indigo-300">
                   {countInBeat !== null
                     ? `Đếm nhịp: ${countInBeat} / 4`
                     : isRecording
-                    ? `Đang thu: 00:${String(recordSec).padStart(2, '0')}`
+                    ? `${isRecordingPaused ? 'Tạm dừng' : 'Đang thu'}: 00:${String(recordSec).padStart(2, '0')}`
                     : 'Sẵn sàng thu'}
                 </span>
               </div>
@@ -773,7 +911,7 @@ export default function CreateWizardPage() {
                 />
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 {!isRecording ? (
                   <button
                     type="button"
@@ -785,14 +923,24 @@ export default function CreateWizardPage() {
                     <span>Bắt đầu Ghi âm</span>
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={stopRecording}
-                    className="flex items-center gap-2 rounded-xl bg-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-950 hover:bg-white"
-                  >
-                    <Square className="h-4 w-4 fill-current" />
-                    <span>Dừng thu</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={togglePauseRecording}
+                      className="flex items-center gap-2 rounded-xl border border-amber-500/50 bg-amber-500/20 px-4 py-2.5 text-sm font-semibold text-amber-200 hover:bg-amber-500/30"
+                    >
+                      {isRecordingPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+                      <span>{isRecordingPaused ? 'Tiếp tục' : 'Tạm dừng'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopRecording}
+                      className="flex items-center gap-2 rounded-xl bg-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-950 hover:bg-white"
+                    >
+                      <Square className="h-4 w-4 fill-current" />
+                      <span>Dừng thu</span>
+                    </button>
+                  </>
                 )}
                 {uploading && (
                   <span className="flex items-center gap-2 text-xs text-indigo-300">
@@ -803,12 +951,38 @@ export default function CreateWizardPage() {
               </div>
             </div>
           ) : (
-            <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-700 bg-[#171c2b] p-8 text-center transition hover:border-indigo-500">
+            <label
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDraggingOver(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDraggingOver(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDraggingOver(false);
+                const f = e.dataTransfer?.files?.[0];
+                if (f) void handleFileUpload(f);
+              }}
+              className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center transition ${
+                isDraggingOver
+                  ? 'border-indigo-400 bg-indigo-600/15'
+                  : 'border-slate-700 bg-[#171c2b] hover:border-indigo-500'
+              }`}
+            >
               <FileAudio className="h-10 w-10 text-indigo-400" />
               <p className="mt-3 text-sm font-medium text-white">
                 Bấm để chọn file hoặc kéo thả vào đây
               </p>
-              <p className="mt-1 text-xs text-slate-400">WAV, MP3, M4A, OGG, FLAC • Tối đa 50 MB</p>
+              <p className="mt-1 text-xs text-slate-400">
+                WAV, MP3, M4A, OGG, FLAC • Tối đa 50 MB •{' '}
+                {audioUploadMode === 'vocal' ? 'Vocal (tối đa 5 phút)' : 'Hum (tối đa 60 giây)'}
+              </p>
               <input
                 type="file"
                 accept=".wav,.mp3,.m4a,.ogg,.flac,audio/*"
@@ -941,7 +1115,14 @@ export default function CreateWizardPage() {
           <div className="grid gap-4 md:grid-cols-3">
             {/* BPM + Tap Tempo + Metronome */}
             <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-4 space-y-2.5">
-              <label className="text-xs font-medium text-slate-400">Tempo (BPM: 40–220)</label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-slate-400">Tempo (BPM: 40–220)</label>
+                {project.analysis.bpm_locked && (
+                  <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] text-indigo-300">
+                    Đã khóa
+                  </span>
+                )}
+              </div>
               <div className="flex items-center gap-2">
                 <input
                   type="number"
@@ -952,7 +1133,7 @@ export default function CreateWizardPage() {
                     const val = Math.max(40, Math.min(220, Number(e.target.value) || 100));
                     updateProject((prev) => ({
                       ...prev,
-                      analysis: { ...prev.analysis, bpm: val },
+                      analysis: { ...prev.analysis, bpm: val, bpm_locked: true },
                     }));
                     engine.setBpm(val);
                   }}
@@ -983,11 +1164,18 @@ export default function CreateWizardPage() {
             <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-4 space-y-2.5">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-medium text-slate-400">Key / Scale</label>
-                {(project.analysis.key_confidence ?? 1) < 0.6 && (
-                  <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300">
-                    Gợi ý (độ tin cậy thấp)
-                  </span>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {project.analysis.key_locked && (
+                    <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] text-indigo-300">
+                      Đã khóa
+                    </span>
+                  )}
+                  {(project.analysis.key_confidence ?? 1) < 0.6 && (
+                    <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300">
+                      Gợi ý (độ tin cậy thấp)
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="flex gap-2">
                 <select
@@ -995,7 +1183,10 @@ export default function CreateWizardPage() {
                   onChange={(e) =>
                     updateProject((prev) => ({
                       ...prev,
-                      analysis: { ...prev.analysis, detected_key: e.target.value },
+                      analysis: { ...prev.analysis, detected_key: e.target.value, key_locked: true },
+                      autotune_settings: prev.autotune_settings.auto_follow_project_key
+                        ? { ...prev.autotune_settings, key: e.target.value }
+                        : prev.autotune_settings,
                     }))
                   }
                   className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-white"
@@ -1011,7 +1202,10 @@ export default function CreateWizardPage() {
                   onChange={(e) =>
                     updateProject((prev) => ({
                       ...prev,
-                      analysis: { ...prev.analysis, detected_scale: e.target.value },
+                      analysis: { ...prev.analysis, detected_scale: e.target.value, key_locked: true },
+                      autotune_settings: prev.autotune_settings.auto_follow_project_key
+                        ? { ...prev.autotune_settings, scale: e.target.value }
+                        : prev.autotune_settings,
                     }))
                   }
                   className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-white"

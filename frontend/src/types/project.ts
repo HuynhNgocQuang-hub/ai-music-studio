@@ -201,6 +201,9 @@ export interface DenoiseResponse {
 export interface AnalyzeRequest {
   project_id: string;
   source_ref: string;
+  bpm_override?: number;
+  key_override?: string;
+  scale_override?: string;
 }
 
 export interface AnalyzeResponse {
@@ -329,6 +332,7 @@ export interface CoachMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp?: string;
+  suggested_actions?: CoachSuggestedAction[];
 }
 
 export interface CoachSuggestedAction {

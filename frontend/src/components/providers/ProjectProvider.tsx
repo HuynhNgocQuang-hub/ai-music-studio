@@ -16,10 +16,10 @@ export type AutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 interface ProjectContextValue {
   project: ProjectState;
   setProject: React.Dispatch<React.SetStateAction<ProjectState>>;
-  updateProject: (updater: (prev: ProjectState) => ProjectState) => void;
+  updateProject: (updater: (prev: ProjectState) => ProjectState) => ProjectState;
   loadProjectIntoSession: (state: ProjectState, options?: { dirty?: boolean }) => void;
   resetProject: () => ProjectState;
-  saveNow: (syncToBackend?: boolean) => Promise<void>;
+  saveNow: (syncToBackend?: boolean, overrideState?: ProjectState) => Promise<void>;
   autoSaveStatus: AutoSaveStatus;
   syncError: string | null;
   lastSavedAt: string | null;
@@ -32,7 +32,7 @@ interface ProjectContextValue {
 const ProjectContext = createContext<ProjectContextValue | null>(null);
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
-  const [project, setProject] = useState<ProjectState>(() => createDefaultProjectState());
+  const [project, setProjectState] = useState<ProjectState>(() => createDefaultProjectState());
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
   const [syncError, setSyncError] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
@@ -99,22 +99,31 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(timer);
   }, [persistDraft]);
 
-  const updateProject = useCallback((updater: (prev: ProjectState) => ProjectState) => {
+  const setProject = useCallback<React.Dispatch<React.SetStateAction<ProjectState>>>((value) => {
+    const prev = latestProjectRef.current;
+    const next = typeof value === 'function' ? value(prev) : value;
+    latestProjectRef.current = next;
+    setProjectState(next);
+  }, []);
+
+  const updateProject = useCallback((updater: (prev: ProjectState) => ProjectState): ProjectState => {
     isDirtyRef.current = true;
-    setProject((prev) => {
-      const next = updater(prev);
-      const effectiveTitle = next.title || next.config.title || 'Untitled Session';
-      return {
-        ...next,
+    const prev = latestProjectRef.current;
+    const next = updater(prev);
+    const effectiveTitle = next.title || next.config.title || 'Untitled Session';
+    const normalized: ProjectState = {
+      ...next,
+      title: effectiveTitle,
+      config: {
+        ...next.config,
         title: effectiveTitle,
-        config: {
-          ...next.config,
-          title: effectiveTitle,
-        },
-        version: (prev.version || 1) + 1,
-        updated_at: new Date().toISOString(),
-      };
-    });
+      },
+      version: (prev.version || 1) + 1,
+      updated_at: new Date().toISOString(),
+    };
+    latestProjectRef.current = normalized;
+    setProjectState(normalized);
+    return normalized;
   }, []);
 
   const loadProjectIntoSession = useCallback(
@@ -130,7 +139,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       };
       isDirtyRef.current = options.dirty ?? false;
       latestProjectRef.current = normalized;
-      setProject(normalized);
+      setProjectState(normalized);
       void saveDraft(normalized, { dirty: options.dirty ?? false }).then((d) => {
         if (d) setLastSavedAt(d.updated_at);
         setSyncError(null);
@@ -144,15 +153,19 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     const fresh = createDefaultProjectState();
     isDirtyRef.current = false;
     latestProjectRef.current = fresh;
-    setProject(fresh);
+    setProjectState(fresh);
     setSyncError(null);
     setAutoSaveStatus('idle');
     return fresh;
   }, []);
 
   const saveNow = useCallback(
-    async (syncToBackend = true) => {
-      await persistDraft(latestProjectRef.current, syncToBackend);
+    async (syncToBackend = true, overrideState?: ProjectState) => {
+      const stateToSave = overrideState ?? latestProjectRef.current;
+      if (overrideState) {
+        latestProjectRef.current = overrideState;
+      }
+      await persistDraft(stateToSave, syncToBackend);
     },
     [persistDraft]
   );
@@ -164,7 +177,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const acceptRestoreDraft = useCallback((draft: StoredDraft) => {
     isDirtyRef.current = false;
     latestProjectRef.current = draft.state;
-    setProject(draft.state);
+    setProjectState(draft.state);
     setLastSavedAt(draft.updated_at);
     setSyncError(null);
     setAutoSaveStatus('saved');
@@ -184,7 +197,8 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       const targetId = decodeURIComponent(match[1]);
       void getDraft(targetId).then((draft) => {
         if (draft) {
-          setProject(draft.state);
+          latestProjectRef.current = draft.state;
+          setProjectState(draft.state);
           setLastSavedAt(draft.updated_at);
         }
       });

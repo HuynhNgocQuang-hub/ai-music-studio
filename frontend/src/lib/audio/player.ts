@@ -276,22 +276,40 @@ export class MultiTrackAudioEngine {
     // Fetch backend audio refs when missing, forced, or source revision changed
     const pid = project.project_id;
     const forceSet = new Set(options?.forceSlots ?? []);
+    const autotuneEnabled = project.autotune_settings?.enabled !== false;
+    if (!autotuneEnabled) {
+      this.invalidateSlots(['autotune']);
+    }
+
     const refs: Array<[string, string | null | undefined]> = [
       ['raw', project.audio_assets.raw_input_ref],
       ['dry', project.audio_assets.dry_denoised_ref],
-      ['autotune', project.audio_assets.tuned_vocal_ref],
+      ['autotune', autotuneEnabled ? project.audio_assets.tuned_vocal_ref : null],
       ['ai_mix', project.audio_assets.rendered_mix_ref],
       ['preserve', project.audio_assets.preserve_mix_ref],
       ['enhance', project.audio_assets.enhance_mix_ref],
       ['accompaniment', project.audio_assets.accompaniment_ref],
     ];
 
-    // Also include any custom clip sources from audio tracks (e.g. texture or imported clips)
+    // Also include any custom clip sources from audio tracks (e.g. vocal overdubs, texture, or imported clips)
+    const standardVocalSlotRefs = new Set([
+      'vocal',
+      'raw_input_ref',
+      'dry_denoised_ref',
+      'tuned_vocal_ref',
+    ]);
     const seenSources = new Set<string>(refs.map(([, r]) => r || '').filter(Boolean));
     for (const track of Object.values(project.tracks)) {
       if (!track || track.type !== 'audio') continue;
       for (const clip of track.clips || []) {
-        if (!clip.source || clip.source.startsWith('idb://') || clip.source === 'overdub') continue;
+        if (
+          !clip.source ||
+          clip.source.startsWith('idb://') ||
+          clip.source === 'overdub' ||
+          standardVocalSlotRefs.has(clip.source)
+        ) {
+          continue;
+        }
         if (!seenSources.has(clip.source)) {
           seenSources.add(clip.source);
           refs.push([clip.source, clip.source]);
@@ -361,13 +379,16 @@ export class MultiTrackAudioEngine {
   private resolveBufferForClip(clip: AudioClip, trackId: string): AudioBuffer | undefined {
     const src = clip.source || '';
     if (trackId === 'vocal') {
-      if (src.startsWith('idb://overdub') || clip.id.startsWith('clip_overdub_') || src.includes('overdub')) {
-        return this.buffers.get(src) || this.buffers.get('overdub');
+      if (src.startsWith('idb://overdub') || clip.id.startsWith('clip_overdub_') || src === 'overdub') {
+        return this.buffers.get(src) || this.buffers.get(clip.id) || this.buffers.get('overdub');
       }
       const assets = this.currentProject?.audio_assets;
       const isMainVocalSource =
         !src ||
         src === 'vocal' ||
+        src === 'raw_input_ref' ||
+        src === 'dry_denoised_ref' ||
+        src === 'tuned_vocal_ref' ||
         src === assets?.raw_input_ref ||
         src === assets?.dry_denoised_ref ||
         src === assets?.tuned_vocal_ref;
@@ -375,16 +396,23 @@ export class MultiTrackAudioEngine {
       if (isMainVocalSource) {
         if (this.abMode === 'raw' && this.buffers.has('raw')) return this.buffers.get('raw');
         if (this.abMode === 'dry' && this.buffers.has('dry')) return this.buffers.get('dry');
-        if ((this.abMode === 'autotune' || this.abMode === 'ai_mix') && this.buffers.has('autotune')) {
+        if (
+          (this.abMode === 'autotune' || this.abMode === 'ai_mix') &&
+          this.currentProject?.autotune_settings?.enabled !== false &&
+          this.buffers.has('autotune')
+        ) {
           return this.buffers.get('autotune');
         }
+        const fallbackKey = this.getVocalSlot();
+        return fallbackKey ? this.buffers.get(fallbackKey) : undefined;
       }
       if (this.buffers.has(src)) return this.buffers.get(src);
-      const fallbackKey = this.pickActiveVocalBufferKey();
-      return fallbackKey ? this.buffers.get(fallbackKey) : undefined;
+      if (this.buffers.has(clip.id)) return this.buffers.get(clip.id);
+      return undefined;
     }
 
     if (this.buffers.has(src)) return this.buffers.get(src);
+    if (this.buffers.has(clip.id)) return this.buffers.get(clip.id);
     return undefined;
   }
 
@@ -682,32 +710,42 @@ export class MultiTrackAudioEngine {
     this.activeSources.push(src);
   }
 
-  private pickActiveVocalBufferKey(): string | null {
+  private getVocalSlot(): string | null {
+    const autotuneEnabled = this.currentProject?.autotune_settings?.enabled !== false;
     if (this.abMode === 'raw' && this.buffers.has('raw')) return 'raw';
     if (this.abMode === 'dry' && this.buffers.has('dry')) return 'dry';
-    if ((this.abMode === 'autotune' || this.abMode === 'ai_mix') && this.buffers.has('autotune')) {
+    if (
+      autotuneEnabled &&
+      (this.abMode === 'autotune' || this.abMode === 'ai_mix') &&
+      this.buffers.has('autotune')
+    ) {
       return 'autotune';
     }
-    if (this.buffers.has('autotune')) return 'autotune';
+    if (autotuneEnabled && this.buffers.has('autotune')) return 'autotune';
     if (this.buffers.has('dry')) return 'dry';
     if (this.buffers.has('raw')) return 'raw';
     return null;
   }
 
+  private pickActiveVocalBufferKey(): string | null {
+    return this.getVocalSlot();
+  }
+
   private pickActiveBufferKey(): string | null {
+    const autotuneEnabled = this.currentProject?.autotune_settings?.enabled !== false;
     if (this.abMode === 'preserve') {
       if (this.buffers.has('preserve')) return 'preserve';
-      if (this.buffers.has('autotune')) return 'autotune';
+      if (autotuneEnabled && this.buffers.has('autotune')) return 'autotune';
     }
     if (this.abMode === 'enhance') {
       if (this.buffers.has('enhance')) return 'enhance';
-      if (this.buffers.has('autotune')) return 'autotune';
+      if (autotuneEnabled && this.buffers.has('autotune')) return 'autotune';
     }
     if (this.abMode === 'ai_mix') {
       if (this.buffers.has('ai_mix')) return 'ai_mix';
-      if (this.buffers.has('autotune')) return 'autotune';
+      if (autotuneEnabled && this.buffers.has('autotune')) return 'autotune';
     }
-    return this.pickActiveVocalBufferKey();
+    return this.getVocalSlot();
   }
 
   private scheduleMidiTracks(anchorTime: number, offsetSec: number, maxEndSec = this.durationSec): void {
