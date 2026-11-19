@@ -261,20 +261,30 @@ export default function TimelineEditor({
 
   const handleAddSection = () => {
     const last = project.song_structure.sections[project.song_structure.sections.length - 1];
-    const startBar = last ? Math.min(totalBars, last.start_bar + last.bars) : 1;
+    const startBar = last ? last.start_bar + last.bars : 1;
     const newSec: SongSection = {
       name: 'Bridge',
       start_bar: startBar,
-      bars: Math.max(1, Math.min(4, totalBars - startBar + 1)),
+      bars: 4,
       energy: 0.75,
     };
-    onMutateWithUndo((prev) => ({
-      ...prev,
-      song_structure: {
-        ...prev.song_structure,
-        sections: [...prev.song_structure.sections, newSec],
-      },
-    }));
+    onMutateWithUndo((prev) => {
+      const nextSections = [...prev.song_structure.sections, newSec];
+      const maxEnd = Math.max(
+        4,
+        prev.song_structure.total_bars,
+        ...nextSections.map((s) => s.start_bar + s.bars - 1)
+      );
+      return {
+        ...prev,
+        song_structure: {
+          ...prev.song_structure,
+          total_bars: maxEnd,
+          sections: nextSections,
+        },
+      };
+    });
+    onMarkChordsDirty();
   };
 
   const handleSaveSectionEdit = () => {
@@ -283,26 +293,42 @@ export default function TimelineEditor({
       const nextSections = [...prev.song_structure.sections];
       nextSections[editingSectionIdx] = {
         ...sectionDraft,
-        start_bar: Math.max(1, Math.min(totalBars, Math.round(sectionDraft.start_bar))),
+        start_bar: Math.max(1, Math.round(sectionDraft.start_bar)),
         bars: Math.max(1, Math.round(sectionDraft.bars)),
       };
+      const maxEnd = nextSections.length
+        ? Math.max(4, ...nextSections.map((s) => s.start_bar + s.bars - 1))
+        : prev.song_structure.total_bars;
       return {
         ...prev,
-        song_structure: { ...prev.song_structure, sections: nextSections },
+        song_structure: {
+          ...prev.song_structure,
+          total_bars: maxEnd,
+          sections: nextSections,
+        },
       };
     });
+    onMarkChordsDirty();
     setEditingSectionIdx(null);
     setSectionDraft(null);
   };
 
   const handleDeleteSection = (idx: number) => {
-    onMutateWithUndo((prev) => ({
-      ...prev,
-      song_structure: {
-        ...prev.song_structure,
-        sections: prev.song_structure.sections.filter((_, i) => i !== idx),
-      },
-    }));
+    onMutateWithUndo((prev) => {
+      const nextSections = prev.song_structure.sections.filter((_, i) => i !== idx);
+      const maxEnd = nextSections.length
+        ? Math.max(4, ...nextSections.map((s) => s.start_bar + s.bars - 1))
+        : prev.song_structure.total_bars;
+      return {
+        ...prev,
+        song_structure: {
+          ...prev.song_structure,
+          total_bars: maxEnd,
+          sections: nextSections,
+        },
+      };
+    });
+    onMarkChordsDirty();
     setEditingSectionIdx(null);
     setSectionDraft(null);
   };

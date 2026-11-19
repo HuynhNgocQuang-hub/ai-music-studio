@@ -158,7 +158,7 @@ export default function StudioPage() {
     };
   }, [routeId, loadProjectIntoSession]);
 
-  // Re-sync audio buffers only when audio asset refs, track clips/notes, or bar structure change
+  // Re-sync audio buffers & engine project snapshot whenever audio refs, clips, MIDI notes, or tempo/bars change
   const audioSignature = useMemo(() => {
     const assets = project.audio_assets;
     const trackSig = Object.entries(project.tracks)
@@ -171,7 +171,9 @@ export default function StudioPage() {
                   `${c.id}:${c.source}:${c.start_bar}:${c.trim_start_sec}:${c.trim_end_sec ?? ''}:${c.fade_in_ms}:${c.fade_out_ms ?? 20}:${c.offset_ms ?? 0}`
               )
               .join(',')}`
-          : `${k}:m:${t!.instrument || ''}:${t!.notes.length}`
+          : `${k}:m:${t!.instrument || ''}:${t!.notes
+              .map((n) => `${n.pitch}:${n.start_beat}:${n.duration}:${n.velocity}`)
+              .join(';')}`
       )
       .join('|');
     return [
@@ -183,6 +185,8 @@ export default function StudioPage() {
       assets.accompaniment_ref ?? '',
       assets.preserve_mix_ref ?? '',
       assets.enhance_mix_ref ?? '',
+      project.analysis.bpm,
+      project.analysis.time_signature,
       project.song_structure.total_bars,
       trackSig,
     ].join('::');
@@ -190,6 +194,8 @@ export default function StudioPage() {
     project.project_id,
     project.audio_assets,
     project.tracks,
+    project.analysis.bpm,
+    project.analysis.time_signature,
     project.song_structure.total_bars,
   ]);
 
@@ -382,6 +388,8 @@ export default function StudioPage() {
         project_id: current.project_id,
         chords: current.song_structure.chords,
         locked_tracks: lockedTracks,
+        sections: current.song_structure.sections,
+        total_bars: current.song_structure.total_bars,
       });
       sseCleanupRef.current?.();
       sseCleanupRef.current = subscribeJobEvents(
