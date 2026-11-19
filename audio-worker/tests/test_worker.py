@@ -19,9 +19,11 @@ if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
 from app.main import app
+from app.schemas import AnalysisResult, AudioAssets, ProjectState, SongStructure, TrackState
 from app.services.autotune import apply_preset, key_to_pitch_class, nearest_scale_midi
 from app.services.denoise import decode_wav_bytes, encode_wav_bytes
 from app.services.exporter import apply_master_limiter, peak_dbfs
+from app.services.renderer import render_project_mix
 
 
 def _make_melody_wav(duration_sec: float = 4.0, sr: int = 44100, add_noise: bool = True) -> bytes:
@@ -287,3 +289,31 @@ def test_render_mode_differentiation(client: TestClient) -> None:
         for m2 in distinct_modes[i + 1 :]:
             diff = float(np.max(np.abs(rendered[m1] - rendered[m2])))
             assert diff > 1e-3, f"Expected distinct previews for {m1} vs {m2}, got max diff {diff}"
+
+
+def test_empty_non_vocal_audio_track_is_silent() -> None:
+    """Empty non-vocal audio tracks (e.g. texture) produce silence while empty vocal falls back cleanly."""
+    vocal_wav = _make_melody_wav(duration_sec=1.0, add_noise=False)
+    project = ProjectState(
+        project_id="proj_empty_texture_test",
+        audio_assets=AudioAssets(
+            raw_input_ref="mem://raw/test.wav",
+            dry_denoised_ref="mem://dry/test.wav",
+        ),
+        analysis=AnalysisResult(bpm=120.0, time_signature="4/4", bars=1),
+        song_structure=SongStructure(total_bars=1),
+        tracks={
+            "vocal": TrackState(type="audio", volume=1.0, pan=0.0, clips=[]),
+            "texture": TrackState(type="audio", volume=1.0, pan=0.0, clips=[]),
+        },
+    )
+    assets = {
+        "mem://raw/test.wav": vocal_wav,
+        "mem://dry/test.wav": vocal_wav,
+    }
+
+    mix, stems, sr = render_project_mix(project, audio_assets=assets, mode="ai_mix", apply_mastering=False)
+    assert sr == 44100
+    assert np.max(np.abs(stems["texture"])) == 0.0
+    assert np.max(np.abs(stems["vocal"])) > 0.01
+    assert np.allclose(mix, stems["vocal"])

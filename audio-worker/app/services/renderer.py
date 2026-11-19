@@ -232,6 +232,7 @@ def _render_audio_track(
     total_samples: int,
     sr: int,
     mode: str,
+    track_name: str = "vocal",
 ) -> np.ndarray:
     """Assemble audio clips (or default vocal asset) onto timeline from provided asset map."""
     buf = np.zeros(total_samples, dtype=np.float32)
@@ -271,11 +272,12 @@ def _render_audio_track(
 
     clips = list(track.clips)
     if not clips:
-        wav_bytes = _resolve_ref("raw_input_ref" if mode_norm == "raw" else "dry_denoised_ref")
-        if wav_bytes:
-            samples, _ = decode_wav_bytes(wav_bytes)
-            n = min(total_samples, len(samples))
-            buf[:n] += samples[:n]
+        if track_name.lower() == "vocal":
+            wav_bytes = _resolve_ref("raw_input_ref" if mode_norm == "raw" else "dry_denoised_ref")
+            if wav_bytes:
+                samples, _ = decode_wav_bytes(wav_bytes)
+                n = min(total_samples, len(samples))
+                buf[:n] += samples[:n]
         return buf
 
     for clip in clips:
@@ -378,7 +380,9 @@ def render_project_mix(
 
     for name, track in project.tracks.items():
         if track.type == "audio":
-            mono = _render_audio_track(track, project, assets, total_samples, sample_rate, mode_norm)
+            mono = _render_audio_track(
+                track, project, assets, total_samples, sample_rate, mode_norm, track_name=name
+            )
             mode_gain = 1.05 if mode_norm == "preserve" else 1.0
         else:
             mono = midi_monos.get(name, np.zeros(total_samples, dtype=np.float32))
