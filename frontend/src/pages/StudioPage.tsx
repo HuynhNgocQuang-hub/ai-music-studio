@@ -1,20 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
-  AlertTriangle,
   Bot,
   ChevronDown,
   ChevronUp,
   Download,
   FileArchive,
-  Lock,
   MessageSquare,
-  Mic,
   Music,
   Pause,
   Play,
   Redo2,
-  RefreshCw,
   Repeat,
   Save,
   Scissors,
@@ -23,11 +19,13 @@ import {
   Sparkles,
   Square,
   Undo2,
-  Unlock,
   Volume2,
+  Wand2,
 } from 'lucide-react';
 import {
   ApiError,
+  autoMixProject,
+  autoTrimVocal,
   autotuneAudio,
   chatWithCoach,
   exportAimusic,
@@ -40,6 +38,7 @@ import {
   subscribeJobEvents,
   suggestLyrics,
   triggerBlobDownload,
+  uploadTrackClip,
 } from '@/lib/api/client';
 import {
   encodeBlobToWav,
@@ -49,6 +48,8 @@ import {
 } from '@/lib/audio/player';
 import { getAudioBlob, getDraft, markDraftSaved, saveAudioBlob } from '@/lib/storage/indexeddb';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
+import PianoRollEditor from '@/components/studio/PianoRollEditor';
+import TimelineEditor from '@/components/studio/TimelineEditor';
 import type {
   AudioClip,
   AutoTunePreset,
@@ -95,14 +96,19 @@ export default function StudioPage() {
   const [undoStack, setUndoStack] = useState<ProjectState[]>([]);
   const [redoStack, setRedoStack] = useState<ProjectState[]>([]);
 
-  // Chords sync dirty flag
+  // Chords sync dirty flag & Loop Region
   const [chordsDirty, setChordsDirty] = useState(false);
-  const [editingChordIdx, setEditingChordIdx] = useState<number | null>(null);
-  const [chordInput, setChordInput] = useState('');
+  const [loopStartBar, setLoopStartBar] = useState<number>(1);
+  const [loopEndBar, setLoopEndBar] = useState<number>(() =>
+    Math.max(2, (project.song_structure.total_bars || 8) + 1)
+  );
 
   // Status / Job feedback
   const [studioNotice, setStudioNotice] = useState<string | null>(null);
   const [busyJobTrack, setBusyJobTrack] = useState<string | null>(null);
+  const [autoTrimBusy, setAutoTrimBusy] = useState(false);
+  const [autoMixBusy, setAutoMixBusy] = useState(false);
+  const [clipUploadBusy, setClipUploadBusy] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   // Overdub & AI Fit Check
@@ -156,10 +162,16 @@ export default function StudioPage() {
   const audioSignature = useMemo(() => {
     const assets = project.audio_assets;
     const trackSig = Object.entries(project.tracks)
+      .filter(([, t]) => Boolean(t))
       .map(([k, t]) =>
-        t.type === 'audio'
-          ? `${k}:a:${t.clips.map((c) => `${c.id}:${c.source}:${c.offset_ms ?? 0}`).join(',')}`
-          : `${k}:m:${t.instrument || ''}:${t.notes.length}`
+        t!.type === 'audio'
+          ? `${k}:a:${t!.clips
+              .map(
+                (c) =>
+                  `${c.id}:${c.source}:${c.start_bar}:${c.trim_start_sec}:${c.trim_end_sec ?? ''}:${c.fade_in_ms}:${c.fade_out_ms ?? 20}:${c.offset_ms ?? 0}`
+              )
+              .join(',')}`
+          : `${k}:m:${t!.instrument || ''}:${t!.notes.length}`
       )
       .join('|');
     return [
@@ -216,23 +228,59 @@ export default function StudioPage() {
     [updateProject]
   );
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (undoStack.length === 0) return;
     const prev = undoStack[undoStack.length - 1];
     setUndoStack((s) => s.slice(0, -1));
-    setRedoStack((s) => [...s, project]);
+    setRedoStack((s) => [...s, latestProjectRef.current]);
     loadProjectIntoSession(prev, { dirty: true });
     void engine.syncFromProject(prev);
-  };
+  }, [undoStack, engine, loadProjectIntoSession]);
 
-  const handleRedo = () => {
+  const handleRedo = useCallback(() => {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     setRedoStack((s) => s.slice(0, -1));
-    setUndoStack((s) => [...s, project]);
+    setUndoStack((s) => [...s.slice(-19), latestProjectRef.current]);
     loadProjectIntoSession(next, { dirty: true });
     void engine.syncFromProject(next);
-  };
+  }, [redoStack, engine, loadProjectIntoSession]);
+
+  // Keyboard shortcuts: Ctrl+Z (Undo) and Ctrl+Y / Ctrl+Shift+Z (Redo)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleUndo, handleRedo]);
+
+  // Keep loop end bar clamped to project total_bars when structure changes
+  useEffect(() => {
+    const maxEnd = Math.max(2, (project.song_structure.total_bars || 8) + 1);
+    setLoopEndBar((curr) => {
+      if (curr > maxEnd || curr <= loopStartBar) return maxEnd;
+      return curr;
+    });
+  }, [project.song_structure.total_bars, loopStartBar]);
 
   // Compute Bar:Beat readout
   const beatsPerBar = project.analysis.time_signature === '3/4' ? 3 : 4;
@@ -240,7 +288,7 @@ export default function StudioPage() {
   const currentBar = Math.floor(totalBeats / beatsPerBar) + 1;
   const currentBeat = Math.floor(totalBeats % beatsPerBar) + 1;
 
-  const allTracksMuted = Object.values(project.tracks).every((t) => Boolean(t.mute));
+  const allTracksMuted = Object.values(project.tracks).every((t) => !t || Boolean(t.mute));
 
   const handleToggleTrackFlag = (trackId: string, flag: 'mute' | 'solo' | 'locked') => {
     mutateWithUndo((prev) => {
@@ -328,7 +376,7 @@ export default function StudioPage() {
     try {
       await saveNow(true);
       const lockedTracks = Object.entries(current.tracks)
-        .filter(([, t]) => t.locked)
+        .filter(([, t]) => Boolean(t?.locked))
         .map(([k]) => k);
       const { job_id } = await rearrangeChordsJob({
         project_id: current.project_id,
@@ -629,6 +677,82 @@ export default function StudioPage() {
     }
   };
 
+  const handleAutoTrimVocal = async () => {
+    const current = latestProjectRef.current;
+    setAutoTrimBusy(true);
+    setStudioNotice('AI đang phân tích khoảng lặng & căn nhịp Vocal...');
+    try {
+      await saveNow(true);
+      const res = await autoTrimVocal(current.project_id);
+      setUndoStack((s) => [...s.slice(-19), current]);
+      setRedoStack([]);
+      loadProjectIntoSession(res.project_state, { dirty: true });
+      await engine.syncFromProject(res.project_state);
+      setStudioNotice(
+        res.summary || 'Đã chạy AI Auto-Trim Vocal và cập nhật trim/offset trên timeline.'
+      );
+    } catch (err) {
+      setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi chạy AI Auto-Trim Vocal.');
+    } finally {
+      setAutoTrimBusy(false);
+    }
+  };
+
+  const handleAutoMix = async () => {
+    const current = latestProjectRef.current;
+    setAutoMixBusy(true);
+    setStudioNotice('AI đang cân bằng Gain, Pan và Master Limiter (-1.0 dBFS)...');
+    try {
+      await saveNow(true);
+      const res = await autoMixProject(current.project_id);
+      setUndoStack((s) => [...s.slice(-19), current]);
+      setRedoStack([]);
+      loadProjectIntoSession(res.project_state, { dirty: true });
+      await engine.syncFromProject(res.project_state);
+      const detail =
+        res.summary ||
+        (res.mix_notes && res.mix_notes.length > 0 ? res.mix_notes.join(' • ') : null) ||
+        'Đã hoàn tất AI Auto-Mix & Master Limiter (-1.0 dBFS).';
+      setStudioNotice(detail);
+    } catch (err) {
+      setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi chạy AI Auto-Mix.');
+    } finally {
+      setAutoMixBusy(false);
+    }
+  };
+
+  const handleUploadTextureClip = async (file: File) => {
+    const current = latestProjectRef.current;
+    setClipUploadBusy(true);
+    setStudioNotice(`Đang import audio sample "${file.name}" vào track Texture...`);
+    try {
+      await saveNow(true);
+      const res = await uploadTrackClip(current.project_id, file, 'texture');
+      if (res.audio_ref) {
+        await engine.loadAudioFromBlob(res.audio_ref, file);
+      }
+      setUndoStack((s) => [...s.slice(-19), current]);
+      setRedoStack([]);
+      loadProjectIntoSession(res.project_state, { dirty: true });
+      await engine.syncFromProject(res.project_state);
+      setStudioNotice(`Đã import sample "${file.name}" vào track Texture.`);
+    } catch (err) {
+      setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi import audio sample.');
+    } finally {
+      setClipUploadBusy(false);
+    }
+  };
+
+  const getClipDurationSec = useCallback(
+    (clip: AudioClip, trackId: string): number => {
+      const bufDur = engine.getClipBufferDuration(clip, trackId);
+      const fallbackDur = project.analysis.duration_sec || transport.durationSec || 8;
+      const sourceEnd = clip.trim_end_sec ?? bufDur ?? fallbackDur;
+      return Math.max(0.1, sourceEnd - (clip.trim_start_sec || 0));
+    },
+    [engine, project.analysis.duration_sec, transport.durationSec]
+  );
+
   const handleSaveAimusic = async () => {
     try {
       await saveNow(true);
@@ -665,13 +789,27 @@ export default function StudioPage() {
     }
   };
 
-  const trackKeys: Array<'vocal' | 'drums' | 'bass' | 'harmony' | 'lead'> = [
-    'vocal',
-    'drums',
-    'bass',
-    'harmony',
-    'lead',
-  ];
+  const trackKeys: Array<'vocal' | 'texture' | 'drums' | 'bass' | 'harmony' | 'lead'> = useMemo(() => {
+    const base: Array<'vocal' | 'texture' | 'drums' | 'bass' | 'harmony' | 'lead'> = ['vocal'];
+    if (project.tracks.texture) base.push('texture');
+    base.push('drums', 'bass', 'harmony', 'lead');
+    return base;
+  }, [project.tracks.texture]);
+
+  // Determine active Karaoke lyric line index based on currentBar
+  const activeLyricIdx = useMemo(() => {
+    const lines = project.lyrics.lines;
+    if (!lines.length) return -1;
+    let bestIdx = -1;
+    let bestBar = -Infinity;
+    lines.forEach((line, idx) => {
+      if (line.bar <= currentBar && line.bar >= bestBar) {
+        bestBar = line.bar;
+        bestIdx = idx;
+      }
+    });
+    return bestIdx;
+  }, [project.lyrics.lines, currentBar]);
 
   return (
     <div className="flex h-[calc(100vh-5.5rem)] flex-col gap-3 overflow-hidden">
@@ -759,7 +897,7 @@ export default function StudioPage() {
               type="button"
               disabled={undoStack.length === 0}
               onClick={handleUndo}
-              title="Undo"
+              title="Undo (Ctrl+Z)"
               className="rounded-lg border border-slate-700 p-1.5 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
             >
               <Undo2 className="h-4 w-4" />
@@ -768,7 +906,7 @@ export default function StudioPage() {
               type="button"
               disabled={redoStack.length === 0}
               onClick={handleRedo}
-              title="Redo"
+              title="Redo (Ctrl+Y)"
               className="rounded-lg border border-slate-700 p-1.5 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
             >
               <Redo2 className="h-4 w-4" />
@@ -776,7 +914,7 @@ export default function StudioPage() {
           </div>
 
           {/* Timeline tools */}
-          <div className="hidden items-center gap-1 rounded-lg border border-slate-800 bg-[#0b0d14] p-0.5 lg:flex">
+          <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-[#0b0d14] p-0.5">
             <button
               type="button"
               onClick={() => setTool('select')}
@@ -789,6 +927,7 @@ export default function StudioPage() {
             <button
               type="button"
               onClick={() => setTool('split')}
+              title="Dao cắt (Split Audio Clip)"
               className={`flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium ${
                 tool === 'split' ? 'bg-indigo-600 text-white' : 'text-slate-400'
               }`}
@@ -808,7 +947,7 @@ export default function StudioPage() {
           </div>
         </div>
 
-        {/* Right Transport Controls: A/B + Save .aimusic + Export + Coach Drawer Toggle */}
+        {/* Right Transport Controls: A/B + Auto-Mix + Save .aimusic + Export + Coach Drawer Toggle */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center rounded-lg border border-slate-800 bg-[#0b0d14] p-0.5 text-[11px]">
             {(
@@ -830,6 +969,17 @@ export default function StudioPage() {
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            disabled={autoMixBusy}
+            onClick={() => void handleAutoMix()}
+            title="AI tự cân bằng Volume, Pan & Master Limiter"
+            className="flex items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-600/20 px-2.5 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-600/35 disabled:opacity-50"
+          >
+            <Wand2 className="h-3.5 w-3.5 text-indigo-300" />
+            <span>{autoMixBusy ? 'Auto-Mixing...' : 'Auto-Mix'}</span>
+          </button>
 
           <button
             type="button"
@@ -910,208 +1060,41 @@ export default function StudioPage() {
       {/* MAIN WORKSPACE: Center Timeline + Right AI Coach Drawer */}
       <div className="flex min-h-0 flex-1 gap-3 overflow-hidden">
         <div className="flex min-w-0 flex-1 flex-col gap-3 overflow-hidden">
-          {/* 2. MULTI-TRACK TIMELINE & CHORD TRACK */}
-          <div className="flex-1 overflow-auto rounded-xl border border-slate-800 bg-[#121622] p-3 space-y-2">
-            {/* Section Bar & Chord Timeline */}
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] font-semibold uppercase text-slate-400 mr-1">Sections:</span>
-                {project.song_structure.sections.map((sec, idx) => (
-                  <span
-                    key={idx}
-                    className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
-                      sec.has_user_motif
-                        ? 'bg-indigo-600/30 text-indigo-200 ring-1 ring-indigo-500/40'
-                        : 'bg-slate-800 text-slate-300'
-                    }`}
-                  >
-                    {sec.name} ({sec.bars}b)
-                  </span>
-                ))}
-              </div>
-              {chordsDirty && (
-                <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-1 text-[11px] text-amber-300">
-                    <AlertTriangle className="h-3 w-3" /> Hòa âm chưa đồng bộ
-                  </span>
-                  <button
-                    type="button"
-                    disabled={busyJobTrack === 'rearrange'}
-                    onClick={() => void handleRearrangeChords()}
-                    className="rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-semibold text-slate-950 hover:bg-amber-400"
-                  >
-                    {busyJobTrack === 'rearrange' ? 'Đang cập nhật...' : 'Cập nhật nhạc đệm'}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Chord cells */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-              <span className="w-36 shrink-0 text-[11px] font-semibold text-slate-400">Chord Track</span>
-              {project.song_structure.chords.map((ch, idx) => (
-                <div key={idx} className="min-w-[68px]">
-                  {editingChordIdx === idx ? (
-                    <input
-                      autoFocus
-                      value={chordInput}
-                      onChange={(e) => setChordInput(e.target.value)}
-                      onBlur={() => {
-                        if (chordInput.trim()) {
-                          mutateWithUndo((p) => {
-                            const nextChords = [...p.song_structure.chords];
-                            nextChords[idx] = { ...nextChords[idx], symbol: chordInput.trim() };
-                            return { ...p, song_structure: { ...p.song_structure, chords: nextChords } };
-                          });
-                          setChordsDirty(true);
-                        }
-                        setEditingChordIdx(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                      }}
-                      className="w-16 rounded border border-indigo-500 bg-slate-900 px-1.5 py-0.5 text-center text-xs font-bold text-white"
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingChordIdx(idx);
-                        setChordInput(ch.symbol);
-                      }}
-                      title="Bấm để sửa hợp âm"
-                      className="w-full rounded border border-slate-700 bg-[#171c2b] px-2 py-1 text-center text-xs font-semibold text-emerald-300 hover:border-indigo-500"
-                    >
-                      {ch.symbol}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            {/* Tracks Rows */}
-            <div className="space-y-2 pt-1">
-              {trackKeys.map((trackId) => {
-                const track = project.tracks[trackId];
-                if (!track) return null;
-                return (
-                  <div
-                    key={trackId}
-                    className="flex items-center gap-3 rounded-xl border border-slate-800 bg-[#161b29] p-2.5"
-                  >
-                    {/* Track Controls */}
-                    <div className="w-56 shrink-0 space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold uppercase tracking-wide text-white">
-                          {trackId}
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          {track.type === 'audio' ? 'Audio Clips' : track.instrument || 'midi'}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleTrackFlag(trackId, 'mute')}
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                            track.mute ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          M
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleToggleTrackFlag(trackId, 'solo')}
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                            track.solo ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          S
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleToggleTrackFlag(trackId, 'locked')}
-                          title={track.locked ? 'Đã khóa' : 'Khóa track'}
-                          className={`rounded p-1 ${
-                            track.locked ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          {track.locked ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}
-                        </button>
-
-                        {track.type === 'audio' ? (
-                          <button
-                            type="button"
-                            onClick={() => void handleStartOverdub()}
-                            className={`ml-auto flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold ${
-                              isOverdubbing
-                                ? 'bg-rose-600 text-white animate-pulse'
-                                : 'bg-rose-600/20 text-rose-300 hover:bg-rose-600/30'
-                            }`}
-                          >
-                            <Mic className="h-3 w-3" />
-                            <span>{isOverdubbing ? 'Dừng Overdub' : 'Record Overdub'}</span>
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={track.locked || busyJobTrack === trackId}
-                            onClick={() => void handleRegenerateTrack(trackId)}
-                            className="ml-auto flex items-center gap-1 rounded bg-indigo-600/20 px-2 py-0.5 text-[10px] font-semibold text-indigo-300 hover:bg-indigo-600/30 disabled:opacity-40"
-                          >
-                            <RefreshCw
-                              className={`h-3 w-3 ${busyJobTrack === trackId ? 'animate-spin' : ''}`}
-                            />
-                            <span>Regen</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Timeline Clip Lane */}
-                    <div
-                      onClick={() => {
-                        if (track.type === 'midi') {
-                          setSelectedTrack(trackId as 'drums' | 'bass' | 'harmony' | 'lead');
-                          setActiveTab('piano_roll');
-                        }
-                      }}
-                      className="relative flex h-14 flex-1 cursor-pointer items-center overflow-hidden rounded-lg border border-slate-800 bg-[#0e121c] px-2"
-                    >
-                      {track.type === 'audio' ? (
-                        <div className="flex h-10 w-full items-center gap-2 overflow-x-auto rounded-md border border-emerald-500/40 bg-emerald-500/15 px-3 text-xs text-emerald-200">
-                          <span className="shrink-0">
-                            {project.audio_assets.tuned_vocal_ref
-                              ? 'Vocal Clip (Auto-Tuned / Dry Ready)'
-                              : project.audio_assets.dry_denoised_ref
-                              ? 'Vocal Clip (Dry Denoised)'
-                              : 'Chưa có Audio Clip — Dùng Record Overdub hoặc Wizard /create'}
-                          </span>
-                          {track.clips
-                            .filter((c) => c.id.startsWith('clip_overdub_') || c.source.includes('overdub'))
-                            .map((c) => (
-                              <span
-                                key={c.id}
-                                className="shrink-0 rounded border border-rose-400/40 bg-rose-500/20 px-2 py-0.5 text-[10px] font-medium text-rose-200"
-                              >
-                                Overdub ({c.offset_ms ? `${c.offset_ms > 0 ? '+' : ''}${c.offset_ms}ms` : 'Bar ' + c.start_bar})
-                              </span>
-                            ))}
-                        </div>
-                      ) : (
-                        <div className="flex h-10 w-full items-center justify-between rounded-md border border-indigo-500/30 bg-indigo-500/15 px-3 text-xs text-indigo-200">
-                          <span>
-                            MIDI Pattern ({track.notes.length} notes • {track.instrument || 'default'})
-                          </span>
-                          <span className="text-[10px] text-indigo-300">Bấm để mở Piano Roll</span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          {/* 2. INTERACTIVE MULTI-TRACK TIMELINE, SECTION/CHORD & CLIP EDITOR */}
+          <TimelineEditor
+            project={project}
+            transport={transport}
+            tool={tool}
+            snapGrid={snapGrid}
+            chordsDirty={chordsDirty}
+            busyJobTrack={busyJobTrack}
+            isOverdubbing={isOverdubbing}
+            autoTrimBusy={autoTrimBusy}
+            clipUploadBusy={clipUploadBusy}
+            loopStartBar={loopStartBar}
+            loopEndBar={loopEndBar}
+            onSeekBar={(bar) => engine.seekToBar(bar)}
+            onLoopRegionChange={(s, e) => {
+              setLoopStartBar(s);
+              setLoopEndBar(e);
+              engine.setLoopRegionBars(s, e);
+            }}
+            onMutateWithUndo={mutateWithUndo}
+            onMarkChordsDirty={() => setChordsDirty(true)}
+            onRearrangeChords={() => void handleRearrangeChords()}
+            onToggleTrackFlag={handleToggleTrackFlag}
+            onRegenerateTrack={(tid) => void handleRegenerateTrack(tid)}
+            onStartOverdub={() => void handleStartOverdub()}
+            onAutoTrimVocal={() => void handleAutoTrimVocal()}
+            onUploadTextureClip={(f) => void handleUploadTextureClip(f)}
+            onSelectMidiTrack={(tid) => {
+              setSelectedTrack(tid);
+              setActiveTab('piano_roll');
+              setDockOpen(true);
+            }}
+            getClipDurationSec={getClipDurationSec}
+            onNotice={setStudioNotice}
+          />
 
           {/* 3. BOTTOM TABBED DOCK */}
           <div className="rounded-xl border border-slate-800 bg-[#121622]">
@@ -1152,7 +1135,11 @@ export default function StudioPage() {
             </div>
 
             {dockOpen && (
-              <div className="max-h-56 overflow-y-auto p-3">
+              <div
+                className={`overflow-y-auto p-3 ${
+                  activeTab === 'piano_roll' ? 'max-h-96' : 'max-h-60'
+                }`}
+              >
                 {/* Tab 1: Mixer */}
                 {activeTab === 'mixer' && (
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -1243,51 +1230,30 @@ export default function StudioPage() {
                         />
                         <span>Auto-Mix / Anti-Clip</span>
                       </label>
+                      <button
+                        type="button"
+                        disabled={autoMixBusy}
+                        onClick={() => void handleAutoMix()}
+                        className="w-full rounded-lg bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                      >
+                        {autoMixBusy ? 'Đang chạy...' : 'Chạy AI Auto-Mix'}
+                      </button>
                     </div>
                   </div>
                 )}
 
-                {/* Tab 2: Piano Roll */}
+                {/* Tab 2: Interactive Piano Roll */}
                 {activeTab === 'piano_roll' && (
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-slate-400">Track:</span>
-                        {(['drums', 'bass', 'harmony', 'lead'] as const).map((tid) => (
-                          <button
-                            key={tid}
-                            type="button"
-                            onClick={() => setSelectedTrack(tid)}
-                            className={`rounded px-2.5 py-1 text-xs font-medium capitalize ${
-                              selectedTrack === tid
-                                ? 'bg-indigo-600 text-white'
-                                : 'bg-slate-800 text-slate-300'
-                            }`}
-                          >
-                            {tid}
-                          </button>
-                        ))}
-                      </div>
-                      <span className="text-xs text-slate-400">
-                        {project.tracks[selectedTrack]?.notes.length || 0} nốt MIDI
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5 rounded-lg border border-slate-800 bg-[#0b0d14] p-2.5">
-                      {(project.tracks[selectedTrack]?.notes || []).slice(0, 32).map((n, i) => (
-                        <div
-                          key={i}
-                          className="rounded border border-indigo-500/40 bg-indigo-600/20 px-2 py-1 text-[11px] text-indigo-200"
-                        >
-                          Pitch {n.pitch} • Beat {n.start_beat} ({n.duration}b)
-                        </div>
-                      ))}
-                      {(project.tracks[selectedTrack]?.notes.length || 0) === 0 && (
-                        <p className="text-xs text-slate-500">
-                          Track chưa có nốt MIDI. Bấm Regen hoặc chạy Wizard để sinh nốt.
-                        </p>
-                      )}
-                    </div>
-                  </div>
+                  <PianoRollEditor
+                    project={project}
+                    transport={transport}
+                    selectedTrack={selectedTrack}
+                    snapGrid={snapGrid}
+                    onSelectTrack={setSelectedTrack}
+                    onMutateWithUndo={mutateWithUndo}
+                    onAuditionNote={(pitch, trackId) => engine.auditionMidiNote(pitch, trackId)}
+                    onNotice={setStudioNotice}
+                  />
                 )}
 
                 {/* Tab 3: Auto-Tune Pro */}
@@ -1493,25 +1459,81 @@ export default function StudioPage() {
                         <span>{lyricLoading ? 'Đang gợi ý...' : 'AI Gợi ý lời'}</span>
                       </button>
                     </div>
-                    <div className="space-y-1.5">
-                      {project.lyrics.lines.map((line, i) => (
-                        <div key={i} className="flex items-center gap-2 text-xs">
-                          <span className="w-20 shrink-0 rounded bg-slate-800 px-2 py-1 text-center font-mono text-[10px] text-indigo-300">
-                            {line.section} b{line.bar}
-                          </span>
-                          <input
-                            value={line.text}
-                            onChange={(e) =>
-                              updateProject((p) => {
-                                const next = [...p.lyrics.lines];
-                                next[i] = { ...next[i], text: e.target.value };
-                                return { ...p, lyrics: { ...p.lyrics, lines: next } };
-                              })
-                            }
-                            className="flex-1 rounded border border-slate-800 bg-[#0b0d14] px-2.5 py-1 text-slate-200"
-                          />
+
+                    {/* Karaoke Active Line Stage */}
+                    {project.lyrics.lines.length > 0 && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/30 bg-gradient-to-r from-indigo-950/60 via-[#151c2e] to-emerald-950/50 px-3.5 py-2.5">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+                            <span>Karaoke Sync • Bar {currentBar}:{currentBeat}</span>
+                            {activeLyricIdx >= 0 && (
+                              <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-emerald-200">
+                                {project.lyrics.lines[activeLyricIdx].section}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-0.5 truncate text-sm font-bold text-white">
+                            {activeLyricIdx >= 0
+                              ? project.lyrics.lines[activeLyricIdx].text || '(Chưa nhập lời)'
+                              : 'Chuẩn bị vào câu hát...'}
+                          </p>
+                          {activeLyricIdx >= 0 && activeLyricIdx + 1 < project.lyrics.lines.length && (
+                            <p className="truncate text-[11px] text-slate-400">
+                              Tiếp theo (b{project.lyrics.lines[activeLyricIdx + 1].bar}):{' '}
+                              {project.lyrics.lines[activeLyricIdx + 1].text}
+                            </p>
+                          )}
                         </div>
-                      ))}
+                      </div>
+                    )}
+
+                    <div className="space-y-1.5">
+                      {project.lyrics.lines.map((line, i) => {
+                        const isActiveLine = i === activeLyricIdx;
+                        return (
+                          <div
+                            key={i}
+                            className={`flex items-center gap-2 rounded-lg p-1 text-xs transition ${
+                              isActiveLine
+                                ? 'border border-emerald-400/60 bg-emerald-500/15 ring-1 ring-emerald-400/30'
+                                : ''
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => engine.seekToBar(line.bar)}
+                              title={`Nhảy tới Bar ${line.bar}`}
+                              className={`w-24 shrink-0 rounded px-2 py-1 text-center font-mono text-[10px] transition ${
+                                isActiveLine
+                                  ? 'bg-emerald-500 font-bold text-slate-950'
+                                  : 'bg-slate-800 text-indigo-300 hover:bg-slate-700'
+                              }`}
+                            >
+                              {line.section} b{line.bar}
+                            </button>
+                            <input
+                              value={line.text}
+                              onChange={(e) =>
+                                updateProject((p) => {
+                                  const next = [...p.lyrics.lines];
+                                  next[i] = { ...next[i], text: e.target.value };
+                                  return { ...p, lyrics: { ...p.lyrics, lines: next } };
+                                })
+                              }
+                              className={`flex-1 rounded border px-2.5 py-1 ${
+                                isActiveLine
+                                  ? 'border-emerald-400/50 bg-[#0d151c] font-semibold text-emerald-100'
+                                  : 'border-slate-800 bg-[#0b0d14] text-slate-200'
+                              }`}
+                            />
+                            {isActiveLine && (
+                              <span className="shrink-0 rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                                Đang hát
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
                       {project.lyrics.lines.length === 0 && (
                         <p className="text-xs text-slate-500">
                           Chưa có lời. Nhập chủ đề và bấm &quot;AI Gợi ý lời&quot; để tạo theo cấu trúc bài.

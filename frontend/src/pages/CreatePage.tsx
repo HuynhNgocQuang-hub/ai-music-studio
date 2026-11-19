@@ -52,6 +52,7 @@ import type {
   MotifPosition,
   OutputMode,
   ProjectState,
+  StructurePreset,
 } from '@/types/project';
 
 const GENRES = ['Pop', 'Ballad', 'Lo-fi', 'R&B', 'Hip-hop', 'EDM', 'Acoustic', 'Rock'];
@@ -1197,38 +1198,82 @@ export default function CreateWizardPage() {
 
           {/* Full Song extra options */}
           {project.config.output_mode === 'full_song' && (
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-800 bg-[#171c2b] p-4">
-              <div className="flex items-center gap-3">
-                <span className="text-xs font-medium text-slate-300">Vị trí đặt mô-típ ngân nga:</span>
-                <select
-                  value={project.config.motif_position}
-                  onChange={(e) =>
-                    updateProject((prev) => ({
-                      ...prev,
-                      config: { ...prev.config, motif_position: e.target.value as MotifPosition },
-                    }))
-                  }
-                  className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white"
-                >
-                  <option value="chorus">Chorus (Mặc định)</option>
-                  <option value="verse">Verse</option>
-                  <option value="auto">Theo AI đề xuất</option>
-                </select>
+            <div className="space-y-4 rounded-xl border border-slate-800 bg-[#171c2b] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-medium text-slate-300">Vị trí đặt mô-típ ngân nga:</span>
+                  <select
+                    value={project.config.motif_position}
+                    onChange={(e) =>
+                      updateProject((prev) => ({
+                        ...prev,
+                        config: { ...prev.config, motif_position: e.target.value as MotifPosition },
+                      }))
+                    }
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white"
+                  >
+                    <option value="chorus">Chorus (Mặc định)</option>
+                    <option value="verse">Verse</option>
+                    <option value="auto">Theo AI đề xuất</option>
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(project.config.enable_lead_karaoke)}
+                    onChange={(e) =>
+                      updateProject((prev) => ({
+                        ...prev,
+                        config: { ...prev.config, enable_lead_karaoke: e.target.checked },
+                      }))
+                    }
+                    className="rounded border-slate-600 bg-slate-800 text-indigo-500"
+                  />
+                  <span>Bật Lead Karaoke Guide + Gợi ý lời</span>
+                </label>
               </div>
-              <label className="flex items-center gap-2 text-xs text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={Boolean(project.config.enable_lead_karaoke)}
-                  onChange={(e) =>
-                    updateProject((prev) => ({
-                      ...prev,
-                      config: { ...prev.config, enable_lead_karaoke: e.target.checked },
-                    }))
-                  }
-                  className="rounded border-slate-600 bg-slate-800 text-indigo-500"
-                />
-                <span>Bật Lead Karaoke Guide + Gợi ý lời</span>
-              </label>
+
+              <div className="space-y-2 border-t border-slate-800 pt-3">
+                <span className="text-xs font-medium text-slate-300">Cấu trúc bài hát (Structure Preset):</span>
+                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                  {(
+                    [
+                      {
+                        id: 'short',
+                        title: 'Ngắn: 4 đoạn',
+                        desc: 'Intro → Verse 1 → Chorus → Outro',
+                      },
+                      {
+                        id: 'standard',
+                        title: 'Chuẩn: có Bridge',
+                        desc: 'Intro → Verse 1 → Chorus → Verse 2 → Bridge → Chorus → Outro',
+                      },
+                    ] as Array<{ id: StructurePreset; title: string; desc: string }>
+                  ).map((preset) => {
+                    const active = (project.config.structure_preset ?? 'standard') === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() =>
+                          updateProject((prev) => ({
+                            ...prev,
+                            config: { ...prev.config, structure_preset: preset.id },
+                          }))
+                        }
+                        className={`rounded-xl border p-2.5 text-left transition ${
+                          active
+                            ? 'border-emerald-500 bg-emerald-600/20 text-white'
+                            : 'border-slate-700 bg-[#121622] text-slate-300 hover:border-slate-600'
+                        }`}
+                      >
+                        <p className="text-xs font-semibold">{preset.title}</p>
+                        <p className="mt-0.5 text-[11px] text-slate-400">{preset.desc}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
 

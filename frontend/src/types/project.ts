@@ -1,6 +1,7 @@
 export type MelodyMode = 'preserve' | 'enhance';
 export type OutputMode = 'accompaniment' | 'full_song';
 export type MotifPosition = 'chorus' | 'verse' | 'auto';
+export type StructurePreset = 'short' | 'standard';
 export type AutoTunePreset = 'off' | 'natural' | 'balanced' | 'modern';
 export type PreviewLayer = 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance';
 export type LLMProvider = 'gemini' | 'openai' | 'mock';
@@ -18,6 +19,7 @@ export interface ProjectConfig {
   melody_mode: MelodyMode;
   output_mode: OutputMode;
   motif_position: MotifPosition;
+  structure_preset?: StructurePreset;
   genre: string;
   mood: string;
   user_prompt: string;
@@ -125,12 +127,15 @@ export interface MidiTrackState {
 
 export interface ProjectTracks {
   vocal: AudioTrackState;
+  texture?: AudioTrackState;
   drums: MidiTrackState;
   bass: MidiTrackState;
   harmony: MidiTrackState;
   lead: MidiTrackState;
-  [key: string]: AudioTrackState | MidiTrackState;
+  [key: string]: AudioTrackState | MidiTrackState | undefined;
 }
+
+export type TrackMap = ProjectTracks;
 
 export interface MasteringSettings {
   auto_mix_enabled: boolean;
@@ -284,6 +289,26 @@ export interface OverdubFitCheckResponse {
   one_click_fixes: OneClickFix[];
 }
 
+export interface AutoTrimVocalResponse {
+  project_state: ProjectState;
+  trimmed_start_sec?: number;
+  trimmed_end_sec?: number;
+  offset_ms?: number;
+  summary?: string;
+}
+
+export interface AutoMixResponse {
+  project_state: ProjectState;
+  mix_notes?: string[];
+  summary?: string;
+}
+
+export interface ClipUploadResponse {
+  project_state: ProjectState;
+  clip: AudioClip;
+  audio_ref: string;
+}
+
 export interface LyricsSuggestRequest {
   project_id: string;
   language: string;
@@ -391,6 +416,7 @@ export function createDefaultProjectState(projectId?: string): ProjectState {
       melody_mode: 'preserve',
       output_mode: 'accompaniment',
       motif_position: 'chorus',
+      structure_preset: 'standard',
       genre: 'Pop',
       mood: 'Uplifting',
       user_prompt: '',
