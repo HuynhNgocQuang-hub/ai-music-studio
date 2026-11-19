@@ -396,4 +396,115 @@ class AgentPipelineTests {
         assertTrue(interruptedSeen.get());
         assertEquals("cancelled", job.getStatus());
     }
+
+    @Test
+    void standardFullSongIncludesBridgeAndShortPresetExcludesBridge() {
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        AgentOrchestrator orch = new AgentOrchestrator(
+                new ComposerAgent(adapter),
+                new ArrangerAgent(adapter),
+                new CoachLyricistAgent(adapter),
+                new QaReviewerAgent(adapter),
+                store,
+                objectMapper,
+                60.0,
+                2
+        );
+
+        // Default ("standard") structure preset
+        ProjectState stdInput = sampleProjectState("enhance", "full_song");
+        assertEquals("standard", stdInput.getConfig().getStructurePreset());
+        ProjectState stdResult = orch.runGenerate(stdInput, null, "job_std_bridge",
+                null, null, null, 60.0);
+
+        List<String> stdNames = stdResult.getSongStructure().getSections().stream()
+                .map(SongSection::getName).toList();
+        assertEquals(List.of("Intro", "Verse 1", "Chorus", "Verse 2", "Bridge", "Chorus", "Outro"), stdNames);
+        assertTrue(stdResult.getQaStatus().isApproved());
+
+        SongSection bridge = stdResult.getSongStructure().getSections().get(4);
+        assertEquals("Bridge", bridge.getName());
+        assertEquals(0.72, bridge.getEnergy(), 0.01);
+
+        // Bridge drums include ride (51) or crash (49) for textural contrast
+        double bridgeStartBeat = (bridge.getStartBar() - 1) * 4.0;
+        double bridgeEndBeat = bridgeStartBeat + bridge.getBars() * 4.0;
+        boolean hasBridgeRideOrCrash = stdResult.getTracks().get("drums").getNotes().stream()
+                .anyMatch(n -> n.getStartBeat() >= bridgeStartBeat && n.getStartBeat() < bridgeEndBeat
+                        && (n.getPitch() == 51 || n.getPitch() == 49));
+        assertTrue(hasBridgeRideOrCrash, "Expected Bridge drums to have distinct ride/crash instrumentation");
+
+        // Enhance melody adds scale-aware passing notes without breaking scale or contour
+        List<MidiNote> enhanced = stdResult.getMelodyNotes();
+        assertTrue(enhanced.size() > stdInput.getAnalysis().getRawMelodyMidi().size(),
+                "Expected enhanceMelody to add scale-aware passing notes across melodic leaps");
+        List<Integer> cMajorPcs = MusicTheory.getScalePitchClasses("C", "major");
+        for (int i = 0; i < enhanced.size(); i++) {
+            assertTrue(cMajorPcs.contains(Math.floorMod(enhanced.get(i).getPitch(), 12)));
+            if (i > 0) {
+                assertTrue(enhanced.get(i).getStartBeat() >= enhanced.get(i - 1).getStartBeat());
+            }
+        }
+
+        // "short" structure preset
+        ProjectState shortInput = sampleProjectState("preserve", "full_song");
+        shortInput.getConfig().setStructurePreset("short");
+        ProjectState shortResult = orch.runGenerate(shortInput, null, "job_short_fs",
+                null, null, null, 60.0);
+        List<String> shortNames = shortResult.getSongStructure().getSections().stream()
+                .map(SongSection::getName).toList();
+        assertEquals(List.of("Intro", "Verse 1", "Chorus", "Outro"), shortNames);
+    }
+
+    @Test
+    void rearrangeRespectsCustomSectionsAndChords() {
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        AgentOrchestrator orch = new AgentOrchestrator(
+                new ComposerAgent(adapter),
+                new ArrangerAgent(adapter),
+                new CoachLyricistAgent(adapter),
+                new QaReviewerAgent(adapter),
+                store,
+                objectMapper,
+                60.0,
+                2
+        );
+
+        ProjectState base = orch.runGenerate(sampleProjectState("preserve", "full_song"),
+                null, "job_rearr_base", null, null, null, 60.0);
+        base.getTracks().get("drums").setLocked(true);
+        List<MidiNote> lockedDrumsNotes = List.copyOf(base.getTracks().get("drums").getNotes());
+
+        List<SongSection> customSections = List.of(
+                new SongSection("Intro", 1, 2, 0.35, false),
+                new SongSection("Verse 1", 3, 2, 0.55, false),
+                new SongSection("Bridge", 5, 2, 0.72, false),
+                new SongSection("Chorus", 7, 2, 0.90, true)
+        );
+        List<ChordEvent> customChords = List.of(
+                new ChordEvent(1, 1.0, "C", 4.0),
+                new ChordEvent(2, 1.0, "G", 4.0),
+                new ChordEvent(3, 1.0, "Am", 4.0),
+                new ChordEvent(4, 1.0, "F", 4.0),
+                new ChordEvent(5, 1.0, "Dm", 4.0),
+                new ChordEvent(6, 1.0, "G", 4.0),
+                new ChordEvent(7, 1.0, "C", 4.0),
+                new ChordEvent(8, 1.0, "G", 4.0)
+        );
+
+        ProjectState updated = orch.runRearrange(base, customChords, customSections, 8, List.of("drums"),
+                "job_rearr_custom", null, null, null, 60.0);
+
+        assertEquals(8, updated.getSongStructure().getTotalBars());
+        assertEquals(4, updated.getSongStructure().getSections().size());
+        assertEquals("Bridge", updated.getSongStructure().getSections().get(2).getName());
+        assertEquals("Dm", updated.getSongStructure().getChords().get(4).getSymbol());
+        assertEquals(lockedDrumsNotes.size(), updated.getTracks().get("drums").getNotes().size());
+        // Bass at bar 5 (beat 16) should follow Dm root (D = pitch class 2 -> MIDI 38)
+        boolean hasDmBassAtBar5 = updated.getTracks().get("bass").getNotes().stream()
+                .anyMatch(n -> Math.abs(n.getStartBeat() - 16.0) < 0.01 && Math.floorMod(n.getPitch(), 12) == 2);
+        assertTrue(hasDmBassAtBar5, "Expected Bass at bar 5 to follow custom Dm chord root");
+    }
 }

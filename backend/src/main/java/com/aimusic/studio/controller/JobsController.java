@@ -73,7 +73,8 @@ public class JobsController {
         }
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
         LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
-        AgentOrchestrator.JobRuntime job = orchestrator.startRearrangeJob(state, req.getChords(), req.getLockedTracks(), overrides);
+        AgentOrchestrator.JobRuntime job = orchestrator.startRearrangeJob(
+                state, req.getChords(), req.getSections(), req.getTotalBars(), req.getLockedTracks(), overrides);
         return new JobStartResponse(job.getJobId(), job.getProjectId(), job.getStatus());
     }
 

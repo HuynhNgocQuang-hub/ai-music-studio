@@ -14,6 +14,7 @@ import com.aimusic.studio.model.dto.AnalyzeResponse;
 import com.aimusic.studio.model.dto.AudioUploadResponse;
 import com.aimusic.studio.model.dto.AutotuneRequest;
 import com.aimusic.studio.model.dto.AutotuneResponse;
+import com.aimusic.studio.model.dto.ClipUploadResponse;
 import com.aimusic.studio.model.dto.DenoiseRequest;
 import com.aimusic.studio.model.dto.DenoiseResponse;
 import com.aimusic.studio.store.ProjectStateStore;
@@ -40,6 +41,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/audio")
@@ -147,6 +149,90 @@ public class AudioController {
                 ext,
                 meta.warnings()
         );
+    }
+
+    @PostMapping(value = "/clip-upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ClipUploadResponse uploadTrackClip(
+            @RequestParam("project_id") String projectId,
+            @RequestParam(value = "track_id", defaultValue = "texture") String trackId,
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "start_bar", defaultValue = "1.0") double startBar
+    ) throws IOException {
+        if (projectId == null || projectId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
+        }
+        String normTrackId = (trackId == null || trackId.isBlank())
+                ? "texture" : trackId.trim().toLowerCase(Locale.ROOT);
+
+        byte[] rawBytes = file.getBytes();
+        String filename = (file.getOriginalFilename() != null && !file.getOriginalFilename().isBlank())
+                ? file.getOriginalFilename() : "clip.wav";
+        String ext = "";
+        int dot = filename.lastIndexOf('.');
+        if (dot >= 0 && dot < filename.length() - 1) {
+            ext = filename.substring(dot + 1).toLowerCase(Locale.ROOT);
+        }
+        if (!AppProperties.ALLOWED_AUDIO_EXTENSIONS.contains(ext)) {
+            throw new AudioValidationException(
+                    "Unsupported audio format '." + ext + "'. Allowed: .wav, .mp3, .m4a, .ogg, .flac",
+                    HttpStatus.BAD_REQUEST);
+        }
+        if (rawBytes.length == 0) {
+            throw new AudioValidationException("Uploaded clip file is empty.", HttpStatus.BAD_REQUEST);
+        }
+        if (rawBytes.length > properties.getMaxUploadBytes()) {
+            throw new AudioValidationException(
+                    String.format(Locale.ROOT, "File size (%.1f MB) exceeds maximum %d MB.",
+                            rawBytes.length / (1024.0 * 1024.0), properties.getMaxUploadMb()),
+                    HttpStatus.PAYLOAD_TOO_LARGE);
+        }
+
+        byte[] bytesToValidate = rawBytes;
+        if (!"wav".equals(ext)) {
+            Optional<Map<String, Object>> workerDecoded = audioWorkerClient.denoise(rawBytes, filename, false, false);
+            if (workerDecoded.isPresent() && workerDecoded.get().get("wav_base64") instanceof String b64) {
+                bytesToValidate = Base64.getDecoder().decode(b64);
+                filename = filename.substring(0, dot) + ".wav";
+            }
+        }
+
+        JavaAudioFallbackService.ValidatedAudio meta = audioFallback.validateAndDecodeAudio(
+                bytesToValidate,
+                filename,
+                properties.getMaxUploadBytes(),
+                0.1,
+                properties.getMaxVocalDurationSec(),
+                properties.getSampleRate()
+        );
+
+        Optional<ProjectState> existingOpt = store.getProject(projectId);
+        ProjectState project = existingOpt.orElseGet(() -> ProjectState.createDefault(projectId, "Untitled Project"));
+        existingOpt.ifPresent(prev -> store.pushUndo(projectId, prev));
+
+        TrackState track = project.getTracks().get(normTrackId);
+        if (track == null) {
+            track = TrackState.audioTrack(0.75, 0.0);
+            project.getTracks().put(normTrackId, track);
+        } else if (!"audio".equalsIgnoreCase(track.getType())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Track '" + normTrackId + "' is not an audio track.");
+        }
+
+        String clipId = "clip_" + normTrackId + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String audioRef = "mem://clips/" + projectId + "/" + clipId + ".wav";
+        store.saveAudioBytes(audioRef, meta.wavBytes());
+
+        AudioClip clip = new AudioClip(clipId, audioRef, Math.max(1.0, startBar), 0.0);
+        clip.setTrimEndSec(meta.durationSec());
+        clip.setFadeInMs(15.0);
+        clip.setFadeOutMs(15.0);
+        clip.setOffsetMs(0.0);
+        track.getClips().add(clip);
+
+        project.setVersion(project.getVersion() + 1);
+        ProjectState saved = store.saveProject(project);
+
+        return new ClipUploadResponse(saved, clip, audioRef, normTrackId, meta.durationSec(), meta.warnings());
     }
 
     @PostMapping("/denoise")

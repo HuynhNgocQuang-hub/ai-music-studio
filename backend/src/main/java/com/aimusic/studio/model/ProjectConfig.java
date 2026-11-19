@@ -13,6 +13,9 @@ public class ProjectConfig {
     @JsonProperty("output_mode")
     private String outputMode = "accompaniment";
 
+    @JsonProperty("structure_preset")
+    private String structurePreset = "standard";
+
     @JsonProperty("motif_position")
     private String motifPosition = "chorus";
 
@@ -47,6 +50,15 @@ public class ProjectConfig {
 
     public String getOutputMode() { return outputMode; }
     public void setOutputMode(String outputMode) { this.outputMode = outputMode != null ? outputMode : "accompaniment"; }
+
+    public String getStructurePreset() { return structurePreset; }
+    public void setStructurePreset(String structurePreset) {
+        if (structurePreset == null || structurePreset.isBlank()) {
+            this.structurePreset = "standard";
+        } else {
+            this.structurePreset = "short".equalsIgnoreCase(structurePreset.trim()) ? "short" : "standard";
+        }
+    }
 
     public String getMotifPosition() { return motifPosition; }
     public void setMotifPosition(String motifPosition) { this.motifPosition = motifPosition != null ? motifPosition : "chorus"; }

@@ -219,8 +219,15 @@ public class AgentOrchestrator {
 
     public JobRuntime startRearrangeJob(ProjectState initialState, List<ChordEvent> chords, List<String> lockedTracks,
                                         LlmContextHolder.LlmOverrides llmOverrides) {
+        return startRearrangeJob(initialState, chords, null, null, lockedTracks, llmOverrides);
+    }
+
+    public JobRuntime startRearrangeJob(ProjectState initialState, List<ChordEvent> chords,
+                                        List<com.aimusic.studio.model.SongSection> sections,
+                                        Integer totalBars, List<String> lockedTracks,
+                                        LlmContextHolder.LlmOverrides llmOverrides) {
         return launchJob(initialState.getProjectId(), "rearrange", initialState, llmOverrides,
-                (job) -> runRearrange(initialState, chords, lockedTracks, job.getJobId(),
+                (job) -> runRearrange(initialState, chords, sections, totalBars, lockedTracks, job.getJobId(),
                         (ev, payload) -> job.publish(ev, payload, objectMapper),
                         job.getCancelled(), job.getTimedOut(), defaultTimeoutSeconds));
     }
@@ -583,12 +590,49 @@ public class AgentOrchestrator {
             AtomicBoolean timeoutFlag,
             double timeoutSeconds
     ) {
+        return runRearrange(projectState, chords, null, null, lockedTracks,
+                jobId, callback, cancelToken, timeoutFlag, timeoutSeconds);
+    }
+
+    public ProjectState runRearrange(
+            ProjectState projectState,
+            List<ChordEvent> chords,
+            List<com.aimusic.studio.model.SongSection> sections,
+            Integer totalBarsOverride,
+            List<String> lockedTracks,
+            String jobId,
+            BiConsumer<String, Map<String, Object>> callback,
+            AtomicBoolean cancelToken,
+            AtomicBoolean timeoutFlag,
+            double timeoutSeconds
+    ) {
         String jid = jobId != null ? jobId : "job_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
         ProjectState state = deepCopy(projectState);
-        state.getSongStructure().setChords(chords != null ? new ArrayList<>(chords) : new ArrayList<>());
-        if (state.getSongStructure().getTotalBars() <= 0 && chords != null && !chords.isEmpty()) {
-            int maxBar = chords.stream().mapToInt(ChordEvent::getBar).max().orElse(4);
-            state.getSongStructure().setTotalBars(maxBar);
+        if (sections != null && !sections.isEmpty()) {
+            state.getSongStructure().setSections(new ArrayList<>(sections));
+        }
+        if (chords != null && !chords.isEmpty()) {
+            state.getSongStructure().setChords(new ArrayList<>(chords));
+        }
+        int computedMaxBar = state.getSongStructure().getTotalBars();
+        if (state.getSongStructure().getChords() != null && !state.getSongStructure().getChords().isEmpty()) {
+            int maxChordBar = state.getSongStructure().getChords().stream()
+                    .mapToInt(ChordEvent::getBar).max().orElse(computedMaxBar);
+            computedMaxBar = Math.max(computedMaxBar, maxChordBar);
+        }
+        if (state.getSongStructure().getSections() != null && !state.getSongStructure().getSections().isEmpty()) {
+            int maxSecBar = state.getSongStructure().getSections().stream()
+                    .mapToInt(s -> s.getStartBar() + Math.max(1, s.getBars()) - 1).max().orElse(computedMaxBar);
+            if (sections != null && !sections.isEmpty()) {
+                computedMaxBar = maxSecBar;
+            } else {
+                computedMaxBar = Math.max(computedMaxBar, maxSecBar);
+            }
+        }
+        if (totalBarsOverride != null && totalBarsOverride > 0) {
+            state.getSongStructure().setTotalBars(totalBarsOverride);
+        } else if (computedMaxBar > 0) {
+            state.getSongStructure().setTotalBars(computedMaxBar);
         }
 
         return executeWithTimeout(jid, timeoutSeconds, timeoutFlag, cancelToken, callback, () -> {
@@ -793,6 +837,7 @@ public class AgentOrchestrator {
         if (src.getTitle() != null && !src.getTitle().isBlank()) target.setTitle(src.getTitle());
         if (src.getMelodyMode() != null) target.setMelodyMode(src.getMelodyMode());
         if (src.getOutputMode() != null) target.setOutputMode(src.getOutputMode());
+        if (src.getStructurePreset() != null) target.setStructurePreset(src.getStructurePreset());
         if (src.getMotifPosition() != null) target.setMotifPosition(src.getMotifPosition());
         if (src.getGenre() != null) target.setGenre(src.getGenre());
         if (src.getMood() != null) target.setMood(src.getMood());

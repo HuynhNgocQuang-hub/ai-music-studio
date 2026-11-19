@@ -177,6 +177,15 @@ public class QaReviewerAgent {
                     fixTarget = "composer";
                     score -= 0.15;
                 }
+                if (!"short".equalsIgnoreCase(cfg.getStructurePreset())) {
+                    boolean hasBridge = sections.stream()
+                            .anyMatch(s -> s.getName() != null && s.getName().toLowerCase(Locale.ROOT).contains("bridge"));
+                    if (!hasBridge) {
+                        issues.add("Standard full song structure must include a Bridge section.");
+                        fixTarget = "composer";
+                        score -= 0.15;
+                    }
+                }
             }
         }
 

@@ -394,4 +394,63 @@ class AudioAndLimiterTests {
         store.saveProject(ProjectState.createDefault("r2", "Recovered"));
         assertTrue(store.isRedisAvailable());
     }
+
+    @Test
+    void textureMultiClipRenderCollectAndAimusicRoundtrip() {
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        ProjectState proj = ProjectState.createDefault("tex_multi_1", "Texture Multi");
+        proj.getAnalysis().setBpm(120.0);
+        proj.getAnalysis().setBars(4);
+        proj.getSongStructure().setTotalBars(4);
+
+        byte[] vocalWav = makeMelodyWav(3.2, 44100, false);
+        byte[] texClip1 = makeMelodyWav(0.8, 44100, false);
+        byte[] texClip2 = makeMelodyWav(0.6, 22050, false);
+
+        String rawRef = "mem://raw/tex_multi_1.wav";
+        String texRef1 = "mem://clips/tex_multi_1/c1.wav";
+        String texRef2 = "mem://clips/tex_multi_1/c2.wav";
+        store.saveAudioBytes(rawRef, vocalWav);
+        store.saveAudioBytes(texRef1, texClip1);
+        store.saveAudioBytes(texRef2, texClip2);
+        proj.getAudioAssets().setRawInputRef(rawRef);
+
+        TrackState texTrack = TrackState.audioTrack(0.8, 0.25);
+        AudioClip c1 = new AudioClip("c1", texRef1, 1.0, 0.1);
+        c1.setTrimEndSec(0.7);
+        c1.setOffsetMs(50.0);
+        AudioClip c2 = new AudioClip("c2", texRef2, 3.0, 0.0);
+        c2.setTrimEndSec(0.5);
+        texTrack.getClips().add(c1);
+        texTrack.getClips().add(c2);
+        proj.getTracks().put("texture", texTrack);
+        store.saveProject(proj);
+
+        ProjectsController pc = new ProjectsController(store, new AudioWorkerClient(new AppProperties(), objectMapper),
+                audioService, new AppProperties());
+        Map<String, byte[]> collected = pc.collectAudioAssets(proj);
+        assertTrue(collected.containsKey(texRef1));
+        assertTrue(collected.containsKey(texRef2));
+
+        var mix = audioService.renderProjectMix(proj, store, "ai_mix", true, 44100);
+        float[][] texStem = mix.stems().get("texture");
+        assertNotNull(texStem);
+        assertTrue(audioService.peakDbfs(texStem) > -60.0, "Expected texture stem to contain audio energy");
+
+        // Empty texture track must stay silent and NOT fall back to vocal audio
+        proj.getTracks().get("texture").setClips(List.of());
+        var silentMix = audioService.renderProjectMix(proj, store, "ai_mix", true, 44100);
+        assertEquals(-120.0, audioService.peakDbfs(silentMix.stems().get("texture")), 0.01);
+
+        // Restore clips and verify .aimusic export/import preserves custom texture clip bytes
+        proj.getTracks().get("texture").setClips(List.of(c1, c2));
+        byte[] bundle = audioService.exportAimusicBundle(proj, store);
+        store.deleteProject(proj.getProjectId());
+        store.deleteAudioBytes(texRef1);
+        store.deleteAudioBytes(texRef2);
+        ProjectState reimported = audioService.importAimusicBundle(bundle, store);
+        assertEquals(2, reimported.getTracks().get("texture").getClips().size());
+        assertTrue(store.getAudioBytes(texRef1).isPresent());
+        assertTrue(store.getAudioBytes(texRef2).isPresent());
+    }
 }

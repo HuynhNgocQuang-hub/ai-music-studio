@@ -57,6 +57,10 @@ public class JavaAudioFallbackService {
                                 double keyConfidence, boolean lowConfidenceWarning, int bars,
                                 double durationSec, List<MidiNote> rawMelodyMidi) {}
     public record RenderedMix(float[][] stereo, Map<String, float[][]> stems, int sampleRate) {}
+    public record AutoTrimAnalysis(double trimStartSec, double trimEndSec, double offsetMs,
+                                   double durationSec, double leadingSilenceSec, double trailingSilenceSec,
+                                   String summary) {}
+    public record AutoMixResult(List<String> mixNotes, String summary) {}
 
     private static final String[] NOTE_NAMES = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     private static final double[] MAJOR_PROFILE = {6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88};
@@ -972,7 +976,7 @@ public class JavaAudioFallbackService {
         for (Map.Entry<String, TrackState> e : tracks.entrySet()) {
             TrackState t = e.getValue();
             if (t == null) continue;
-            if ("vocal".equalsIgnoreCase(e.getKey()) || "audio".equalsIgnoreCase(t.getType())) {
+            if ("vocal".equalsIgnoreCase(e.getKey())) {
                 t.setMute(false);
                 t.setSolo(false);
             } else {
@@ -1027,7 +1031,7 @@ public class JavaAudioFallbackService {
                 String name = entry.getKey();
                 TrackState track = entry.getValue();
                 float[] mono = "audio".equalsIgnoreCase(track.getType())
-                        ? renderAudioTrack(track, effectiveProject, store, totalSamples, sampleRate, normMode, bpm, beatsPerBar)
+                        ? renderAudioTrack(name, track, effectiveProject, store, totalSamples, sampleRate, normMode, bpm, beatsPerBar)
                         : synthesizeMidiTrack(name, track.getNotes(), bpm, totalSamples, sampleRate);
 
                 boolean active = !track.isMute() && (!anySolo || track.isSolo());
@@ -1051,20 +1055,25 @@ public class JavaAudioFallbackService {
         return new RenderedMix(mix, stems, sampleRate);
     }
 
-    private float[] renderAudioTrack(TrackState track, ProjectState project, ProjectStateStore store,
+    private float[] renderAudioTrack(String trackName, TrackState track, ProjectState project, ProjectStateStore store,
                                      int totalSamples, int sr, String mode, double bpm, int beatsPerBar) {
         float[] buf = new float[totalSamples];
         double secPerBar = beatsPerBar * (60.0 / bpm);
         List<AudioClip> clips = track.getClips();
 
         if (clips == null || clips.isEmpty()) {
-            String fallbackRef = resolvePreferredAudioRef(project, mode);
-            if (fallbackRef != null) {
-                store.getAudioBytes(fallbackRef).ifPresent(bytes -> {
-                    float[] samples = decodeWavBytes(bytes).mono();
-                    int n = Math.min(totalSamples, samples.length);
-                    for (int i = 0; i < n; i++) buf[i] += samples[i];
-                });
+            if ("vocal".equalsIgnoreCase(trackName)) {
+                String fallbackRef = resolvePreferredAudioRef(project, mode);
+                if (fallbackRef != null) {
+                    store.getAudioBytes(fallbackRef).ifPresent(bytes -> {
+                        DecodedWav decoded = decodeWavBytes(bytes);
+                        float[] samples = decoded.sampleRate() != sr
+                                ? resampleLinear(decoded.mono(), decoded.sampleRate(), sr)
+                                : decoded.mono();
+                        int n = Math.min(totalSamples, samples.length);
+                        for (int i = 0; i < n; i++) buf[i] += samples[i];
+                    });
+                }
             }
             return buf;
         }
@@ -1072,7 +1081,10 @@ public class JavaAudioFallbackService {
         for (AudioClip clip : clips) {
             byte[] wavBytes = resolveClipBytes(clip.getSource(), project, store, mode);
             if (wavBytes == null) continue;
-            float[] samples = decodeWavBytes(wavBytes).mono();
+            DecodedWav decoded = decodeWavBytes(wavBytes);
+            float[] samples = decoded.sampleRate() != sr
+                    ? resampleLinear(decoded.mono(), decoded.sampleRate(), sr)
+                    : decoded.mono();
             int tStart = Math.max(0, (int) Math.round(clip.getTrimStartSec() * sr));
             int tEnd = clip.getTrimEndSec() != null ? (int) Math.round(clip.getTrimEndSec() * sr) : samples.length;
             tEnd = Math.min(samples.length, Math.max(tStart, tEnd));
@@ -1397,6 +1409,39 @@ public class JavaAudioFallbackService {
                     writeBundleAsset(zos, store, "audio/dry_denoised.wav", assets.getDryDenoisedRef());
                     writeBundleAsset(zos, store, "audio/vocal_autotuned.wav", assets.getTunedVocalRef());
                 }
+
+                Map<String, String> customClipPaths = new LinkedHashMap<>();
+                if (project.getTracks() != null) {
+                    int idx = 0;
+                    for (TrackState t : project.getTracks().values()) {
+                        if (t == null || t.getClips() == null) continue;
+                        for (AudioClip clip : t.getClips()) {
+                            if (clip == null || clip.getSource() == null || clip.getSource().isBlank()) continue;
+                            String src = clip.getSource();
+                            if ("raw_input_ref".equals(src) || "dry_denoised_ref".equals(src) || "tuned_vocal_ref".equals(src)
+                                    || (assets != null && (src.equals(assets.getRawInputRef())
+                                    || src.equals(assets.getDryDenoisedRef())
+                                    || src.equals(assets.getTunedVocalRef())))) {
+                                continue;
+                            }
+                            if (!customClipPaths.containsKey(src)) {
+                                Optional<byte[]> clipBytes = store.getAudioBytes(src);
+                                if (clipBytes.isPresent()) {
+                                    String arcPath = "audio/clips/clip_" + (++idx) + ".wav";
+                                    zos.putNextEntry(new ZipEntry(arcPath));
+                                    zos.write(clipBytes.get());
+                                    zos.closeEntry();
+                                    customClipPaths.put(src, arcPath);
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!customClipPaths.isEmpty()) {
+                    zos.putNextEntry(new ZipEntry("clip_refs.json"));
+                    zos.write(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(customClipPaths));
+                    zos.closeEntry();
+                }
             }
             return baos.toByteArray();
         } catch (Exception ex) {
@@ -1450,6 +1495,18 @@ public class JavaAudioFallbackService {
                 String ref = "mem://processed/" + pid + "_tuned.wav";
                 store.saveAudioBytes(ref, entries.get("audio/vocal_autotuned.wav"));
                 project.getAudioAssets().setTunedVocalRef(ref);
+            }
+            if (entries.containsKey("clip_refs.json")) {
+                Map<String, String> customClipPaths = objectMapper.readValue(
+                        entries.get("clip_refs.json"),
+                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {}
+                );
+                for (Map.Entry<String, String> e : customClipPaths.entrySet()) {
+                    byte[] clipData = entries.get(e.getValue());
+                    if (clipData != null) {
+                        store.saveAudioBytes(e.getKey(), clipData);
+                    }
+                }
             }
             return store.saveProject(project);
         } catch (IOException ex) {
@@ -1541,5 +1598,199 @@ public class JavaAudioFallbackService {
         }
 
         return new OverdubFitCheckResponse(timingOffsetMs, pitchIssues, gainSuggestion, fixes);
+    }
+
+    // --- Phase 2 & 3 Studio Auto-Trim & Auto-Mix ---
+
+    public AutoTrimAnalysis analyzeVocalTrimAndBeatOffset(byte[] wavBytes, double bpm) {
+        DecodedWav decoded = decodeWavBytes(wavBytes);
+        float[] samples = decoded.mono();
+        int sr = decoded.sampleRate();
+        double durationSec = Math.round(((double) samples.length / sr) * 1000.0) / 1000.0;
+
+        int hop = Math.max(1, (int) (0.01 * sr));
+        double hopSec = (double) hop / sr;
+        int numFrames = (samples.length + hop - 1) / hop;
+        double[] frameRms = new double[numFrames];
+        double peakRms = 0.0;
+        for (int f = 0; f < numFrames; f++) {
+            int s = f * hop;
+            int e = Math.min(samples.length, s + hop);
+            double sumSq = 0.0;
+            for (int i = s; i < e; i++) sumSq += samples[i] * samples[i];
+            double rms = Math.sqrt(sumSq / Math.max(1, e - s));
+            frameRms[f] = rms;
+            if (rms > peakRms) peakRms = rms;
+        }
+
+        double threshold = Math.max(peakRms * 0.04, Math.pow(10.0, -45.0 / 20.0));
+        int firstActive = -1;
+        int lastActive = -1;
+        for (int f = 0; f < numFrames; f++) {
+            if (frameRms[f] >= threshold) {
+                if (firstActive < 0) firstActive = f;
+                lastActive = f;
+            }
+        }
+
+        double leadingSilenceSec = 0.0;
+        double trailingSilenceSec = 0.0;
+        double trimStartSec = 0.0;
+        double trimEndSec = durationSec;
+        double padSec = 0.02;
+
+        if (firstActive >= 0 && lastActive >= firstActive) {
+            leadingSilenceSec = Math.round(firstActive * hopSec * 1000.0) / 1000.0;
+            double activeEndSec = Math.min(durationSec, (lastActive + 1) * hopSec);
+            trailingSilenceSec = Math.max(0.0, Math.round((durationSec - activeEndSec) * 1000.0) / 1000.0);
+
+            trimStartSec = Math.max(0.0, Math.round((leadingSilenceSec - padSec) * 1000.0) / 1000.0);
+            trimEndSec = Math.min(durationSec, Math.round((activeEndSec + padSec) * 1000.0) / 1000.0);
+            double minKeep = Math.min(0.25, durationSec);
+            if (trimEndSec - trimStartSec < minKeep) {
+                trimStartSec = 0.0;
+                trimEndSec = durationSec;
+            }
+        }
+
+        double preRollMs = (leadingSilenceSec - trimStartSec) * 1000.0;
+        double beatSec = 60.0 / Math.max(40.0, bpm);
+        double nearestBeat = Math.round(leadingSilenceSec / beatSec) * beatSec;
+        double beatDeltaMs = (nearestBeat - leadingSilenceSec) * 1000.0;
+        double rawOffsetMs = -preRollMs + (Math.abs(beatDeltaMs) < 120.0 ? beatDeltaMs * 0.5 : 0.0);
+        double offsetMs = Math.round(Math.max(-250.0, Math.min(250.0, rawOffsetMs)) * 10.0) / 10.0;
+
+        String summary = String.format(Locale.ROOT,
+                "Trimmed %.2fs leading & %.2fs trailing silence (range %.2fs-%.2fs); beat offset %+.1f ms.",
+                leadingSilenceSec, trailingSilenceSec, trimStartSec, trimEndSec, offsetMs);
+        return new AutoTrimAnalysis(trimStartSec, trimEndSec, offsetMs, durationSec, leadingSilenceSec, trailingSilenceSec, summary);
+    }
+
+    public AutoMixResult autoMixProject(ProjectState project, ProjectStateStore store) {
+        Map<String, TrackState> tracks = project.getTracks();
+        int totalBars = project.getSongStructure() != null && project.getSongStructure().getTotalBars() > 0
+                ? project.getSongStructure().getTotalBars() : 4;
+
+        TrackState vocalTrack = tracks.get("vocal");
+        boolean vocalHasClips = vocalTrack != null && vocalTrack.getClips() != null && !vocalTrack.getClips().isEmpty();
+        boolean vocalHasAssets = project.getAudioAssets() != null
+                && ((project.getAudioAssets().getTunedVocalRef() != null && !project.getAudioAssets().getTunedVocalRef().isBlank())
+                || (project.getAudioAssets().getDryDenoisedRef() != null && !project.getAudioAssets().getDryDenoisedRef().isBlank())
+                || (project.getAudioAssets().getRawInputRef() != null && !project.getAudioAssets().getRawInputRef().isBlank()));
+        boolean vocalPresent = vocalTrack != null && !vocalTrack.isMute() && (vocalHasClips || vocalHasAssets);
+
+        double vocalRms = measureAudioTrackRms(vocalTrack, true, project, store, "ai_mix");
+        List<String> mixNotes = new ArrayList<>();
+        if (vocalPresent) {
+            mixNotes.add(String.format(Locale.ROOT,
+                    "Vocal detected (RMS %.3f): centered (pan 0.0) and ducked mid-range accompaniment for clarity.",
+                    vocalRms));
+        } else {
+            mixNotes.add("Instrumental balance mode (no active vocal): boosted Lead & Harmony presence.");
+        }
+
+        for (Map.Entry<String, TrackState> entry : tracks.entrySet()) {
+            String name = entry.getKey().toLowerCase(Locale.ROOT);
+            TrackState track = entry.getValue();
+            if (track == null) continue;
+
+            double density = 0.0;
+            double avgVel = 0.7;
+            if ("midi".equalsIgnoreCase(track.getType()) && track.getNotes() != null && !track.getNotes().isEmpty()) {
+                density = (double) track.getNotes().size() / Math.max(1, totalBars);
+                avgVel = track.getNotes().stream().mapToInt(MidiNote::getVelocity).average().orElse(85.0) / 127.0;
+            }
+
+            double newVol;
+            double newPan;
+            switch (name) {
+                case "vocal" -> {
+                    double rmsBoost = vocalRms > 0.0 && vocalRms < 0.12 ? 0.10 : (vocalRms > 0.35 ? -0.06 : 0.02);
+                    newVol = 0.98 + rmsBoost;
+                    newPan = 0.0;
+                }
+                case "drums" -> {
+                    double densityTrim = Math.min(0.10, density * 0.01);
+                    newVol = (vocalPresent ? 0.80 : 0.86) - densityTrim * 0.5;
+                    newPan = 0.0;
+                }
+                case "bass" -> {
+                    double velTrim = (avgVel - 0.7) * 0.12;
+                    newVol = (vocalPresent ? 0.78 : 0.84) - velTrim;
+                    newPan = 0.0;
+                }
+                case "harmony" -> {
+                    double densityTrim = Math.min(0.12, density * 0.012);
+                    newVol = (vocalPresent ? 0.64 : 0.76) - densityTrim * 0.5;
+                    newPan = -0.22;
+                }
+                case "lead" -> {
+                    double densityTrim = Math.min(0.10, density * 0.01);
+                    newVol = (vocalPresent ? 0.58 : 0.82) - densityTrim * 0.4;
+                    newPan = 0.22;
+                }
+                case "texture" -> {
+                    double texRms = measureAudioTrackRms(track, false, project, store, "ai_mix");
+                    double rmsAdj = texRms > 0.25 ? -0.08 : 0.0;
+                    newVol = (vocalPresent ? 0.56 : 0.68) + rmsAdj;
+                    newPan = 0.30;
+                }
+                default -> {
+                    newVol = vocalPresent ? 0.65 : 0.75;
+                    newPan = 0.0;
+                }
+            }
+
+            newVol = Math.round(Math.max(0.0, Math.min(1.15, newVol)) * 100.0) / 100.0;
+            newPan = Math.round(Math.max(-0.5, Math.min(0.5, newPan)) * 100.0) / 100.0;
+            track.setVolume(newVol);
+            track.setPan(newPan);
+            mixNotes.add(String.format(Locale.ROOT, "%s: vol=%.2f, pan=%+.2f", entry.getKey(), newVol, newPan));
+        }
+
+        if (project.getMastering() == null) {
+            project.setMastering(new com.aimusic.studio.model.MasteringSettings());
+        }
+        project.getMastering().setAutoMixEnabled(true);
+        project.getMastering().setLimiterCeilingDb(-1.0);
+        if (project.getMastering().getTargetLufs() >= 0.0) {
+            project.getMastering().setTargetLufs(-14.0);
+        }
+        mixNotes.add("Master Limiter ceiling set to -1.0 dBFS (target -14.0 LUFS).");
+
+        String summary = String.format(Locale.ROOT,
+                "Auto-Mix balanced %d tracks (%s) with Master Limiter <= -1.0 dBFS.",
+                tracks.size(), vocalPresent ? "vocal-prioritized" : "instrumental");
+        return new AutoMixResult(mixNotes, summary);
+    }
+
+    private double measureAudioTrackRms(TrackState track, boolean isVocalTrack,
+                                        ProjectState project, ProjectStateStore store, String mode) {
+        if (track == null || store == null) return 0.0;
+        byte[] bytes = null;
+        if (track.getClips() != null && !track.getClips().isEmpty()) {
+            for (AudioClip clip : track.getClips()) {
+                if (clip != null) {
+                    bytes = resolveClipBytes(clip.getSource(), project, store, mode);
+                    if (bytes != null) break;
+                }
+            }
+        }
+        if (bytes == null && isVocalTrack) {
+            String ref = resolvePreferredAudioRef(project, mode);
+            if (ref != null) {
+                bytes = store.getAudioBytes(ref).orElse(null);
+            }
+        }
+        if (bytes == null) return 0.0;
+        try {
+            float[] mono = decodeWavBytes(bytes).mono();
+            if (mono.length == 0) return 0.0;
+            double sumSq = 0.0;
+            for (float s : mono) sumSq += s * s;
+            return Math.sqrt(sumSq / mono.length);
+        } catch (Exception e) {
+            return 0.0;
+        }
     }
 }

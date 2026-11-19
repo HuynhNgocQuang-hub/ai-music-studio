@@ -90,16 +90,40 @@ public class ComposerAgent {
         if ("full_song".equals(outputMode)) {
             String llmMotif = llmSuggestion.get("motif_position") instanceof String s ? s : null;
             resolvedMotifPos = resolveMotifPos(motifPosition, llmMotif);
+            String structurePreset = cfg.getStructurePreset() != null
+                    ? cfg.getStructurePreset().trim().toLowerCase(Locale.ROOT)
+                    : "standard";
             int unit = Math.max(4, Math.min(8, inputBars));
             int introBars = 4;
             int verseBars = unit;
             int chorusBars = unit;
             int outroBars = 4;
-            sections.add(new SongSection("Intro", 1, introBars, 0.3, false));
-            sections.add(new SongSection("Verse 1", 1 + introBars, verseBars, 0.55, "verse".equals(resolvedMotifPos)));
-            sections.add(new SongSection("Chorus", 1 + introBars + verseBars, chorusBars, 0.9, "chorus".equals(resolvedMotifPos)));
-            sections.add(new SongSection("Outro", 1 + introBars + verseBars + chorusBars, outroBars, 0.35, false));
-            totalBars = introBars + verseBars + chorusBars + outroBars;
+            int cursor = 1;
+
+            sections.add(new SongSection("Intro", cursor, introBars, 0.3, false));
+            cursor += introBars;
+
+            sections.add(new SongSection("Verse 1", cursor, verseBars, 0.55, "verse".equals(resolvedMotifPos)));
+            cursor += verseBars;
+
+            sections.add(new SongSection("Chorus", cursor, chorusBars, 0.9, "chorus".equals(resolvedMotifPos)));
+            cursor += chorusBars;
+
+            if (!"short".equals(structurePreset)) {
+                int verse2Bars = unit;
+                int bridgeBars = 4;
+                sections.add(new SongSection("Verse 2", cursor, verse2Bars, 0.62, "verse".equals(resolvedMotifPos)));
+                cursor += verse2Bars;
+
+                sections.add(new SongSection("Bridge", cursor, bridgeBars, 0.72, false));
+                cursor += bridgeBars;
+
+                sections.add(new SongSection("Chorus", cursor, chorusBars, 0.92, "chorus".equals(resolvedMotifPos)));
+                cursor += chorusBars;
+            }
+
+            sections.add(new SongSection("Outro", cursor, outroBars, 0.35, false));
+            totalBars = cursor + outroBars - 1;
         } else {
             totalBars = inputBars;
             resolvedMotifPos = "main";
@@ -127,14 +151,17 @@ public class ComposerAgent {
                     barNotes.add(n);
                 }
             }
+            SongSection activeSection = sectionForBar(sections, barNum);
 
             String chosen = null;
-            if (barIdx < llmChords.size() && (qaFeedback == null || qaFeedback.isBlank())) {
+            boolean isBridge = activeSection != null
+                    && activeSection.getName().toLowerCase(Locale.ROOT).contains("bridge");
+            if (!isBridge && barIdx < llmChords.size() && (qaFeedback == null || qaFeedback.isBlank())) {
                 String cand = llmChords.get(barIdx);
                 if (validSymbols.contains(cand)) chosen = cand;
             }
             if (chosen == null) {
-                chosen = chooseChordForBar(barNotes, triads, barIdx, genre, mood);
+                chosen = chooseChordForBar(barNotes, triads, barIdx, activeSection, genre, mood, scale);
             }
             chords.add(new ChordEvent(barNum, 1.0, chosen, beatsPerBar));
         }
@@ -161,27 +188,107 @@ public class ComposerAgent {
     }
 
     private List<MidiNote> enhanceMelody(List<MidiNote> rawNotes, List<Integer> scalePcs) {
-        List<MidiNote> enhanced = new ArrayList<>(rawNotes.size());
+        if (rawNotes.isEmpty()) return List.of();
+        List<MidiNote> quantized = new ArrayList<>(rawNotes.size());
         for (int i = 0; i < rawNotes.size(); i++) {
             MidiNote n = rawNotes.get(i);
             int snapped = MusicTheory.snapPitchToScale(n.getPitch(), scalePcs);
-            double qStart = Math.round(n.getStartBeat() * 2.0) / 2.0;
-            double qDur = Math.max(0.25, Math.round(n.getDuration() * 2.0) / 2.0);
-            int vel = Math.min(115, Math.max(70, n.getVelocity() + (i % 2 == 0 ? 4 : 0)));
-            enhanced.add(new MidiNote(snapped, qStart, qDur, vel, n.getConfidence()));
+            double qStart = Math.max(0.0, Math.round(n.getStartBeat() * 4.0) / 4.0);
+            if (i > 0 && qStart <= quantized.get(i - 1).getStartBeat()) {
+                qStart = quantized.get(i - 1).getStartBeat() + 0.25;
+            }
+            double qDur = Math.max(0.25, Math.round(n.getDuration() * 4.0) / 4.0);
+            boolean onBeat = Math.abs(qStart - Math.round(qStart)) < 0.01;
+            int vel = Math.min(118, Math.max(68, n.getVelocity() + (onBeat ? 6 : 0)));
+            quantized.add(new MidiNote(snapped, qStart, qDur, vel, n.getConfidence()));
+        }
+
+        // Insert subtle scale-aware passing notes across melodic leaps while preserving core contour
+        List<MidiNote> enhanced = new ArrayList<>(quantized.size() * 2);
+        int maxPassingNotes = Math.max(1, quantized.size() / 2);
+        int addedPassing = 0;
+        for (int i = 0; i < quantized.size(); i++) {
+            MidiNote curr = quantized.get(i);
+            if (i + 1 >= quantized.size()) {
+                enhanced.add(curr);
+                continue;
+            }
+            MidiNote next = quantized.get(i + 1);
+            double gapToNext = next.getStartBeat() - curr.getStartBeat();
+            double clippedDur = Math.max(0.25, Math.min(curr.getDuration(), gapToNext));
+            int pitchDiff = next.getPitch() - curr.getPitch();
+
+            if (addedPassing < maxPassingNotes
+                    && gapToNext >= 1.0
+                    && clippedDur >= 0.75
+                    && Math.abs(pitchDiff) >= 3
+                    && Math.abs(pitchDiff) <= 7) {
+                Integer passingPitch = findScalePassingPitch(curr.getPitch(), next.getPitch(), scalePcs);
+                if (passingPitch != null) {
+                    double passingDur = gapToNext >= 1.5 ? 0.5 : 0.25;
+                    double mainDur = Math.max(0.5, gapToNext - passingDur);
+                    double passingStart = Math.round((curr.getStartBeat() + mainDur) * 1000.0) / 1000.0;
+                    int passingVel = Math.max(64, (int) Math.round(curr.getVelocity() * 0.82));
+                    enhanced.add(new MidiNote(curr.getPitch(), curr.getStartBeat(), mainDur, curr.getVelocity(), curr.getConfidence()));
+                    enhanced.add(new MidiNote(passingPitch, passingStart, passingDur, passingVel, curr.getConfidence()));
+                    addedPassing++;
+                    continue;
+                }
+            }
+            enhanced.add(new MidiNote(curr.getPitch(), curr.getStartBeat(), clippedDur, curr.getVelocity(), curr.getConfidence()));
         }
         return enhanced;
     }
 
-    private String chooseChordForBar(List<MidiNote> barNotes, List<MusicTheory.DiatonicTriad> triads,
-                                     int barIndex, String genre, String mood) {
-        if (triads.isEmpty()) return "C";
-        int[] defaultOrder = triads.size() >= 6 ? new int[]{0, 4, 5, 3} : new int[]{0};
-        if (mood.toLowerCase(Locale.ROOT).contains("sad") || genre.toLowerCase(Locale.ROOT).contains("ballad")) {
-            defaultOrder = triads.size() >= 6 ? new int[]{5, 3, 0, 4} : new int[]{0};
+    private Integer findScalePassingPitch(int p1, int p2, List<Integer> scalePcs) {
+        if (scalePcs == null || scalePcs.isEmpty() || p1 == p2) return null;
+        int low = Math.min(p1, p2) + 1;
+        int high = Math.max(p1, p2) - 1;
+        double mid = (p1 + p2) / 2.0;
+        Integer best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (int cand = low; cand <= high; cand++) {
+            if (cand >= 21 && cand <= 108 && scalePcs.contains(Math.floorMod(cand, 12))) {
+                double dist = Math.abs(cand - mid);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = cand;
+                }
+            }
         }
-        int preferredIdx = defaultOrder[barIndex % defaultOrder.length];
-        if (barNotes.isEmpty()) {
+        return best;
+    }
+
+    private SongSection sectionForBar(List<SongSection> sections, int barNum) {
+        for (SongSection sec : sections) {
+            if (barNum >= sec.getStartBar() && barNum < sec.getStartBar() + sec.getBars()) {
+                return sec;
+            }
+        }
+        return null;
+    }
+
+    private String chooseChordForBar(List<MidiNote> barNotes, List<MusicTheory.DiatonicTriad> triads,
+                                     int barIndex, SongSection section, String genre, String mood, String scale) {
+        if (triads.isEmpty()) return "C";
+        String secName = section != null && section.getName() != null
+                ? section.getName().toLowerCase(Locale.ROOT) : "";
+        boolean isBridge = secName.contains("bridge");
+        boolean isMinor = scale != null && scale.toLowerCase(Locale.ROOT).contains("minor");
+
+        int[] defaultOrder;
+        if (isBridge && triads.size() >= 6) {
+            // Contrasting harmonic color for Bridge (subdominant/mediant/dominant lift)
+            defaultOrder = isMinor ? new int[]{3, 5, 2, 4} : new int[]{3, 4, 2, 5};
+        } else if (mood.toLowerCase(Locale.ROOT).contains("sad") || genre.toLowerCase(Locale.ROOT).contains("ballad")) {
+            defaultOrder = triads.size() >= 6 ? new int[]{5, 3, 0, 4} : new int[]{0};
+        } else {
+            defaultOrder = triads.size() >= 6 ? new int[]{0, 4, 5, 3} : new int[]{0};
+        }
+
+        int relBar = section != null ? Math.max(0, (barIndex + 1) - section.getStartBar()) : barIndex;
+        int preferredIdx = defaultOrder[relBar % defaultOrder.length];
+        if (isBridge || barNotes.isEmpty()) {
             return triads.get(preferredIdx).symbol();
         }
 

@@ -297,4 +297,134 @@ class ApiMockMvcTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.total").value(7));
     }
+
+    private byte[] makeSilencePaddedVocalWav(double leadSilSec, double toneSec, double trailSilSec, int sr) {
+        int nLead = (int) (leadSilSec * sr);
+        int nTone = (int) (toneSec * sr);
+        int nTrail = (int) (trailSilSec * sr);
+        float[] samples = new float[nLead + nTone + nTrail];
+        for (int i = 0; i < nTone; i++) {
+            double t = (double) i / sr;
+            samples[nLead + i] = (float) (0.45 * Math.sin(2.0 * Math.PI * 329.63 * t));
+        }
+        return audioService.encodeWavMono(samples, sr);
+    }
+
+    @Test
+    void phase23StudioEndpointsAndMultiClipTextureExport() throws Exception {
+        byte[] paddedVocal = makeSilencePaddedVocalWav(0.6, 2.4, 0.5, 44100);
+        MockMultipartFile vocalFile = new MockMultipartFile("file", "padded_vocal.wav", "audio/wav", paddedVocal);
+
+        MvcResult upRes = mockMvc.perform(multipart("/api/audio/upload")
+                        .file(vocalFile)
+                        .param("title", "Phase 23 Song"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String pid = objectMapper.readTree(upRes.getResponse().getContentAsString()).get("project_id").asText();
+
+        // Standard Full Song generation includes Bridge
+        MvcResult genRes = mockMvc.perform(post("/api/jobs/generate")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"config\":{\"melody_mode\":\"enhance\",\"output_mode\":\"full_song\",\"structure_preset\":\"standard\"}}"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String jobId = objectMapper.readTree(genRes.getResponse().getContentAsString()).get("job_id").asText();
+        Thread.sleep(350);
+        mockMvc.perform(get("/api/jobs/" + jobId + "/events")).andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/projects/" + pid))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.song_structure.sections[*].name", hasItem("Bridge")));
+
+        // 1. Auto-Trim Vocal
+        MvcResult trimRes = mockMvc.perform(post("/api/studio/auto-trim-vocal")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.project_id").value(pid))
+                .andExpect(jsonPath("$.summary").isNotEmpty())
+                .andExpect(jsonPath("$.trim_start_sec", greaterThan(0.4)))
+                .andExpect(jsonPath("$.trim_end_sec", lessThan(3.2)))
+                .andExpect(jsonPath("$.trimmed_clips", greaterThanOrEqualTo(1)))
+                .andExpect(jsonPath("$.project_state.tracks.vocal.clips", not(empty())))
+                .andReturn();
+        JsonNode trimJson = objectMapper.readTree(trimRes.getResponse().getContentAsString());
+        assertTrue(trimJson.at("/project_state/tracks/vocal/clips/0/trim_start_sec").asDouble() > 0.4);
+
+        // 2. Clip Upload onto "texture" track (creates texture track & handles invalid format)
+        MockMultipartFile badClip = new MockMultipartFile("file", "bad.txt", "text/plain", "nope".getBytes());
+        mockMvc.perform(multipart("/api/audio/clip-upload")
+                        .file(badClip)
+                        .param("project_id", pid))
+                .andExpect(status().isBadRequest());
+
+        byte[] fxWav1 = makeMelodyWav(1.0, 44100);
+        byte[] fxWav2 = makeMelodyWav(0.8, 44100);
+        MockMultipartFile clipFile1 = new MockMultipartFile("file", "riser.wav", "audio/wav", fxWav1);
+        MockMultipartFile clipFile2 = new MockMultipartFile("file", "chime.wav", "audio/wav", fxWav2);
+
+        MvcResult clipRes1 = mockMvc.perform(multipart("/api/audio/clip-upload")
+                        .file(clipFile1)
+                        .param("project_id", pid)
+                        .param("track_id", "texture")
+                        .param("start_bar", "1.0"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.audio_ref", startsWith("mem://clips/")))
+                .andExpect(jsonPath("$.clip.id").isNotEmpty())
+                .andExpect(jsonPath("$.project_state.tracks.texture.type").value("audio"))
+                .andExpect(jsonPath("$.project_state.tracks.texture.clips", hasSize(1)))
+                .andReturn();
+        String texRef1 = objectMapper.readTree(clipRes1.getResponse().getContentAsString()).get("audio_ref").asText();
+
+        mockMvc.perform(get("/api/audio/asset").param("ref", texRef1))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"));
+
+        mockMvc.perform(multipart("/api/audio/clip-upload")
+                        .file(clipFile2)
+                        .param("project_id", pid)
+                        .param("track_id", "texture")
+                        .param("start_bar", "2.0"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.project_state.tracks.texture.clips", hasSize(2)));
+
+        // 3. Auto-Mix
+        MvcResult mixRes = mockMvc.perform(post("/api/studio/auto-mix")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.project_id").value(pid))
+                .andExpect(jsonPath("$.mix_notes", not(empty())))
+                .andExpect(jsonPath("$.project_state.mastering.auto_mix_enabled").value(true))
+                .andExpect(jsonPath("$.project_state.mastering.limiter_ceiling_db").value(-1.0))
+                .andReturn();
+        JsonNode mixJson = objectMapper.readTree(mixRes.getResponse().getContentAsString());
+        JsonNode tracksNode = mixJson.at("/project_state/tracks");
+        tracksNode.fields().forEachRemaining(e -> {
+            double vol = e.getValue().get("volume").asDouble();
+            double pan = e.getValue().get("pan").asDouble();
+            assertTrue(vol >= 0.0 && vol <= 1.15, "Volume out of range for " + e.getKey() + ": " + vol);
+            assertTrue(pan >= -0.5 && pan <= 0.5, "Pan out of range for " + e.getKey() + ": " + pan);
+        });
+
+        // 4. Multi-clip preview & stems export include texture track
+        mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "ai_mix"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"));
+
+        byte[] stemsBytes = mockMvc.perform(post("/api/projects/" + pid + "/export/audio")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"format\":\"stems\",\"apply_mastering\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("application/zip"))
+                .andReturn().getResponse().getContentAsByteArray();
+
+        java.util.Set<String> stemEntries = new java.util.HashSet<>();
+        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(stemsBytes))) {
+            java.util.zip.ZipEntry ze;
+            while ((ze = zis.getNextEntry()) != null) stemEntries.add(ze.getName());
+        }
+        assertTrue(stemEntries.contains("stems/vocal.wav"));
+        assertTrue(stemEntries.contains("stems/texture.wav"));
+    }
 }

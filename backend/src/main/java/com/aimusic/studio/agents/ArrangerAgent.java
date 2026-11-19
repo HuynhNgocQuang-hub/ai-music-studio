@@ -219,15 +219,25 @@ public class ArrangerAgent {
         return GENRE_INSTRUMENTS.get("pop");
     }
 
-    private double sectionEnergyForBar(List<SongSection> sections, int barNum) {
+    private SongSection sectionForBar(List<SongSection> sections, int barNum) {
         for (SongSection sec : sections) {
             int start = sec.getStartBar();
             int bars = sec.getBars();
             if (barNum >= start && barNum < start + bars) {
-                return sec.getEnergy();
+                return sec;
             }
         }
-        return 0.7;
+        return null;
+    }
+
+    private boolean isBridgeSection(SongSection sec) {
+        return sec != null && sec.getName() != null
+                && sec.getName().toLowerCase(Locale.ROOT).contains("bridge");
+    }
+
+    private double sectionEnergyForBar(List<SongSection> sections, int barNum) {
+        SongSection sec = sectionForBar(sections, barNum);
+        return sec != null ? sec.getEnergy() : 0.7;
     }
 
     private int bassMidiPitch(int rootPc) {
@@ -257,10 +267,37 @@ public class ArrangerAgent {
         boolean isHiphop = lowered.contains("hip-hop") || lowered.contains("r&b");
 
         for (int barIdx = 0; barIdx < totalBars; barIdx++) {
-            double energy = sectionEnergyForBar(sections, barIdx + 1);
+            int barNum = barIdx + 1;
+            SongSection sec = sectionForBar(sections, barNum);
+            boolean isBridge = isBridgeSection(sec);
+            double energy = sec != null ? sec.getEnergy() : 0.7;
             double barStart = (double) barIdx * beatsPerBar;
             if (energy < 0.32 && barIdx == 0) continue;
             double velScale = Math.max(0.55, Math.min(1.0, energy + 0.15));
+
+            if (isBridge) {
+                boolean isFirstBridgeBar = barNum == sec.getStartBar();
+                boolean isLastBridgeBar = barNum == sec.getStartBar() + sec.getBars() - 1;
+                if (isFirstBridgeBar) {
+                    notes.add(new MidiNote(49, barStart, 0.5, (int) (96 * velScale), 1.0));
+                }
+                // Half-time atmospheric bridge groove with ride cymbal & turnaround fill
+                notes.add(new MidiNote(36, barStart, 0.25, (int) (96 * velScale), 1.0));
+                if (beatsPerBar >= 4) {
+                    notes.add(new MidiNote(36, barStart + 2.5, 0.25, (int) (88 * velScale), 1.0));
+                    notes.add(new MidiNote(38, barStart + 2.0, 0.25, (int) (92 * velScale), 1.0));
+                } else if (beatsPerBar >= 2) {
+                    notes.add(new MidiNote(38, barStart + 1.0, 0.25, (int) (86 * velScale), 1.0));
+                }
+                for (int beat = 0; beat < beatsPerBar; beat++) {
+                    notes.add(new MidiNote(51, barStart + beat, 0.3, (int) (74 * velScale), 1.0));
+                }
+                if (isLastBridgeBar && beatsPerBar >= 4) {
+                    notes.add(new MidiNote(38, barStart + 3.0, 0.25, (int) (95 * velScale), 1.0));
+                    notes.add(new MidiNote(38, barStart + 3.5, 0.25, (int) (104 * velScale), 1.0));
+                }
+                continue;
+            }
 
             for (int beat = 0; beat < beatsPerBar; beat++) {
                 double t = barStart + beat;
@@ -295,17 +332,27 @@ public class ArrangerAgent {
 
         for (int barIdx = 0; barIdx < totalBars; barIdx++) {
             int barNum = barIdx + 1;
-            double energy = sectionEnergyForBar(sections, barNum);
+            SongSection sec = sectionForBar(sections, barNum);
+            boolean isBridge = isBridgeSection(sec);
+            double energy = sec != null ? sec.getEnergy() : 0.7;
             String symbol = chordByBar.getOrDefault(barNum, "C");
             MusicTheory.ParsedChord parsed = MusicTheory.parseChordSymbol(symbol);
             int rootPitch = bassMidiPitch(parsed.rootPc());
+            int thirdPc = parsed.pitchClasses().size() >= 2
+                    ? parsed.pitchClasses().get(1) : (parsed.rootPc() + 4) % 12;
+            int thirdPitch = bassMidiPitch(thirdPc);
             int fifthPc = parsed.pitchClasses().size() >= 3
                     ? parsed.pitchClasses().get(2) : (parsed.rootPc() + 7) % 12;
             int fifthPitch = bassMidiPitch(fifthPc);
             double barStart = (double) barIdx * beatsPerBar;
             int vel = (int) Math.max(65, Math.min(110, 75 + energy * 30));
 
-            if (isEdm && energy >= 0.6) {
+            if (isBridge && beatsPerBar >= 4) {
+                // Sustained melodic pedal + chord-tone walk in Bridge
+                notes.add(new MidiNote(rootPitch, barStart, 2.0, vel - 4, 1.0));
+                notes.add(new MidiNote(thirdPitch, barStart + 2.0, 1.0, vel - 2, 1.0));
+                notes.add(new MidiNote(fifthPitch, barStart + 3.0, 1.0, Math.min(112, vel + 4), 1.0));
+            } else if (isEdm && energy >= 0.6) {
                 for (int step = 0; step < beatsPerBar * 2; step++) {
                     notes.add(new MidiNote(rootPitch, barStart + step * 0.5, 0.4, vel, 1.0));
                 }
@@ -329,14 +376,25 @@ public class ArrangerAgent {
 
         for (int barIdx = 0; barIdx < totalBars; barIdx++) {
             int barNum = barIdx + 1;
-            double energy = sectionEnergyForBar(sections, barNum);
+            SongSection sec = sectionForBar(sections, barNum);
+            boolean isBridge = isBridgeSection(sec);
+            double energy = sec != null ? sec.getEnergy() : 0.7;
             String symbol = chordByBar.getOrDefault(barNum, "C");
             MusicTheory.ParsedChord parsed = MusicTheory.parseChordSymbol(symbol);
             List<Integer> voicing = chordVoicingPitches(parsed.pitchClasses());
             double barStart = (double) barIdx * beatsPerBar;
             int vel = (int) Math.max(55, Math.min(95, 58 + energy * 32));
 
-            if (isBallad || energy < 0.5) {
+            if (isBridge) {
+                // Contrasting arpeggiated texture + low pad root in Bridge
+                if (!voicing.isEmpty()) {
+                    notes.add(new MidiNote(voicing.get(0), barStart, beatsPerBar, Math.max(52, vel - 8), 1.0));
+                    for (int beat = 0; beat < beatsPerBar; beat++) {
+                        int arpPitch = voicing.get(beat % voicing.size()) + (beat == beatsPerBar - 1 ? 12 : 0);
+                        notes.add(new MidiNote(Math.min(84, arpPitch), barStart + beat, 0.85, vel, 1.0));
+                    }
+                }
+            } else if (isBallad || energy < 0.5) {
                 for (int pitch : voicing) {
                     notes.add(new MidiNote(pitch, barStart, beatsPerBar, vel, 1.0));
                 }
@@ -362,24 +420,45 @@ public class ArrangerAgent {
         List<SongSection> motifSections = sections.stream().filter(SongSection::isHasUserMotif).toList();
 
         if (!motifSections.isEmpty() && melodyNotes != null && !melodyNotes.isEmpty()) {
-            double motifStartBeat = (motifSections.get(0).getStartBar() - 1) * (double) beatsPerBar;
-            double motifLenBeats = Math.max(1.0, motifSections.get(0).getBars() * (double) beatsPerBar);
-            for (MidiNote n : melodyNotes) {
-                double shiftedStart = motifStartBeat + (n.getStartBeat() % motifLenBeats);
-                if (shiftedStart < totalBeats) {
-                    double maxDur = Math.min(n.getDuration(), totalBeats - shiftedStart);
-                    if (maxDur >= 0.125) {
-                        notes.add(new MidiNote(n.getPitch(),
-                                Math.round(shiftedStart * 10000.0) / 10000.0,
-                                Math.round(maxDur * 10000.0) / 10000.0,
-                                n.getVelocity(), 1.0));
+            for (SongSection motifSec : motifSections) {
+                double motifStartBeat = (motifSec.getStartBar() - 1) * (double) beatsPerBar;
+                double motifLenBeats = Math.max(1.0, motifSec.getBars() * (double) beatsPerBar);
+                for (MidiNote n : melodyNotes) {
+                    double shiftedStart = motifStartBeat + (n.getStartBeat() % motifLenBeats);
+                    if (shiftedStart < totalBeats) {
+                        double maxDur = Math.min(n.getDuration(), totalBeats - shiftedStart);
+                        if (maxDur >= 0.125) {
+                            notes.add(new MidiNote(n.getPitch(),
+                                    Math.round(shiftedStart * 10000.0) / 10000.0,
+                                    Math.round(maxDur * 10000.0) / 10000.0,
+                                    n.getVelocity(), 1.0));
+                        }
+                    }
+                }
+            }
+            // Add contrasting counter-melody in Bridge sections
+            for (SongSection sec : sections) {
+                if (isBridgeSection(sec) && !sec.isHasUserMotif()) {
+                    for (int offset = 0; offset < sec.getBars(); offset++) {
+                        int barNum = sec.getStartBar() + offset;
+                        if (barNum < 1 || barNum > totalBars) continue;
+                        String symbol = chordByBar.getOrDefault(barNum, "C");
+                        MusicTheory.ParsedChord parsed = MusicTheory.parseChordSymbol(symbol);
+                        int pc1 = parsed.pitchClasses().size() > 1 ? parsed.pitchClasses().get(1) : parsed.rootPc();
+                        int pc2 = parsed.pitchClasses().size() > 2 ? parsed.pitchClasses().get(2) : pc1;
+                        double barStart = (barNum - 1) * (double) beatsPerBar;
+                        notes.add(new MidiNote(72 + pc1, barStart, Math.min(2.0, beatsPerBar), 80, 1.0));
+                        if (beatsPerBar >= 4) {
+                            notes.add(new MidiNote(72 + pc2, barStart + 2.0, 1.75, 84, 1.0));
+                        }
                     }
                 }
             }
         } else {
             for (int barIdx = 0; barIdx < totalBars; barIdx++) {
                 int barNum = barIdx + 1;
-                double energy = sectionEnergyForBar(sections, barNum);
+                SongSection sec = sectionForBar(sections, barNum);
+                double energy = sec != null ? sec.getEnergy() : 0.7;
                 if (energy < 0.45) continue;
                 String symbol = chordByBar.getOrDefault(barNum, "C");
                 MusicTheory.ParsedChord parsed = MusicTheory.parseChordSymbol(symbol);
