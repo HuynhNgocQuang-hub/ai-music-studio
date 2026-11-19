@@ -115,11 +115,40 @@ def export_stems_zip(stems: dict[str, np.ndarray], sample_rate: int = 44100) -> 
 def _format_mido_key(key: str, scale: str) -> str:
     valid_major = {"C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb", "Cb"}
     valid_minor = {"Am", "Em", "Bm", "F#m", "C#m", "G#m", "D#m", "A#m", "Dm", "Gm", "Cm", "Fm", "Bbm", "Ebm", "Abm"}
-    k = key.strip()
-    if "minor" in scale.lower():
-        cand = f"{k}m"
+    sharp_to_flat_major = {
+        "C#": "Db",
+        "D#": "Eb",
+        "E#": "F",
+        "F#": "Gb",
+        "G#": "Ab",
+        "A#": "Bb",
+        "B#": "C",
+        "Fb": "E",
+    }
+    enharmonic_minor_roots = {
+        "Db": "C#",
+        "Gb": "F#",
+        "Cb": "B",
+        "E#": "F",
+        "B#": "C",
+        "Fb": "E",
+    }
+
+    raw = (key or "C").strip()
+    if not raw:
+        raw = "C"
+    k = raw[0].upper() + (raw[1:] if len(raw) > 1 else "")
+    is_minor = "minor" in (scale or "").lower()
+    if is_minor and len(k) > 1 and k.endswith("m"):
+        k = k[:-1]
+
+    if is_minor:
+        minor_root = enharmonic_minor_roots.get(k, k)
+        cand = f"{minor_root}m"
         return cand if cand in valid_minor else "Am"
-    return k if k in valid_major else "C"
+
+    mapped = sharp_to_flat_major.get(k, k)
+    return mapped if mapped in valid_major else "C"
 
 
 def export_midi(project: ProjectState) -> bytes:

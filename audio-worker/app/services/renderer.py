@@ -12,20 +12,54 @@ import mido
 import numpy as np
 
 from app.schemas import MidiNote, ProjectState, TrackState
-from app.services.denoise import decode_wav_bytes
+from app.services.denoise import _resample_mono, decode_wav_bytes
 from app.services.exporter import apply_master_limiter
 
 SOUNDFONT_PATH = os.getenv("SOUNDFONT_PATH", "/usr/share/sounds/sf2/FluidR3_GM.sf2")
 
 INSTRUMENT_PROGRAMS: dict[str, int] = {
+    # Keys & Piano
     "grand_piano": 0,
     "electric_piano": 4,
+    "rhodes_ep": 4,
+    # Guitars
     "acoustic_guitar": 24,
+    "muted_guitar": 28,
+    "overdrive_guitar": 29,
+    "lead_guitar": 30,
+    # Basses
+    "upright_bass": 32,
     "finger_bass": 33,
+    "pick_bass": 34,
+    "fretless_bass": 35,
     "synth_bass": 38,
+    "808_bass": 38,
+    "warm_sub_bass": 39,
+    "saw_bass": 39,
+    # Strings & Winds
     "strings": 48,
-    "synth_pad": 88,
+    "string_ensemble": 48,
+    "flute": 73,
+    # Synth Leads
     "lead_synth": 80,
+    "synth_lead": 80,
+    "bright_lead": 81,
+    "pluck_synth": 82,
+    # Synth Pads
+    "synth_pad": 88,
+    "warm_pad": 89,
+    "supersaw_pad": 90,
+    "dark_pad": 95,
+    # Drum Kits
+    "acoustic_kit": 0,
+    "rnb_kit": 0,
+    "rock_kit": 16,
+    "electronic_kit": 24,
+    "lofi_kit": 24,
+    "electronic_808": 25,
+    "808_kit": 25,
+    "cajon_kit": 32,
+    "brush_kit": 40,
 }
 
 
@@ -152,7 +186,8 @@ def _try_fluidsynth_render(
     mt.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
     ch = 9 if track_name == "drums" else 0
     if ch != 9:
-        prog = INSTRUMENT_PROGRAMS.get(track.instrument or "grand_piano", 0)
+        inst_key = (track.instrument or "grand_piano").strip().lower()
+        prog = INSTRUMENT_PROGRAMS.get(inst_key, 0)
         mt.append(mido.Message("program_change", channel=ch, program=prog, time=0))
 
     events: list[tuple[int, int, mido.Message]] = []
@@ -222,6 +257,8 @@ def _vocal_ref_candidates(project: ProjectState, mode: str) -> tuple[tuple[Optio
         return (raw_pair, dry_pair, tuned_pair)
     if mode in ("dry", "dry_beat"):
         return (dry_pair, raw_pair, tuned_pair)
+    if not project.autotune_settings.enabled:
+        return (dry_pair, raw_pair)
     return (tuned_pair, dry_pair, raw_pair)
 
 
@@ -251,19 +288,21 @@ def _render_audio_track(
         return audio_assets.get(key)
 
     canonical_refs = {
-        "raw_input_ref",
-        "dry_denoised_ref",
-        "tuned_vocal_ref",
-        project.audio_assets.raw_input_ref,
-        project.audio_assets.dry_denoised_ref,
-        project.audio_assets.tuned_vocal_ref,
+        ref
+        for ref in (
+            "raw_input_ref",
+            "dry_denoised_ref",
+            "tuned_vocal_ref",
+            project.audio_assets.raw_input_ref,
+            project.audio_assets.dry_denoised_ref,
+            project.audio_assets.tuned_vocal_ref,
+        )
+        if ref
     }
 
     def _resolve_ref(src: str) -> Optional[bytes]:
         if src and src not in canonical_refs:
-            custom = _get_bytes(src)
-            if custom:
-                return custom
+            return _get_bytes(src)
         for proj_ref, slot_name in _vocal_ref_candidates(project, mode_norm):
             b = _get_bytes(proj_ref) or _get_bytes(slot_name)
             if b:
@@ -275,7 +314,9 @@ def _render_audio_track(
         if track_name.lower() == "vocal":
             wav_bytes = _resolve_ref("raw_input_ref" if mode_norm == "raw" else "dry_denoised_ref")
             if wav_bytes:
-                samples, _ = decode_wav_bytes(wav_bytes)
+                samples, clip_sr = decode_wav_bytes(wav_bytes)
+                if clip_sr != sr:
+                    samples = _resample_mono(samples, clip_sr, sr)
                 n = min(total_samples, len(samples))
                 buf[:n] += samples[:n]
         return buf
@@ -284,7 +325,9 @@ def _render_audio_track(
         wav_bytes = _resolve_ref(clip.source)
         if not wav_bytes:
             continue
-        samples, _ = decode_wav_bytes(wav_bytes)
+        samples, clip_sr = decode_wav_bytes(wav_bytes)
+        if clip_sr != sr:
+            samples = _resample_mono(samples, clip_sr, sr)
         t_start = max(0, int(round(clip.trim_start_sec * sr)))
         t_end = int(round(clip.trim_end_sec * sr)) if clip.trim_end_sec is not None else len(samples)
         t_end = min(len(samples), max(t_start, t_end))
@@ -387,7 +430,7 @@ def render_project_mix(
         else:
             mono = midi_monos.get(name, np.zeros(total_samples, dtype=np.float32))
             if mode_norm == "preserve":
-                mode_gain = 0.40 if name == "lead" else 0.80
+                mode_gain = 0.0 if name.lower() == "lead" else 0.80
             elif mode_norm == "enhance":
                 mode_gain = 1.08
             else:
