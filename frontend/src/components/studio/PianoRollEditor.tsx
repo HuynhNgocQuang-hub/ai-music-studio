@@ -37,7 +37,10 @@ const SCALE_INTERVALS: Record<string, number[]> = {
   minor: [0, 2, 3, 5, 7, 8, 10],
   pentatonic_major: [0, 2, 4, 7, 9],
   pentatonic_minor: [0, 3, 5, 7, 10],
+  chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
 };
+
+const SCALES = ['major', 'minor', 'pentatonic_major', 'pentatonic_minor', 'chromatic'] as const;
 
 function formatMidiPitch(pitch: number): string {
   const octave = Math.floor(pitch / 12) - 1;
@@ -215,9 +218,30 @@ export default function PianoRollEditor({
               {tid}
             </button>
           ))}
-          <span className="rounded bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">
-            Scale: {project.analysis.detected_key} {project.analysis.detected_scale}
-          </span>
+          <div className="flex items-center gap-1 rounded bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">
+            <span>Scale: {project.analysis.detected_key}</span>
+            <select
+              aria-label="Piano Roll Scale"
+              value={project.analysis.detected_scale}
+              onChange={(e) => {
+                const nextScale = e.target.value;
+                onMutateWithUndo((prev) => ({
+                  ...prev,
+                  analysis: { ...prev.analysis, detected_scale: nextScale, key_locked: true },
+                  autotune_settings: prev.autotune_settings.auto_follow_project_key
+                    ? { ...prev.autotune_settings, scale: nextScale }
+                    : prev.autotune_settings,
+                }));
+              }}
+              className="bg-transparent font-semibold text-emerald-200 focus:outline-none"
+            >
+              {SCALES.map((sc) => (
+                <option key={sc} value={sc} className="bg-slate-900 text-white">
+                  {sc}
+                </option>
+              ))}
+            </select>
+          </div>
           <span className="text-[11px] text-slate-400">
             Snap: <strong className="text-slate-200">{snapGrid}</strong> • {notes.length} nốt
           </span>

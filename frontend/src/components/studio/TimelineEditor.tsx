@@ -976,7 +976,7 @@ export default function TimelineEditor({
                         onSelectMidiTrack(trackId as 'drums' | 'bass' | 'harmony' | 'lead');
                         return;
                       }
-                      // If vocal clips are empty and user clicks with Split tool while baseVocalRef exists, materialize & split
+                      // If vocal clips are empty and user clicks with Split tool while baseVocalRef exists, materialize & split in a single undo frame
                       if (
                         tool === 'split' &&
                         trackId === 'vocal' &&
@@ -993,14 +993,6 @@ export default function TimelineEditor({
                           fade_out_ms: 20,
                           offset_ms: 0,
                         };
-                        onMutateWithUndo((prev) => ({
-                          ...prev,
-                          tracks: {
-                            ...prev.tracks,
-                            vocal: { ...prev.tracks.vocal, clips: [defaultClip] },
-                          },
-                        }));
-                        // Split immediately using the same click coords
                         handleSplitClipAtClientX(e, 'vocal', defaultClip, laneEl);
                       }
                     }}
@@ -1025,7 +1017,10 @@ export default function TimelineEditor({
                             selectedClipRef?.trackId === trackId &&
                             selectedClipRef?.clipId === clip.id;
                           const isOverdub =
-                            clip.id.startsWith('clip_overdub_') || clip.source.includes('overdub');
+                            trackId === 'vocal' &&
+                            (clip.id.startsWith('clip_overdub_') ||
+                              clip.source.includes('overdub') ||
+                              clip.source.startsWith('mem://clips/'));
 
                           return (
                             <div

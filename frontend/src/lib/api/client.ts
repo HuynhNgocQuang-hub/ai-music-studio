@@ -30,6 +30,8 @@ const SETTINGS_STORAGE_KEY = 'ai_music_studio_settings_v1';
 export const ALLOWED_AUDIO_EXTENSIONS = ['wav', 'mp3', 'm4a', 'ogg', 'flac'] as const;
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB (SRS FR-INP)
 export const MIN_AUDIO_DURATION_SEC = 3; // 3 seconds minimum (SRS FR-INP)
+export const MAX_HUM_DURATION_SEC = 60; // 1 minute in hum mode (SRS FR-INP)
+export const MAX_VOCAL_DURATION_SEC = 300; // 5 minutes in vocal mode (SRS FR-INP)
 
 export const DEFAULT_LLM_SETTINGS: StudioLLMSettings = {
   geminiApiKey: '',
@@ -206,12 +208,18 @@ export async function clearBackendCache(): Promise<{ status: string; cleared_ass
 // ============================================================
 // 3.1 Audio Input, Denoise & Auto-Tune
 // ============================================================
-export async function uploadAudio(file: Blob | File, filename = 'recording.wav', projectId?: string): Promise<UploadAudioResponse> {
+export async function uploadAudio(
+  file: Blob | File,
+  filename = 'recording.wav',
+  projectId?: string,
+  mode: 'hum' | 'vocal' = 'hum'
+): Promise<UploadAudioResponse> {
   const formData = new FormData();
   formData.append('file', file, filename);
   if (projectId) {
     formData.append('project_id', projectId);
   }
+  formData.append('mode', mode);
   return requestJson<UploadAudioResponse>('/api/audio/upload', {
     method: 'POST',
     body: formData,
@@ -423,9 +431,17 @@ export async function suggestLyrics(payload: LyricsSuggestRequest): Promise<Lyri
 }
 
 export async function chatWithCoach(payload: CoachChatRequest): Promise<CoachChatResponse> {
+  const cleanHistory = payload.history.map(({ role, content, timestamp }) => ({
+    role,
+    content,
+    ...(timestamp ? { timestamp } : {}),
+  }));
   return requestJson<CoachChatResponse>('/api/coach/chat', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      history: cleanHistory,
+    }),
   });
 }
 

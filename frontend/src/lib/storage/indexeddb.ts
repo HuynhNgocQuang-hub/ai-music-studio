@@ -22,7 +22,7 @@ export interface StoredDraft {
 export interface StoredAudioBlob {
   key: string; // `${project_id}:${slot}` e.g. 'proj_123:raw_input'
   project_id: string;
-  slot: 'raw_input' | 'dry_denoised' | 'tuned_vocal' | 'overdub';
+  slot: 'raw_input' | 'dry_denoised' | 'tuned_vocal' | 'overdub' | (string & {});
   mime_type: string;
   blob: Blob;
   updated_at: string;

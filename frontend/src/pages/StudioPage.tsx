@@ -54,14 +54,20 @@ import type {
   AudioClip,
   AutoTunePreset,
   AutotuneSettings,
+  ChordEvent,
   CoachMessage,
+  CoachSuggestedAction,
+  MelodyMode,
+  MotifPosition,
   OneClickFix,
+  OutputMode,
   OverdubFitCheckResponse,
   ProjectState,
+  StructurePreset,
 } from '@/types/project';
 
 const KEYS = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
-const SCALES = ['major', 'minor', 'pentatonic_major', 'pentatonic_minor'];
+const SCALES = ['major', 'minor', 'pentatonic_major', 'pentatonic_minor', 'chromatic'];
 const INSTRUMENTS: Record<string, string[]> = {
   drums: ['acoustic_kit', 'electronic_808', 'lofi_kit'],
   bass: ['finger_bass', 'synth_bass', 'upright_bass'],
@@ -131,6 +137,8 @@ export default function StudioPage() {
   ]);
   const [coachInput, setCoachInput] = useState('');
   const [coachLoading, setCoachLoading] = useState(false);
+  const [appliedCoachActions, setAppliedCoachActions] = useState<string[]>([]);
+  const [applyingCoachActionKey, setApplyingCoachActionKey] = useState<string | null>(null);
 
   // Load project from IndexedDB or Backend only when routeId changes
   useEffect(() => {
@@ -200,16 +208,49 @@ export default function StudioPage() {
   ]);
 
   useEffect(() => {
+    let cancelled = false;
     const current = latestProjectRef.current;
-    void engine.syncFromProject(current);
-    const hasOverdubClip = (current.tracks.vocal?.clips || []).some(
-      (c) => c.id.startsWith('clip_overdub_') || c.source.includes('overdub')
-    );
-    if (hasOverdubClip && !engine.hasBuffer('overdub')) {
-      void getAudioBlob(current.project_id, 'overdub').then((blob) => {
-        if (blob) void engine.loadAudioFromBlob('overdub', blob);
-      });
-    }
+    void (async () => {
+      await engine.syncFromProject(current);
+      if (cancelled) return;
+
+      // Restore raw_input audio blob from IndexedDB if backend cache expired
+      if (!engine.hasBuffer('raw')) {
+        const rawBlob = await getAudioBlob(current.project_id, 'raw_input');
+        if (rawBlob && !cancelled) {
+          await engine.loadAudioFromBlob('raw', rawBlob);
+        }
+      }
+
+      // Restore any custom/overdub clip blobs from IndexedDB if missing from engine
+      for (const track of Object.values(current.tracks)) {
+        if (!track || track.type !== 'audio') continue;
+        for (const clip of track.clips || []) {
+          const src = clip.source || '';
+          const isCustomClip =
+            src.startsWith('mem://clips/') ||
+            src.startsWith('idb://') ||
+            clip.id.startsWith('clip_overdub_') ||
+            src === 'overdub';
+          if (!isCustomClip) continue;
+          const cacheKey = src || clip.id;
+          if (!engine.hasBuffer(cacheKey)) {
+            const clipBlob =
+              (await getAudioBlob(current.project_id, cacheKey)) ||
+              (clip.id !== cacheKey ? await getAudioBlob(current.project_id, clip.id) : null) ||
+              (clip.id.startsWith('clip_overdub_') || src.includes('overdub')
+                ? await getAudioBlob(current.project_id, 'overdub')
+                : null);
+            if (clipBlob && !cancelled) {
+              await engine.loadAudioFromBlob(cacheKey, clipBlob);
+            }
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [audioSignature, engine]);
 
   useEffect(() => {
@@ -226,10 +267,13 @@ export default function StudioPage() {
   }, [engine]);
 
   const mutateWithUndo = useCallback(
-    (updater: (prev: ProjectState) => ProjectState) => {
-      setUndoStack((s) => [...s.slice(-19), latestProjectRef.current]);
+    (updater: (prev: ProjectState) => ProjectState): ProjectState => {
+      const prev = latestProjectRef.current;
+      setUndoStack((s) => [...s.slice(-19), prev]);
       setRedoStack([]);
-      updateProject(updater);
+      const next = updateProject(updater);
+      latestProjectRef.current = next;
+      return next;
     },
     [updateProject]
   );
@@ -440,42 +484,31 @@ export default function StudioPage() {
         stream.getTracks().forEach((t) => t.stop());
         engine.stop();
         const rawBlob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-        setStudioNotice('AI Fit Check đang phân tích bản thu Overdub...');
+        setStudioNotice('Đang lưu Overdub & chạy AI Fit Check...');
         try {
           const wavBlob = await encodeBlobToWav(rawBlob);
-          const currentId = latestProjectRef.current.project_id;
-          await saveAudioBlob(currentId, 'overdub', wavBlob);
-          await engine.loadAudioFromBlob('overdub', wavBlob);
+          const current = latestProjectRef.current;
+          await saveNow(true, current);
+          const clipRes = await uploadTrackClip(current.project_id, wavBlob, 'vocal');
+          const clip = clipRes.clip;
+          const cacheKey = clip.source || clipRes.audio_ref || clip.id;
 
-          const clipId = `clip_overdub_${Date.now()}`;
-          const overdubClip: AudioClip = {
-            id: clipId,
-            source: `idb://overdub/${clipId}`,
-            start_bar: 1,
-            trim_start_sec: 0,
-            fade_in_ms: 20,
-            fade_out_ms: 20,
-            offset_ms: 0,
-          };
-          setLastOverdubClipId(clipId);
+          await saveAudioBlob(current.project_id, cacheKey, wavBlob);
+          await engine.loadAudioFromBlob(cacheKey, wavBlob);
+
+          setLastOverdubClipId(clip.id);
           setAppliedFixIds([]);
-          mutateWithUndo((prev) => ({
-            ...prev,
-            tracks: {
-              ...prev.tracks,
-              vocal: {
-                ...prev.tracks.vocal,
-                clips: [...(prev.tracks.vocal?.clips || []), overdubClip],
-              },
-            },
-          }));
+          setUndoStack((s) => [...s.slice(-19), current]);
+          setRedoStack([]);
+          loadProjectIntoSession(clipRes.project_state, { dirty: true });
+          await engine.syncFromProject(clipRes.project_state);
 
-          const res = await overdubFitCheck(currentId, wavBlob);
+          const res = await overdubFitCheck(current.project_id, wavBlob);
           setFitCheck(res);
           setCoachOpen(true);
-          setStudioNotice('Đã lưu bản thu Overdub vào IndexedDB và hoàn tất AI Fit Check.');
+          setStudioNotice('Đã upload bản thu Overdub và hoàn tất AI Fit Check.');
         } catch (err) {
-          setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi chạy AI Fit Check.');
+          setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi upload Overdub hoặc chạy AI Fit Check.');
         }
       };
       overdubRecorderRef.current = recorder;
@@ -568,21 +601,13 @@ export default function StudioPage() {
       };
       setStudioNotice('Đang áp dụng Auto-Tune 1-Click Fix...');
       try {
-        mutateWithUndo((prev) => ({ ...prev, autotune_settings: nextSettings }));
-        await saveNow(true);
+        const nextState = mutateWithUndo((prev) => ({ ...prev, autotune_settings: nextSettings }));
+        await saveNow(true, nextState);
         const res = await autotuneAudio({
           project_id: current.project_id,
           autotune_settings: nextSettings,
         });
-        const updated: ProjectState = {
-          ...latestProjectRef.current,
-          autotune_settings: nextSettings,
-          audio_assets: {
-            ...latestProjectRef.current.audio_assets,
-            tuned_vocal_ref: res.tuned_vocal_ref,
-          },
-        };
-        updateProject((prev) => ({
+        const updated = updateProject((prev) => ({
           ...prev,
           autotune_settings: nextSettings,
           audio_assets: { ...prev.audio_assets, tuned_vocal_ref: res.tuned_vocal_ref },
@@ -670,7 +695,12 @@ export default function StudioPage() {
       });
       setCoachMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: res.reply, timestamp: new Date().toISOString() },
+        {
+          role: 'assistant',
+          content: res.reply,
+          timestamp: new Date().toISOString(),
+          suggested_actions: res.suggested_actions,
+        },
       ]);
     } catch (err) {
       setCoachMessages((prev) => [
@@ -682,6 +712,161 @@ export default function StudioPage() {
       ]);
     } finally {
       setCoachLoading(false);
+    }
+  };
+
+  const handleApplyCoachAction = async (msgIdx: number, act: CoachSuggestedAction) => {
+    const actionKey = `${msgIdx}:${act.id}`;
+    if (appliedCoachActions.includes(actionKey)) return;
+    setApplyingCoachActionKey(actionKey);
+    const payload = act.payload ?? {};
+    const current = latestProjectRef.current;
+
+    try {
+      if (act.action === 'auto_mix') {
+        await handleAutoMix();
+        setAppliedCoachActions((prev) => [...prev, actionKey]);
+        return;
+      }
+      if (act.action === 'auto_trim_vocal') {
+        await handleAutoTrimVocal();
+        setAppliedCoachActions((prev) => [...prev, actionKey]);
+        return;
+      }
+
+      if (act.action === 'apply_autotune' || act.action === 'update_autotune' || payload.autotune_settings || payload.preset) {
+        const rawPreset = String(
+          (payload.autotune_settings as Partial<AutotuneSettings> | undefined)?.preset ||
+            payload.preset ||
+            (current.autotune_settings.preset === 'off' ? 'balanced' : current.autotune_settings.preset)
+        ) as AutoTunePreset;
+        const preset: AutoTunePreset =
+          rawPreset === 'off' || rawPreset === 'natural' || rawPreset === 'balanced' || rawPreset === 'modern'
+            ? rawPreset
+            : 'balanced';
+        const isOff = preset === 'off';
+        const nextSettings: AutotuneSettings = {
+          ...current.autotune_settings,
+          ...(typeof payload.autotune_settings === 'object' && payload.autotune_settings
+            ? (payload.autotune_settings as Partial<AutotuneSettings>)
+            : {}),
+          enabled: !isOff,
+          preset,
+          key: typeof payload.key === 'string' ? payload.key : current.autotune_settings.key,
+          scale: typeof payload.scale === 'string' ? payload.scale : current.autotune_settings.scale,
+          mix_percent: isOff ? 0 : current.autotune_settings.mix_percent || 85,
+        };
+        const nextState = mutateWithUndo((prev) => ({
+          ...prev,
+          autotune_settings: nextSettings,
+          ...(isOff ? { audio_assets: { ...prev.audio_assets, tuned_vocal_ref: null } } : {}),
+        }));
+        await saveNow(true, nextState);
+        const res = await autotuneAudio({
+          project_id: current.project_id,
+          autotune_settings: nextSettings,
+        });
+        const updated = updateProject((prev) => ({
+          ...prev,
+          autotune_settings: nextSettings,
+          audio_assets: { ...prev.audio_assets, tuned_vocal_ref: isOff ? null : res.tuned_vocal_ref },
+        }));
+        await engine.syncFromProject(updated, isOff ? undefined : { forceSlots: ['autotune'] });
+        engine.setABMode(isOff ? 'dry' : 'autotune');
+        setAppliedCoachActions((prev) => [...prev, actionKey]);
+        setStudioNotice(`Đã áp dụng đề xuất Coach: ${act.label}`);
+        return;
+      }
+
+      if (act.action === 'rearrange_chords' || Array.isArray(payload.chords)) {
+        let nextChords: ChordEvent[] = current.song_structure.chords;
+        if (Array.isArray(payload.chords) && payload.chords.length > 0) {
+          nextChords = payload.chords as ChordEvent[];
+        } else {
+          const rootIdx = Math.max(0, KEYS.indexOf(current.analysis.detected_key));
+          const prog = [
+            `${KEYS[(rootIdx + 9) % 12]}m`,
+            KEYS[(rootIdx + 5) % 12],
+            KEYS[rootIdx],
+            KEYS[(rootIdx + 7) % 12],
+          ];
+          const totalBars = Math.max(4, current.song_structure.total_bars || 8);
+          const beatsPerChord = current.analysis.time_signature === '3/4' ? 3 : 4;
+          nextChords = Array.from({ length: totalBars }, (_, barIdx) => ({
+            bar: barIdx + 1,
+            beat: 1,
+            symbol: prog[barIdx % prog.length],
+            duration_beats: beatsPerChord,
+          }));
+        }
+        const nextState = mutateWithUndo((prev) => ({
+          ...prev,
+          song_structure: { ...prev.song_structure, chords: nextChords },
+        }));
+        setChordsDirty(true);
+        await saveNow(true, nextState);
+        setAppliedCoachActions((prev) => [...prev, actionKey]);
+        setStudioNotice(`Đã cập nhật hợp âm theo Coach (${act.label}). Đang đồng bộ hòa âm...`);
+        await handleRearrangeChords();
+        return;
+      }
+
+      const nextState = mutateWithUndo((prev) => {
+        const nextConfig = { ...prev.config };
+        const nextAnalysis = { ...prev.analysis };
+        let nextAutotune = prev.autotune_settings;
+
+        if (typeof payload.motif_position === 'string') {
+          nextConfig.motif_position = payload.motif_position as MotifPosition;
+        }
+        if (typeof payload.output_mode === 'string') {
+          nextConfig.output_mode = payload.output_mode as OutputMode;
+        }
+        if (typeof payload.melody_mode === 'string') {
+          nextConfig.melody_mode = payload.melody_mode as MelodyMode;
+        }
+        if (typeof payload.structure_preset === 'string') {
+          nextConfig.structure_preset = payload.structure_preset as StructurePreset;
+        }
+        if (typeof payload.genre === 'string') nextConfig.genre = payload.genre;
+        if (typeof payload.mood === 'string') nextConfig.mood = payload.mood;
+
+        if (typeof payload.bpm === 'number' && Number.isFinite(payload.bpm)) {
+          const clampedBpm = Math.max(40, Math.min(220, Math.round(payload.bpm)));
+          nextAnalysis.bpm = clampedBpm;
+          nextAnalysis.bpm_locked = true;
+          engine.setBpm(clampedBpm);
+        }
+        if (typeof payload.key === 'string') {
+          nextAnalysis.detected_key = payload.key;
+          nextAnalysis.key_locked = true;
+          if (nextAutotune.auto_follow_project_key) {
+            nextAutotune = { ...nextAutotune, key: payload.key };
+          }
+        }
+        if (typeof payload.scale === 'string') {
+          nextAnalysis.detected_scale = payload.scale;
+          nextAnalysis.key_locked = true;
+          if (nextAutotune.auto_follow_project_key) {
+            nextAutotune = { ...nextAutotune, scale: payload.scale };
+          }
+        }
+
+        return {
+          ...prev,
+          config: nextConfig,
+          analysis: nextAnalysis,
+          autotune_settings: nextAutotune,
+        };
+      });
+
+      await saveNow(true, nextState);
+      setAppliedCoachActions((prev) => [...prev, actionKey]);
+      setStudioNotice(`Đã áp dụng đề xuất Coach: ${act.label}`);
+    } catch (err) {
+      setStudioNotice(err instanceof ApiError ? err.detail : `Lỗi áp dụng đề xuất: ${act.label}`);
+    } finally {
+      setApplyingCoachActionKey(null);
     }
   };
 
@@ -737,6 +922,7 @@ export default function StudioPage() {
       await saveNow(true);
       const res = await uploadTrackClip(current.project_id, file, 'texture');
       if (res.audio_ref) {
+        await saveAudioBlob(current.project_id, res.audio_ref, file);
         await engine.loadAudioFromBlob(res.audio_ref, file);
       }
       setUndoStack((s) => [...s.slice(-19), current]);
@@ -872,7 +1058,10 @@ export default function StudioPage() {
               value={project.analysis.bpm}
               onChange={(e) => {
                 const val = Math.max(40, Math.min(220, Number(e.target.value) || 100));
-                mutateWithUndo((p) => ({ ...p, analysis: { ...p.analysis, bpm: val } }));
+                mutateWithUndo((p) => ({
+                  ...p,
+                  analysis: { ...p.analysis, bpm: val, bpm_locked: true },
+                }));
                 engine.setBpm(val);
               }}
               className="w-12 bg-transparent font-mono font-bold text-white focus:outline-none"
@@ -883,7 +1072,7 @@ export default function StudioPage() {
               onChange={(e) =>
                 mutateWithUndo((p) => ({
                   ...p,
-                  analysis: { ...p.analysis, detected_key: e.target.value },
+                  analysis: { ...p.analysis, detected_key: e.target.value, key_locked: true },
                   autotune_settings: p.autotune_settings.auto_follow_project_key
                     ? { ...p.autotune_settings, key: e.target.value }
                     : p.autotune_settings,
@@ -894,6 +1083,26 @@ export default function StudioPage() {
               {KEYS.map((k) => (
                 <option key={k} value={k} className="bg-slate-900">
                   {k}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Project Scale"
+              value={project.analysis.detected_scale}
+              onChange={(e) =>
+                mutateWithUndo((p) => ({
+                  ...p,
+                  analysis: { ...p.analysis, detected_scale: e.target.value, key_locked: true },
+                  autotune_settings: p.autotune_settings.auto_follow_project_key
+                    ? { ...p.autotune_settings, scale: e.target.value }
+                    : p.autotune_settings,
+                }))
+              }
+              className="bg-transparent text-[11px] font-medium text-emerald-200 focus:outline-none"
+            >
+              {SCALES.map((sc) => (
+                <option key={sc} value={sc} className="bg-slate-900">
+                  {sc}
                 </option>
               ))}
             </select>
@@ -1607,13 +1816,37 @@ export default function StudioPage() {
               {coachMessages.map((m, idx) => (
                 <div
                   key={idx}
-                  className={`rounded-xl p-2.5 leading-relaxed ${
+                  className={`rounded-xl p-2.5 leading-relaxed space-y-2 ${
                     m.role === 'user'
                       ? 'ml-6 bg-indigo-600/25 text-indigo-100'
                       : 'mr-4 border border-slate-800 bg-[#171c2b] text-slate-200'
                   }`}
                 >
-                  {m.content}
+                  <p>{m.content}</p>
+                  {m.role === 'assistant' && m.suggested_actions && m.suggested_actions.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1 border-t border-slate-800/80">
+                      {m.suggested_actions.map((act) => {
+                        const actionKey = `${idx}:${act.id}`;
+                        const applied = appliedCoachActions.includes(actionKey);
+                        const busy = applyingCoachActionKey === actionKey;
+                        return (
+                          <button
+                            key={act.id}
+                            type="button"
+                            disabled={applied || busy}
+                            onClick={() => void handleApplyCoachAction(idx, act)}
+                            className={`rounded-md px-2 py-1 text-[11px] font-medium text-white transition ${
+                              applied
+                                ? 'bg-emerald-600/60 cursor-default'
+                                : 'bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50'
+                            }`}
+                          >
+                            {busy ? 'Đang áp dụng...' : applied ? `✓ ${act.label}` : act.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ))}
               {coachLoading && (
