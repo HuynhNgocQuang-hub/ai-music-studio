@@ -923,7 +923,8 @@ public class JavaAudioFallbackService {
             setVocalClipSource(tracks.get("vocal"), "dry_denoised_ref");
         } else if ("autotune".equals(norm)) {
             muteAllMidiTracks(tracks);
-            setVocalClipSource(tracks.get("vocal"), "tuned_vocal_ref");
+            boolean autotuneEnabled = copy.getAutotuneSettings() == null || copy.getAutotuneSettings().isEnabled();
+            setVocalClipSource(tracks.get("vocal"), autotuneEnabled ? "tuned_vocal_ref" : "dry_denoised_ref");
         } else if ("preserve".equals(norm)) {
             TrackState lead = tracks.get("lead");
             if (lead != null) {
@@ -968,6 +969,12 @@ public class JavaAudioFallbackService {
                     t.setVolume(Math.min(1.2, t.getVolume() * 1.12));
                 }
             }
+        }
+        if (!"raw".equals(norm)
+                && copy.getAutotuneSettings() != null
+                && !copy.getAutotuneSettings().isEnabled()
+                && copy.getAudioAssets() != null) {
+            copy.getAudioAssets().setTunedVocalRef(null);
         }
         return copy;
     }
@@ -1116,15 +1123,16 @@ public class JavaAudioFallbackService {
         var assets = project.getAudioAssets();
         if (assets == null) return null;
         String norm = normalizePreviewMode(mode);
+        boolean autotuneEnabled = project.getAutotuneSettings() == null || project.getAutotuneSettings().isEnabled();
         if ("raw".equals(norm)) {
             if (assets.getRawInputRef() != null) return assets.getRawInputRef();
             if (assets.getDryDenoisedRef() != null) return assets.getDryDenoisedRef();
-            return assets.getTunedVocalRef();
+            return autotuneEnabled ? assets.getTunedVocalRef() : null;
         }
         if ("dry".equals(norm) || "dry_beat".equals(norm)) {
             return assets.getDryDenoisedRef() != null ? assets.getDryDenoisedRef() : assets.getRawInputRef();
         }
-        if (assets.getTunedVocalRef() != null) return assets.getTunedVocalRef();
+        if (autotuneEnabled && assets.getTunedVocalRef() != null) return assets.getTunedVocalRef();
         if (assets.getDryDenoisedRef() != null) return assets.getDryDenoisedRef();
         return assets.getRawInputRef();
     }
@@ -1154,6 +1162,7 @@ public class JavaAudioFallbackService {
                 return store.getAudioBytes(assets.getRawInputRef()).orElse(null);
             }
         }
+        if (src == null || src.isBlank()) return null;
         return store.getAudioBytes(src).orElse(null);
     }
 
@@ -1347,6 +1356,8 @@ public class JavaAudioFallbackService {
                     int ch = channelMap.getOrDefault(trackName.toLowerCase(Locale.ROOT), 0);
                     Track midiTrack = seq.createTrack();
                     midiTrack.add(metaTextEvent(0x03, trackName, 0));
+                    int program = resolveMidiProgram(trackName, t.getInstrument());
+                    midiTrack.add(new MidiEvent(new ShortMessage(ShortMessage.PROGRAM_CHANGE, ch, program, 0), 0));
 
                     for (MidiNote n : notes) {
                         long startTick = Math.max(0L, Math.round(n.getStartBeat() * ppq));
@@ -1367,6 +1378,59 @@ public class JavaAudioFallbackService {
         } catch (Exception ex) {
             throw new IllegalStateException("Failed to export MIDI", ex);
         }
+    }
+
+    private static final Map<String, Integer> MIDI_INSTRUMENT_PROGRAMS = Map.ofEntries(
+            Map.entry("grand_piano", 0),
+            Map.entry("electric_piano", 4),
+            Map.entry("rhodes_ep", 4),
+            Map.entry("acoustic_guitar", 24),
+            Map.entry("muted_guitar", 28),
+            Map.entry("overdrive_guitar", 29),
+            Map.entry("lead_guitar", 30),
+            Map.entry("upright_bass", 32),
+            Map.entry("finger_bass", 33),
+            Map.entry("pick_bass", 34),
+            Map.entry("fretless_bass", 35),
+            Map.entry("synth_bass", 38),
+            Map.entry("808_bass", 38),
+            Map.entry("warm_sub_bass", 38),
+            Map.entry("saw_bass", 39),
+            Map.entry("strings", 48),
+            Map.entry("string_ensemble", 48),
+            Map.entry("vocal", 53),
+            Map.entry("flute", 73),
+            Map.entry("synth_lead", 80),
+            Map.entry("lead_synth", 80),
+            Map.entry("bright_lead", 80),
+            Map.entry("pluck_synth", 81),
+            Map.entry("synth_pad", 88),
+            Map.entry("dark_pad", 88),
+            Map.entry("supersaw_pad", 88),
+            Map.entry("warm_pad", 89),
+            Map.entry("acoustic_kit", 0),
+            Map.entry("rock_kit", 0),
+            Map.entry("brush_kit", 0),
+            Map.entry("cajon_kit", 0),
+            Map.entry("lofi_kit", 0),
+            Map.entry("rnb_kit", 0),
+            Map.entry("electronic_808", 25),
+            Map.entry("808_kit", 25),
+            Map.entry("electronic_kit", 25)
+    );
+
+    private int resolveMidiProgram(String trackName, String instrument) {
+        if (instrument != null && !instrument.isBlank()) {
+            Integer mapped = MIDI_INSTRUMENT_PROGRAMS.get(instrument.trim().toLowerCase(Locale.ROOT));
+            if (mapped != null) return mapped;
+        }
+        String t = trackName != null ? trackName.trim().toLowerCase(Locale.ROOT) : "";
+        return switch (t) {
+            case "bass" -> 33;
+            case "lead" -> 4;
+            case "vocal" -> 53;
+            default -> 0;
+        };
     }
 
     private MidiEvent metaTextEvent(int type, String text, long tick) throws Exception {

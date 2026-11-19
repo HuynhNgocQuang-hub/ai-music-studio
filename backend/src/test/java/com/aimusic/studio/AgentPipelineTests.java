@@ -552,4 +552,41 @@ class AgentPipelineTests {
         assertTrue(storedAfter.getSongStructure().getSections().stream()
                 .anyMatch(s -> "Bridge".equals(s.getName())));
     }
+
+    @Test
+    void warn04EnableLeadKaraokeControlsLeadTrackAndAutoLyrics() {
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        AgentOrchestrator orch = new AgentOrchestrator(
+                new ComposerAgent(adapter),
+                new ArrangerAgent(adapter),
+                new CoachLyricistAgent(adapter),
+                new QaReviewerAgent(adapter),
+                store,
+                objectMapper,
+                60.0,
+                2
+        );
+
+        // 1. full_song with enable_lead_karaoke=false (and include_lead not true) skips lead & auto-lyrics
+        ProjectState disabledInput = sampleProjectState("enhance", "full_song");
+        disabledInput.getConfig().setEnableLeadKaraoke(false);
+        ProjectState disabledOut = orch.runGenerate(disabledInput, null, "job_lead_off", null, null, null, 60.0);
+        assertTrue(disabledOut.getTracks().get("lead").getNotes().isEmpty());
+        assertTrue(disabledOut.getLyrics().getLines().isEmpty());
+
+        // 2. full_song with enable_lead_karaoke=false but include_lead=true still builds lead
+        ProjectState includeLeadInput = sampleProjectState("enhance", "full_song");
+        includeLeadInput.getConfig().setEnableLeadKaraoke(false);
+        includeLeadInput.getConfig().setIncludeLead(true);
+        ProjectState includeLeadOut = orch.runGenerate(includeLeadInput, null, "job_lead_inc", null, null, null, 60.0);
+        assertFalse(includeLeadOut.getTracks().get("lead").getNotes().isEmpty());
+
+        // 3. accompaniment with enable_lead_karaoke=true builds lead & lyrics
+        ProjectState enabledAccInput = sampleProjectState("preserve", "accompaniment");
+        enabledAccInput.getConfig().setEnableLeadKaraoke(true);
+        ProjectState enabledAccOut = orch.runGenerate(enabledAccInput, null, "job_lead_on", null, null, null, 60.0);
+        assertFalse(enabledAccOut.getTracks().get("lead").getNotes().isEmpty());
+        assertFalse(enabledAccOut.getLyrics().getLines().isEmpty());
+    }
 }

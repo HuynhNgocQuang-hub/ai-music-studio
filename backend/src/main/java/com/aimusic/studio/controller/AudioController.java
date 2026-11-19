@@ -315,12 +315,17 @@ public class AudioController {
         byte[] wavBytes = store.getAudioBytes(ref)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Audio asset expired or missing."));
 
-        Double bpmOv = req.getBpmOverride() != null ? req.getBpmOverride()
-                : (project.getAnalysis().isBpmLocked() ? project.getAnalysis().getBpm() : null);
-        String keyOv = (req.getKeyOverride() != null && !req.getKeyOverride().isBlank()) ? req.getKeyOverride()
-                : (project.getAnalysis().isKeyLocked() ? project.getAnalysis().getDetectedKey() : null);
-        String scaleOv = (req.getScaleOverride() != null && !req.getScaleOverride().isBlank()) ? req.getScaleOverride()
-                : (project.getAnalysis().isKeyLocked() ? project.getAnalysis().getDetectedScale() : null);
+        boolean bpmLocked = project.getAnalysis().isBpmLocked();
+        boolean keyLocked = project.getAnalysis().isKeyLocked();
+        Double explicitBpm = req.getBpmOverride();
+        String explicitKey = (req.getKeyOverride() != null && !req.getKeyOverride().isBlank())
+                ? req.getKeyOverride().trim() : null;
+        String explicitScale = (req.getScaleOverride() != null && !req.getScaleOverride().isBlank())
+                ? req.getScaleOverride().trim() : null;
+
+        Double bpmOv = explicitBpm != null ? explicitBpm : (bpmLocked ? project.getAnalysis().getBpm() : null);
+        String keyOv = explicitKey != null ? explicitKey : (keyLocked ? project.getAnalysis().getDetectedKey() : null);
+        String scaleOv = explicitScale != null ? explicitScale : (keyLocked ? project.getAnalysis().getDetectedScale() : null);
 
         double bpm;
         String timeSig;
@@ -358,6 +363,18 @@ public class AudioController {
             rawMidi = res.rawMelodyMidi();
         }
 
+        if (explicitBpm == null && bpmLocked) {
+            bpm = project.getAnalysis().getBpm();
+        }
+        if (explicitKey == null && keyLocked) {
+            detKey = project.getAnalysis().getDetectedKey();
+            keyConf = project.getAnalysis().getKeyConfidence();
+            lowConf = project.getAnalysis().isLowConfidenceWarning();
+        }
+        if (explicitScale == null && keyLocked) {
+            detScale = project.getAnalysis().getDetectedScale();
+        }
+
         project.getAnalysis().setBpm(bpm);
         project.getAnalysis().setTimeSignature(timeSig);
         project.getAnalysis().setDetectedKey(detKey);
@@ -367,10 +384,10 @@ public class AudioController {
         project.getAnalysis().setBars(bars);
         project.getAnalysis().setDurationSec(durSec);
         project.getAnalysis().setRawMelodyMidi(rawMidi);
-        if (req.getBpmOverride() != null) {
+        if (explicitBpm != null) {
             project.getAnalysis().setBpmLocked(true);
         }
-        if (req.getKeyOverride() != null || req.getScaleOverride() != null) {
+        if (explicitKey != null || explicitScale != null) {
             project.getAnalysis().setKeyLocked(true);
         }
 
@@ -429,6 +446,21 @@ public class AudioController {
             effective.setScale(normalizeScaleName(effective.getScale()));
         }
 
+        boolean autotuneDisabled = !effective.isEnabled()
+                || ("off".equalsIgnoreCase(effective.getPreset()) && effective.getMixPercent() <= 0.0);
+        if (autotuneDisabled) {
+            effective.setEnabled(false);
+            project.setAutotuneSettings(effective);
+            project.getAudioAssets().setTunedVocalRef(null);
+            String fallbackSlot = (project.getAudioAssets().getDryDenoisedRef() != null
+                    && !project.getAudioAssets().getDryDenoisedRef().isBlank())
+                    ? "dry_denoised_ref"
+                    : "raw_input_ref";
+            updateStandardVocalClips(project.getTracks().get("vocal"), fallbackSlot);
+            store.saveProject(project);
+            return new AutotuneResponse(project.getProjectId(), srcRef, effective, project.getAnalysis().getDurationSec());
+        }
+
         byte[] tunedBytes;
         Optional<Map<String, Object>> workerResp = audioWorkerClient.autotune(srcBytes, effective);
         if (workerResp.isPresent() && workerResp.get().get("wav_base64") instanceof String b64) {
@@ -442,13 +474,24 @@ public class AudioController {
 
         project.setAutotuneSettings(effective);
         project.getAudioAssets().setTunedVocalRef(tunedRef);
-        TrackState vocalTrack = project.getTracks().get("vocal");
-        if (vocalTrack != null && vocalTrack.getClips() != null && !vocalTrack.getClips().isEmpty()) {
-            vocalTrack.getClips().get(0).setSource(effective.isEnabled() ? "tuned_vocal_ref" : "dry_denoised_ref");
-        }
+        updateStandardVocalClips(project.getTracks().get("vocal"), "tuned_vocal_ref");
         store.saveProject(project);
 
         return new AutotuneResponse(project.getProjectId(), tunedRef, effective, project.getAnalysis().getDurationSec());
+    }
+
+    private void updateStandardVocalClips(TrackState vocalTrack, String targetSlot) {
+        if (vocalTrack == null || vocalTrack.getClips() == null) return;
+        for (AudioClip clip : vocalTrack.getClips()) {
+            if (clip == null) continue;
+            String s = clip.getSource();
+            if (s == null || s.isBlank()
+                    || "raw_input_ref".equals(s)
+                    || "dry_denoised_ref".equals(s)
+                    || "tuned_vocal_ref".equals(s)) {
+                clip.setSource(targetSlot);
+            }
+        }
     }
 
     @GetMapping("/asset")

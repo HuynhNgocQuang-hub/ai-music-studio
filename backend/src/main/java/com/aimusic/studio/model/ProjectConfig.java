@@ -29,7 +29,7 @@ public class ProjectConfig {
     private String userPrompt = "";
 
     @JsonProperty("enable_lead_karaoke")
-    private Boolean enableLeadKaraoke = false;
+    private Boolean enableLeadKaraoke;
 
     @JsonProperty("include_lead")
     private Boolean includeLead;

@@ -152,8 +152,8 @@ public class StudioController {
         int trimmedCount = 0;
         for (AudioClip clip : vocalTrack.getClips()) {
             if (clip == null) continue;
-            byte[] clipBytes = resolveVocalBytes(state, clip.getSource());
-            if (clipBytes == null) clipBytes = defaultVocalBytes;
+            byte[] clipBytes = resolveClipOwnBytes(state, clip, defaultVocalBytes);
+            if (clipBytes == null) continue;
             JavaAudioFallbackService.AutoTrimAnalysis analysis = audioFallback.analyzeVocalTrimAndBeatOffset(clipBytes, bpm);
             clip.setTrimStartSec(analysis.trimStartSec());
             clip.setTrimEndSec(analysis.trimEndSec());
@@ -202,18 +202,40 @@ public class StudioController {
 
     private String preferredVocalSourceSlot(ProjectState state) {
         AudioAssets assets = state.getAudioAssets();
+        boolean autotuneEnabled = state.getAutotuneSettings() == null || state.getAutotuneSettings().isEnabled();
         if (assets != null) {
-            if (assets.getTunedVocalRef() != null && !assets.getTunedVocalRef().isBlank()) return "tuned_vocal_ref";
+            if (autotuneEnabled && assets.getTunedVocalRef() != null && !assets.getTunedVocalRef().isBlank()) {
+                return "tuned_vocal_ref";
+            }
             if (assets.getDryDenoisedRef() != null && !assets.getDryDenoisedRef().isBlank()) return "dry_denoised_ref";
         }
         return "raw_input_ref";
     }
 
+    private byte[] resolveClipOwnBytes(ProjectState state, AudioClip clip, byte[] defaultVocalBytes) {
+        String src = clip.getSource() != null ? clip.getSource().trim() : "";
+        boolean isStandardVocalSlot = src.isEmpty()
+                || "raw_input_ref".equals(src)
+                || "dry_denoised_ref".equals(src)
+                || "tuned_vocal_ref".equals(src);
+        boolean isOverdubClip = clip.getId() != null && clip.getId().startsWith("clip_overdub_");
+        if (isStandardVocalSlot) {
+            if (isOverdubClip) {
+                return null;
+            }
+            byte[] resolved = resolveVocalBytes(state, src);
+            return resolved != null ? resolved : defaultVocalBytes;
+        }
+        // Custom clip refs (e.g. mem://clips/... or idb://overdub/...) must resolve only their own stored bytes.
+        return store.getAudioBytes(src).orElse(null);
+    }
+
     private byte[] resolveVocalBytes(ProjectState state, String clipSource) {
         AudioAssets assets = state.getAudioAssets();
+        boolean autotuneEnabled = state.getAutotuneSettings() == null || state.getAutotuneSettings().isEnabled();
         if (clipSource != null && !clipSource.isBlank()) {
             String src = clipSource.trim();
-            if ("tuned_vocal_ref".equals(src) && assets != null && assets.getTunedVocalRef() != null) {
+            if ("tuned_vocal_ref".equals(src) && assets != null && autotuneEnabled && assets.getTunedVocalRef() != null) {
                 Optional<byte[]> b = store.getAudioBytes(assets.getTunedVocalRef());
                 if (b.isPresent()) return b.get();
             } else if ("dry_denoised_ref".equals(src) && assets != null && assets.getDryDenoisedRef() != null) {
@@ -222,13 +244,14 @@ public class StudioController {
             } else if ("raw_input_ref".equals(src) && assets != null && assets.getRawInputRef() != null) {
                 Optional<byte[]> b = store.getAudioBytes(assets.getRawInputRef());
                 if (b.isPresent()) return b.get();
-            } else {
+            } else if (!"tuned_vocal_ref".equals(src)) {
                 Optional<byte[]> b = store.getAudioBytes(src);
                 if (b.isPresent()) return b.get();
             }
         }
         if (assets != null) {
-            for (String ref : new String[]{assets.getTunedVocalRef(), assets.getDryDenoisedRef(), assets.getRawInputRef()}) {
+            String tuned = autotuneEnabled ? assets.getTunedVocalRef() : null;
+            for (String ref : new String[]{tuned, assets.getDryDenoisedRef(), assets.getRawInputRef()}) {
                 if (ref != null && !ref.isBlank()) {
                     Optional<byte[]> b = store.getAudioBytes(ref);
                     if (b.isPresent()) return b.get();

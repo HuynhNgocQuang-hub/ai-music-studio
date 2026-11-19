@@ -49,14 +49,18 @@ class ApiMockMvcTests {
 
     @Test
     void healthAndHeaderOverrides() throws Exception {
-        mockMvc.perform(get("/api/health")
+        MvcResult res = mockMvc.perform(get("/api/health")
                         .header("X-Gemini-Api-Key", "AIzaTestHeaderKey12345")
                         .header("X-LLM-Provider", "gemini"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("ok"))
-                .andExpect(jsonPath("$.redis.connected").value(true))
+                .andExpect(jsonPath("$.redis.backend", anyOf(is("memory"), is("redis"))))
                 .andExpect(jsonPath("$.llm_providers.gemini_configured").value(true))
-                .andExpect(jsonPath("$.llm_providers.default").value("gemini"));
+                .andExpect(jsonPath("$.llm_providers.default").value("gemini"))
+                .andReturn();
+        JsonNode root = objectMapper.readTree(res.getResponse().getContentAsString());
+        boolean expectedConnected = "redis".equals(root.at("/redis/backend").asText());
+        assertEquals(expectedConnected, root.at("/redis/connected").asBoolean());
     }
 
     @Test
@@ -426,5 +430,167 @@ class ApiMockMvcTests {
         }
         assertTrue(stemEntries.contains("stems/vocal.wav"));
         assertTrue(stemEntries.contains("stems/texture.wav"));
+    }
+
+    @Test
+    void auditBug02AutotuneOffClearsTunedRefAndPreviewUsesDry() throws Exception {
+        byte[] wav = makeMelodyWav(4.0, 44100);
+        MockMultipartFile file = new MockMultipartFile("file", "vocal.wav", "audio/wav", wav);
+        MvcResult up = mockMvc.perform(multipart("/api/audio/upload").file(file).param("title", "AT Off Test"))
+                .andExpect(status().isOk()).andReturn();
+        String pid = objectMapper.readTree(up.getResponse().getContentAsString()).get("project_id").asText();
+
+        MvcResult dn = mockMvc.perform(post("/api/audio/denoise")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"enable_denoise\":true,\"auto_trim\":true}"))
+                .andExpect(status().isOk()).andReturn();
+        String dryRef = objectMapper.readTree(dn.getResponse().getContentAsString()).get("dry_denoised_ref").asText();
+
+        // Turn autotune ON (modern) first
+        MvcResult atOn = mockMvc.perform(post("/api/audio/autotune")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"preset\":\"modern\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.autotune_settings.enabled").value(true))
+                .andExpect(jsonPath("$.tuned_vocal_ref", startsWith("mem://processed/")))
+                .andReturn();
+        String tunedRef = objectMapper.readTree(atOn.getResponse().getContentAsString()).get("tuned_vocal_ref").asText();
+        assertNotEquals(dryRef, tunedRef);
+
+        byte[] dryPreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "dry"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        byte[] mixOnPreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "ai_mix"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        assertFalse(java.util.Arrays.equals(dryPreview, mixOnPreview));
+
+        // Now turn autotune OFF via preset="off"
+        mockMvc.perform(post("/api/audio/autotune")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"preset\":\"off\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.autotune_settings.enabled").value(false))
+                .andExpect(jsonPath("$.tuned_vocal_ref").value(dryRef));
+
+        mockMvc.perform(get("/api/projects/" + pid))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.autotune_settings.enabled").value(false))
+                .andExpect(jsonPath("$.audio_assets.tuned_vocal_ref").doesNotExist());
+
+        byte[] mixOffPreview = mockMvc.perform(get("/api/audio/preview/" + pid).param("mode", "ai_mix"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        assertArrayEquals(dryPreview, mixOffPreview);
+
+        // Also verify explicit enabled=false with mix_percent=0 returns dry_denoised_ref
+        mockMvc.perform(post("/api/audio/autotune")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "project_id": "%s",
+                                  "autotune_settings": {
+                                    "enabled": false,
+                                    "preset": "off",
+                                    "mix_percent": 0.0
+                                  }
+                                }
+                                """.formatted(pid)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.autotune_settings.enabled").value(false))
+                .andExpect(jsonPath("$.tuned_vocal_ref").value(dryRef));
+    }
+
+    @Test
+    void auditBug01AutoTrimVocalResolvesOwnClipBytesAndSkipsLocalOverdubs() throws Exception {
+        byte[] mainVocal = makeSilencePaddedVocalWav(0.7, 2.5, 0.5, 44100);
+        MockMultipartFile mainFile = new MockMultipartFile("file", "main.wav", "audio/wav", mainVocal);
+        MvcResult up = mockMvc.perform(multipart("/api/audio/upload").file(mainFile).param("title", "AutoTrim Overdub"))
+                .andExpect(status().isOk()).andReturn();
+        String pid = objectMapper.readTree(up.getResponse().getContentAsString()).get("project_id").asText();
+
+        // Upload a second vocal clip (overdub) with different silence padding (0.2s lead, 1.5s tone)
+        byte[] overdubWav = makeSilencePaddedVocalWav(0.2, 1.5, 0.3, 44100);
+        MockMultipartFile overdubFile = new MockMultipartFile("file", "ov.wav", "audio/wav", overdubWav);
+        MvcResult ovUp = mockMvc.perform(multipart("/api/audio/clip-upload")
+                        .file(overdubFile)
+                        .param("project_id", pid)
+                        .param("track_id", "vocal")
+                        .param("start_bar", "2.0"))
+                .andExpect(status().isOk()).andReturn();
+        String serverOverdubRef = objectMapper.readTree(ovUp.getResponse().getContentAsString()).get("audio_ref").asText();
+
+        // Sync project with a local idb:// overdub clip + the server mem://clips/... overdub clip
+        ProjectState synced = objectMapper.readValue(
+                mockMvc.perform(get("/api/projects/" + pid)).andReturn().getResponse().getContentAsString(),
+                ProjectState.class);
+        com.aimusic.studio.model.AudioClip localOverdub = new com.aimusic.studio.model.AudioClip(
+                "clip_overdub_local_1", "idb://overdub/local1", 3.0, 0.12);
+        localOverdub.setTrimEndSec(1.45);
+        localOverdub.setOffsetMs(42.0);
+        synced.getTracks().get("vocal").getClips().get(1).setId("clip_overdub_server_2");
+        synced.getTracks().get("vocal").getClips().add(localOverdub);
+
+        mockMvc.perform(put("/api/projects/" + pid + "/sync")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(synced)))
+                .andExpect(status().isOk());
+
+        MvcResult trimRes = mockMvc.perform(post("/api/studio/auto-trim-vocal")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.trimmed_clips").value(2))
+                .andReturn();
+
+        JsonNode clips = objectMapper.readTree(trimRes.getResponse().getContentAsString())
+                .at("/project_state/tracks/vocal/clips");
+        // Clip 0 (main vocal): ~0.7s lead silence -> trim_start_sec > 0.5
+        assertTrue(clips.get(0).get("trim_start_sec").asDouble() > 0.5);
+        // Clip 1 (server mem://clips/... overdub): ~0.2s lead silence -> trimmed from its OWN bytes (< 0.35)
+        assertEquals(serverOverdubRef, clips.get(1).get("source").asText());
+        assertTrue(clips.get(1).get("trim_start_sec").asDouble() < 0.35);
+        // Clip 2 (idb:// local overdub): untouched!
+        assertEquals("clip_overdub_local_1", clips.get(2).get("id").asText());
+        assertEquals(0.12, clips.get(2).get("trim_start_sec").asDouble(), 0.001);
+        assertEquals(1.45, clips.get(2).get("trim_end_sec").asDouble(), 0.001);
+        assertEquals(42.0, clips.get(2).get("offset_ms").asDouble(), 0.001);
+    }
+
+    @Test
+    void warn02AnalyzePreservesUserLockedBpmKeyAndScale() throws Exception {
+        byte[] wav = makeMelodyWav(4.0, 44100);
+        MockMultipartFile file = new MockMultipartFile("file", "locked.wav", "audio/wav", wav);
+        MvcResult up = mockMvc.perform(multipart("/api/audio/upload").file(file).param("title", "Lock Test"))
+                .andExpect(status().isOk()).andReturn();
+        String pid = objectMapper.readTree(up.getResponse().getContentAsString()).get("project_id").asText();
+
+        // Sync manually locked BPM/Key/Scale (simulating Step 2 manual edits before returning to Step 1)
+        ProjectState state = objectMapper.readValue(
+                mockMvc.perform(get("/api/projects/" + pid)).andReturn().getResponse().getContentAsString(),
+                ProjectState.class);
+        state.getAnalysis().setBpm(138.0);
+        state.getAnalysis().setBpmLocked(true);
+        state.getAnalysis().setDetectedKey("F#");
+        state.getAnalysis().setDetectedScale("minor");
+        state.getAnalysis().setKeyLocked(true);
+        mockMvc.perform(put("/api/projects/" + pid + "/sync")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(state)))
+                .andExpect(status().isOk());
+
+        // Re-running /api/audio/analyze without explicit overrides must preserve locked BPM, Key & Scale
+        mockMvc.perform(post("/api/audio/analyze")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bpm").value(138.0))
+                .andExpect(jsonPath("$.key").value("F#"))
+                .andExpect(jsonPath("$.scale").value("minor"));
+
+        mockMvc.perform(get("/api/projects/" + pid))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.analysis.bpm_locked").value(true))
+                .andExpect(jsonPath("$.analysis.key_locked").value(true))
+                .andExpect(jsonPath("$.analysis.bpm").value(138.0))
+                .andExpect(jsonPath("$.analysis.detected_key").value("F#"))
+                .andExpect(jsonPath("$.analysis.detected_scale").value("minor"));
     }
 }

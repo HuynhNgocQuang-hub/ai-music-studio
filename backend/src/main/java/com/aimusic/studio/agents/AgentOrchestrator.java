@@ -406,9 +406,14 @@ public class AgentOrchestrator {
                 checkGuards(jid, cancelToken, timeoutFlag);
                 state.setTracks(tracks);
 
-                boolean isFullSong = "full_song".equalsIgnoreCase(state.getConfig().getOutputMode());
-                boolean includeLyrics = state.getConfig().getIncludeLyrics() == null || state.getConfig().getIncludeLyrics();
-                if (iteration == 1 && isFullSong && includeLyrics) {
+                ProjectConfig cfg = state.getConfig();
+                boolean isFullSong = "full_song".equalsIgnoreCase(cfg.getOutputMode());
+                boolean leadKaraokeEnabled = Boolean.TRUE.equals(cfg.getEnableLeadKaraoke());
+                boolean leadKaraokeDisabled = Boolean.FALSE.equals(cfg.getEnableLeadKaraoke());
+                boolean includeLyrics = cfg.getIncludeLyrics() != null
+                        ? (cfg.getIncludeLyrics() && (isFullSong || leadKaraokeEnabled))
+                        : ((isFullSong && !leadKaraokeDisabled) || leadKaraokeEnabled);
+                if (iteration == 1 && includeLyrics) {
                     emit(callback, "agent_step", mapOf(
                             "job_id", jid,
                             "agent", "lyricist",

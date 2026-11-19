@@ -88,16 +88,13 @@ public class ArrangerAgent {
             }
         }
 
+        boolean includeLead = shouldIncludeLead(cfg, outputMode);
         Set<String> tracksToBuild = new HashSet<>();
         if (targetTrack != null && !targetTrack.isBlank()) {
             tracksToBuild.add(targetTrack.toLowerCase(Locale.ROOT));
-        } else if (lockedTracks != null) {
-            tracksToBuild.addAll(List.of("drums", "bass", "harmony"));
-            if ("full_song".equals(outputMode)) tracksToBuild.add("lead");
-            tracksToBuild.removeAll(lockedSet);
         } else {
             tracksToBuild.addAll(List.of("drums", "bass", "harmony"));
-            if ("full_song".equals(outputMode) || Boolean.TRUE.equals(cfg.getIncludeLead())) {
+            if (includeLead) {
                 tracksToBuild.add("lead");
             }
             tracksToBuild.removeAll(lockedSet);
@@ -120,7 +117,9 @@ public class ArrangerAgent {
             TrackState vocal = TrackState.audioTrack(0.9, 0.0);
             String ref = null;
             if (projectState.getAudioAssets() != null) {
-                ref = projectState.getAudioAssets().getTunedVocalRef() != null
+                boolean autotuneEnabled = projectState.getAutotuneSettings() == null
+                        || projectState.getAutotuneSettings().isEnabled();
+                ref = (autotuneEnabled && projectState.getAudioAssets().getTunedVocalRef() != null)
                         ? projectState.getAudioAssets().getTunedVocalRef()
                         : projectState.getAudioAssets().getDryDenoisedRef();
             }
@@ -144,6 +143,9 @@ public class ArrangerAgent {
                     TrackState empty = TrackState.midiTrack(instruments.get(trackName), 0.75, 0.0);
                     empty.setLocked(lockedSet.contains(trackName));
                     resultTracks.put(trackName, empty);
+                } else if ("lead".equals(trackName) && (targetTrack == null || targetTrack.isBlank())
+                        && !includeLead && !lockedSet.contains("lead")) {
+                    resultTracks.get(trackName).setNotes(new ArrayList<>());
                 }
                 continue;
             }
@@ -189,6 +191,16 @@ public class ArrangerAgent {
         }
 
         return resultTracks;
+    }
+
+    private boolean shouldIncludeLead(ProjectConfig cfg, String outputMode) {
+        if (Boolean.TRUE.equals(cfg.getIncludeLead()) || Boolean.TRUE.equals(cfg.getEnableLeadKaraoke())) {
+            return true;
+        }
+        if (Boolean.FALSE.equals(cfg.getEnableLeadKaraoke()) || Boolean.FALSE.equals(cfg.getIncludeLead())) {
+            return false;
+        }
+        return "full_song".equals(outputMode);
     }
 
     private TrackState copyTrack(TrackState src) {
