@@ -507,4 +507,49 @@ class AgentPipelineTests {
                 .anyMatch(n -> Math.abs(n.getStartBeat() - 16.0) < 0.01 && Math.floorMod(n.getPitch(), 12) == 2);
         assertTrue(hasDmBassAtBar5, "Expected Bass at bar 5 to follow custom Dm chord root");
     }
+
+    @Test
+    void launchJobPersistsStateBeforeEmittingCompletedSse() throws Exception {
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        java.util.concurrent.atomic.AtomicBoolean storeSaved = new java.util.concurrent.atomic.AtomicBoolean(false);
+        ProjectStateStore slowStore = new ProjectStateStore(objectMapper, 3600, 3600, true) {
+            @Override
+            public ProjectState saveProject(ProjectState project) {
+                if (project.getSongStructure() != null && !project.getSongStructure().getSections().isEmpty()) {
+                    try {
+                        Thread.sleep(150);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    storeSaved.set(true);
+                }
+                return super.saveProject(project);
+            }
+        };
+        ProjectState initial = sampleProjectState("enhance", "full_song");
+        slowStore.saveProject(initial);
+
+        AgentOrchestrator orch = new AgentOrchestrator(
+                new ComposerAgent(adapter),
+                new ArrangerAgent(adapter),
+                new CoachLyricistAgent(adapter),
+                new QaReviewerAgent(adapter),
+                slowStore,
+                objectMapper,
+                60.0,
+                2
+        );
+
+        var job = orch.startGenerateJob(initial, null, null);
+        long deadline = System.currentTimeMillis() + 10_000L;
+        while (!"completed".equals(job.getStatus()) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals("completed", job.getStatus());
+        assertTrue(storeSaved.get(), "ProjectStateStore must finish saving BEFORE job status becomes completed");
+
+        ProjectState storedAfter = slowStore.getProject(initial.getProjectId()).orElseThrow();
+        assertTrue(storedAfter.getSongStructure().getSections().stream()
+                .anyMatch(s -> "Bridge".equals(s.getName())));
+    }
 }

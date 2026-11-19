@@ -204,17 +204,15 @@ public class AgentOrchestrator {
     public JobRuntime startGenerateJob(ProjectState initialState, ProjectConfig configOverride,
                                        LlmContextHolder.LlmOverrides llmOverrides) {
         return launchJob(initialState.getProjectId(), "generate", initialState, llmOverrides,
-                (job) -> runGenerate(initialState, configOverride, job.getJobId(),
-                        (ev, payload) -> job.publish(ev, payload, objectMapper),
-                        job.getCancelled(), job.getTimedOut(), defaultTimeoutSeconds));
+                (job, cb) -> runGenerate(initialState, configOverride, job.getJobId(),
+                        cb, job.getCancelled(), job.getTimedOut(), defaultTimeoutSeconds));
     }
 
     public JobRuntime startRegenerateTrackJob(ProjectState initialState, String targetTrack, String instrument,
                                               LlmContextHolder.LlmOverrides llmOverrides) {
         return launchJob(initialState.getProjectId(), "regenerate_track", initialState, llmOverrides,
-                (job) -> runRegenerateTrack(initialState, targetTrack, instrument, job.getJobId(),
-                        (ev, payload) -> job.publish(ev, payload, objectMapper),
-                        job.getCancelled(), job.getTimedOut(), defaultTimeoutSeconds));
+                (job, cb) -> runRegenerateTrack(initialState, targetTrack, instrument, job.getJobId(),
+                        cb, job.getCancelled(), job.getTimedOut(), defaultTimeoutSeconds));
     }
 
     public JobRuntime startRearrangeJob(ProjectState initialState, List<ChordEvent> chords, List<String> lockedTracks,
@@ -227,9 +225,8 @@ public class AgentOrchestrator {
                                         Integer totalBars, List<String> lockedTracks,
                                         LlmContextHolder.LlmOverrides llmOverrides) {
         return launchJob(initialState.getProjectId(), "rearrange", initialState, llmOverrides,
-                (job) -> runRearrange(initialState, chords, sections, totalBars, lockedTracks, job.getJobId(),
-                        (ev, payload) -> job.publish(ev, payload, objectMapper),
-                        job.getCancelled(), job.getTimedOut(), defaultTimeoutSeconds));
+                (job, cb) -> runRearrange(initialState, chords, sections, totalBars, lockedTracks, job.getJobId(),
+                        cb, job.getCancelled(), job.getTimedOut(), defaultTimeoutSeconds));
     }
 
     private JobRuntime launchJob(
@@ -237,7 +234,7 @@ public class AgentOrchestrator {
             String jobType,
             ProjectState initialState,
             LlmContextHolder.LlmOverrides llmOverrides,
-            java.util.function.Function<JobRuntime, ProjectState> work
+            java.util.function.BiFunction<JobRuntime, BiConsumer<String, Map<String, Object>>, ProjectState> work
     ) {
         String jobId = "job_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         JobRuntime job = new JobRuntime(jobId, projectId, jobType);
@@ -245,16 +242,35 @@ public class AgentOrchestrator {
         syncJobToStore(job);
 
         ProjectState prevCopy = deepCopy(initialState);
+        AtomicBoolean persisted = new AtomicBoolean(false);
+        BiConsumer<String, Map<String, Object>> jobCallback = (ev, payload) -> {
+            if ("completed".equals(ev) && !job.getCancelled().get() && !job.getTimedOut().get()) {
+                Object psObj = payload.get("project_state");
+                if (psObj instanceof ProjectState updated && persisted.compareAndSet(false, true)) {
+                    if (store != null) {
+                        store.pushUndo(projectId, prevCopy);
+                        store.saveProject(updated);
+                    }
+                    job.setResultState(updated);
+                    job.setStatus("completed");
+                    syncJobToStore(job);
+                }
+            }
+            job.publish(ev, payload, objectMapper);
+        };
+
         executor.submit(() -> {
             job.setWorkerThread(Thread.currentThread());
             LlmContextHolder.set(llmOverrides);
             try {
-                ProjectState updated = work.apply(job);
-                job.setResultState(updated);
-                job.setStatus("completed");
-                if (store != null) {
-                    store.pushUndo(projectId, prevCopy);
-                    store.saveProject(updated);
+                ProjectState updated = work.apply(job, jobCallback);
+                if (!job.getCancelled().get() && !job.getTimedOut().get()) {
+                    job.setResultState(updated);
+                    job.setStatus("completed");
+                    if (store != null && persisted.compareAndSet(false, true)) {
+                        store.pushUndo(projectId, prevCopy);
+                        store.saveProject(updated);
+                    }
                 }
             } catch (JobCancelledException ex) {
                 job.setStatus("cancelled");
