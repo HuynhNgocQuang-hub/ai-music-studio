@@ -588,7 +588,7 @@ public class ProjectStateStore {
             }
         }
         Map<String, Object> info = new LinkedHashMap<>();
-        info.put("connected", true);
+        info.put("connected", false);
         info.put("backend", "memory");
         info.put("keys_count", keys.size());
         info.put("memory_bytes", totalBytes);

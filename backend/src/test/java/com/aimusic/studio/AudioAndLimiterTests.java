@@ -28,6 +28,7 @@ import javax.sound.midi.MidiEvent;
 import javax.sound.midi.MidiMessage;
 import javax.sound.midi.MidiSystem;
 import javax.sound.midi.Sequence;
+import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Track;
 import java.io.ByteArrayInputStream;
 import java.net.InetSocketAddress;
@@ -328,6 +329,7 @@ class AudioAndLimiterTests {
         store.saveAudioBytes(tunedRef, tunedWav);
         store.saveAudioBytes(overdubRef, overdubWav);
 
+        proj.setAutotuneSettings(tunedCfg);
         proj.getAudioAssets().setRawInputRef(rawRef);
         proj.getAudioAssets().setDryDenoisedRef(dryRef);
         proj.getAudioAssets().setTunedVocalRef(tunedRef);
@@ -452,5 +454,101 @@ class AudioAndLimiterTests {
         assertEquals(2, reimported.getTracks().get("texture").getClips().size());
         assertTrue(store.getAudioBytes(texRef1).isPresent());
         assertTrue(store.getAudioBytes(texRef2).isPresent());
+    }
+
+    @Test
+    void auditBug02DisabledAutotuneSkipsTunedVocalRefInRender() {
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        ProjectState proj = ProjectState.createDefault("at_disabled_1", "AT Disabled");
+        proj.getAnalysis().setBpm(120.0);
+        proj.getAnalysis().setBars(2);
+        proj.getSongStructure().setTotalBars(2);
+
+        byte[] dryWav = makeMelodyWav(2.5, 44100, false);
+        AutotuneSettings tunedCfg = audioService.applyPreset("modern", "D", "minor");
+        byte[] tunedWav = audioService.applyAutotune(dryWav, tunedCfg);
+        assertFalse(Arrays.equals(dryWav, tunedWav));
+
+        String dryRef = "mem://processed/at_disabled_1_dry.wav";
+        String tunedRef = "mem://processed/at_disabled_1_tuned.wav";
+        store.saveAudioBytes(dryRef, dryWav);
+        store.saveAudioBytes(tunedRef, tunedWav);
+
+        proj.getAudioAssets().setDryDenoisedRef(dryRef);
+        proj.getAudioAssets().setTunedVocalRef(tunedRef);
+        proj.getTracks().get("vocal").getClips().add(new AudioClip("clip_1", "tuned_vocal_ref", 1.0, 0.0));
+        proj.getTracks().get("drums").setNotes(List.of(new MidiNote(36, 0.0, 0.5, 110, 1.0)));
+
+        // When autotune_settings.enabled is false, stale tuned_vocal_ref must NOT be used
+        proj.getAutotuneSettings().setEnabled(false);
+        for (String mode : List.of("ai_mix", "preserve", "enhance", "autotune")) {
+            byte[] rendered = audioService.encodeWavStereo(
+                    audioService.renderProjectMix(proj, store, mode, true, 44100).stereo(), 44100);
+            String compMode = "autotune".equals(mode) ? "dry" : ("ai_mix".equals(mode) ? "dry_beat" : null);
+            if (compMode != null) {
+                byte[] expectedDry = audioService.encodeWavStereo(
+                        audioService.renderProjectMix(proj, store, compMode, true, 44100).stereo(), 44100);
+                assertArrayEquals(expectedDry, rendered, "Mode '" + mode + "' must use dry vocal when autotune is disabled");
+            }
+        }
+    }
+
+    @Test
+    void warn04ExportMidiEmitsProgramChangePerTrackInstrument() throws Exception {
+        ProjectState proj = ProjectState.createDefault("midi_pc_1", "MIDI Program Change");
+        proj.getAnalysis().setBpm(120.0);
+        proj.getTracks().get("drums").setInstrument("electronic_808");
+        proj.getTracks().get("drums").setNotes(List.of(new MidiNote(36, 0.0, 0.5, 110, 1.0)));
+        proj.getTracks().get("bass").setInstrument("synth_bass");
+        proj.getTracks().get("bass").setNotes(List.of(new MidiNote(36, 0.0, 1.0, 110, 1.0)));
+        proj.getTracks().get("harmony").setInstrument("acoustic_guitar");
+        proj.getTracks().get("harmony").setNotes(List.of(new MidiNote(60, 0.0, 1.0, 100, 1.0)));
+        proj.getTracks().get("lead").setInstrument("flute");
+        proj.getTracks().get("lead").setNotes(List.of(new MidiNote(72, 0.0, 1.0, 105, 1.0)));
+
+        byte[] midiBytes = audioService.exportMidi(proj);
+        Sequence seq = MidiSystem.getSequence(new ByteArrayInputStream(midiBytes));
+        Map<Integer, Integer> programByChannel = new HashMap<>();
+        for (Track tr : seq.getTracks()) {
+            for (int i = 0; i < tr.size(); i++) {
+                MidiMessage msg = tr.get(i).getMessage();
+                if (msg instanceof ShortMessage sm && sm.getCommand() == ShortMessage.PROGRAM_CHANGE) {
+                    programByChannel.put(sm.getChannel(), sm.getData1());
+                }
+            }
+        }
+        assertEquals(25, programByChannel.get(9));  // electronic_808 on drums channel 9
+        assertEquals(38, programByChannel.get(1));  // synth_bass on bass channel 1
+        assertEquals(24, programByChannel.get(2));  // acoustic_guitar on harmony channel 2
+        assertEquals(73, programByChannel.get(3));  // flute on lead channel 3
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void warn08MemoryHealthStatusReportsConnectedFalse() {
+        ProjectStateStore memOnly = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        Map<String, Object> memPing = memOnly.ping();
+        assertEquals("memory", memPing.get("backend"));
+        assertEquals(false, memPing.get("connected"));
+
+        RedisTemplate<String, byte[]> template = Mockito.mock(RedisTemplate.class);
+        AtomicBoolean redisUp = new AtomicBoolean(true);
+        Mockito.when(template.execute(Mockito.<RedisCallback<Object>>any())).thenAnswer(inv -> {
+            if (!redisUp.get()) throw new RuntimeException("Redis down");
+            RedisConnection conn = Mockito.mock(RedisConnection.class, Mockito.RETURNS_DEEP_STUBS);
+            Mockito.when(conn.ping()).thenReturn("PONG");
+            Mockito.when(conn.serverCommands().dbSize()).thenReturn(3L);
+            return inv.<RedisCallback<Object>>getArgument(0).doInRedis(conn);
+        });
+
+        ProjectStateStore redisStore = new ProjectStateStore(objectMapper, new AppProperties(), template);
+        Map<String, Object> upPing = redisStore.ping();
+        assertEquals("redis", upPing.get("backend"));
+        assertEquals(true, upPing.get("connected"));
+
+        redisUp.set(false);
+        Map<String, Object> fallbackPing = redisStore.ping();
+        assertEquals("memory", fallbackPing.get("backend"));
+        assertEquals(false, fallbackPing.get("connected"));
     }
 }
