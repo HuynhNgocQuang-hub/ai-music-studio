@@ -243,6 +243,8 @@ export interface JobRearrangeRequest {
   project_id: string;
   chords: ChordEvent[];
   locked_tracks: string[];
+  sections?: SongSection[];
+  total_bars?: number;
 }
 
 export interface JobCreatedResponse {
@@ -290,10 +292,12 @@ export interface OverdubFitCheckResponse {
 }
 
 export interface AutoTrimVocalResponse {
+  project_id?: string;
   project_state: ProjectState;
-  trimmed_start_sec?: number;
-  trimmed_end_sec?: number;
+  trim_start_sec?: number;
+  trim_end_sec?: number;
   offset_ms?: number;
+  trimmed_clips?: number;
   summary?: string;
 }
 
