@@ -1070,9 +1070,9 @@ export default function TimelineEditor({
                               </div>
                               <div className="flex items-center justify-between text-[9px] opacity-75">
                                 <span>
-                                  {clip.trim_start_sec.toFixed(1)}s–
-                                  {clip.trim_end_sec !== undefined
-                                    ? `${clip.trim_end_sec.toFixed(1)}s`
+                                  {(clip.trim_start_sec ?? 0).toFixed(1)}s–
+                                  {clip.trim_end_sec != null
+                                    ? `${Number(clip.trim_end_sec).toFixed(1)}s`
                                     : 'end'}
                                 </span>
                                 <span>
