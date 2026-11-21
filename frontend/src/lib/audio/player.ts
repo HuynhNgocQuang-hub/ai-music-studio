@@ -1,5 +1,6 @@
 import type { AudioClip, MidiNote, ProjectState } from '@/types/project';
 import { resolveAudioUrl } from '@/lib/api/client';
+import { getBeatsPerBar } from '@/lib/music/presets';
 
 export type VocalABMode = 'raw' | 'dry' | 'autotune' | 'preserve' | 'enhance' | 'ai_mix';
 
@@ -9,6 +10,11 @@ export interface TrackChannelConfig {
   solo: boolean;
   volume: number; // 0.0 .. 1.2
   pan: number; // -1.0 .. 1.0
+  lowDb?: number; // -12 .. +12 dB
+  midDb?: number; // -12 .. +12 dB
+  highDb?: number; // -12 .. +12 dB
+  reverbSend?: number; // 0.0 .. 1.0
+  delaySend?: number; // 0.0 .. 1.0
 }
 
 export interface LoopRegionBars {
@@ -22,9 +28,11 @@ export interface TransportSnapshot {
   durationSec: number;
   bpm: number;
   loopEnabled: boolean;
+  metronomeEnabled: boolean;
   loopRegionBars: LoopRegionBars | null;
   abMode: VocalABMode;
   masterPeakDb: number;
+  channelPeakDb: Record<string, number>;
 }
 
 type TransportListener = (snapshot: TransportSnapshot) => void;
@@ -51,10 +59,31 @@ export class MultiTrackAudioEngine {
   private bufferSources: Map<string, string> = new Map();
   private lastProjectId: string | null = null;
   private channelGains: Map<string, GainNode> = new Map();
+  private channelLowEq: Map<string, BiquadFilterNode> = new Map();
+  private channelMidEq: Map<string, BiquadFilterNode> = new Map();
+  private channelHighEq: Map<string, BiquadFilterNode> = new Map();
+  private channelAnalysers: Map<string, AnalyserNode> = new Map();
   private channelPanners: Map<string, StereoPannerNode> = new Map();
+  private channelReverbSends: Map<string, GainNode> = new Map();
+  private channelDelaySends: Map<string, GainNode> = new Map();
+  private reverbSendBus: GainNode | null = null;
+  private reverbReturnGain: GainNode | null = null;
+  private delaySendBus: GainNode | null = null;
+  private delayReturnGain: GainNode | null = null;
+  private delayLeftNode: DelayNode | null = null;
+  private delayRightNode: DelayNode | null = null;
+  private reverbReturnLevel = 1.0;
+  private delayReturnLevel = 1.0;
+  private fxBypassed = false;
+  private hallImpulseBuffer: AudioBuffer | null = null;
   private activeSources: AudioBufferSourceNode[] = [];
   private activeOscillators: AudioScheduledSourceNode[] = [];
   private channelConfigs: Map<string, TrackChannelConfig> = new Map();
+  private preferPreRenderedMix = false;
+  private lastArrangementSig = '';
+  private channelMeterScratch = new Float32Array(64);
+  private masterMeterScratch = new Float32Array(256);
+  private waveformCache = new WeakMap<AudioBuffer, Map<string, number[]>>();
 
   private isPlayingState = false;
   private startContextTime = 0;
@@ -62,6 +91,8 @@ export class MultiTrackAudioEngine {
   private durationSec = 8;
   private bpm = 100;
   private loopEnabled = false;
+  private metronomeEnabled = false;
+  private noiseBuffer: AudioBuffer | null = null;
   private loopRegionBars: LoopRegionBars | null = null;
   private abMode: VocalABMode = 'dry';
   private rafId: number | null = null;
@@ -71,7 +102,7 @@ export class MultiTrackAudioEngine {
   private metronomeTimer: number | null = null;
 
   private getBeatsPerBar(): number {
-    return this.currentProject?.analysis.time_signature === '3/4' ? 3 : 4;
+    return getBeatsPerBar(this.currentProject?.analysis.time_signature);
   }
 
   private getSecPerBeat(): number {
@@ -80,6 +111,100 @@ export class MultiTrackAudioEngine {
 
   private getSecPerBar(): number {
     return this.getBeatsPerBar() * this.getSecPerBeat();
+  }
+
+  private getSyncDelaySec(): number {
+    return Math.max(0.12, Math.min(0.75, 0.75 * this.getSecPerBeat()));
+  }
+
+  private createHallImpulseBuffer(ctx: AudioContext): AudioBuffer {
+    if (this.hallImpulseBuffer && this.hallImpulseBuffer.sampleRate === ctx.sampleRate) {
+      return this.hallImpulseBuffer;
+    }
+    const sr = ctx.sampleRate;
+    const len = Math.max(64, Math.floor(1.45 * sr));
+    const buf = ctx.createBuffer(2, len, sr);
+    let seed = 2026;
+    const nextRand = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return (seed / 0xffffffff) * 2 - 1;
+    };
+    const fadeLen = Math.max(1, Math.floor(0.015 * sr));
+    for (let ch = 0; ch < 2; ch++) {
+      const data = buf.getChannelData(ch);
+      let lp = 0;
+      let sumSq = 0;
+      for (let i = 0; i < len; i++) {
+        const t = i / sr;
+        const env = Math.exp(-4.6 * t) * (i < fadeLen ? i / fadeLen : 1);
+        lp = 0.45 * (nextRand() * env) + 0.55 * lp;
+        data[i] = lp;
+        sumSq += lp * lp;
+      }
+      const norm = sumSq > 0 ? 0.55 / Math.sqrt(sumSq) : 1;
+      for (let i = 0; i < len; i++) {
+        data[i] *= norm;
+      }
+    }
+    this.hallImpulseBuffer = buf;
+    return buf;
+  }
+
+  private setupFxBuses(ctx: AudioContext): void {
+    if (!this.masterGain || (this.reverbSendBus && this.delaySendBus)) return;
+
+    // Bus A: Hall Reverb Return
+    this.reverbSendBus = ctx.createGain();
+    const preDelay = ctx.createDelay(0.1);
+    preDelay.delayTime.value = 0.018;
+    const revDamp = ctx.createBiquadFilter();
+    revDamp.type = 'lowpass';
+    revDamp.frequency.value = 4600;
+    const convolver = ctx.createConvolver();
+    convolver.buffer = this.createHallImpulseBuffer(ctx);
+    this.reverbReturnGain = ctx.createGain();
+    this.reverbReturnGain.gain.value = this.fxBypassed ? 0 : this.reverbReturnLevel;
+
+    this.reverbSendBus.connect(preDelay);
+    preDelay.connect(revDamp);
+    revDamp.connect(convolver);
+    convolver.connect(this.reverbReturnGain);
+    this.reverbReturnGain.connect(this.masterGain);
+
+    // Bus B: Tempo-Synced Ping-Pong Delay Return (dotted-8th note)
+    this.delaySendBus = ctx.createGain();
+    const delayFilter = ctx.createBiquadFilter();
+    delayFilter.type = 'lowpass';
+    delayFilter.frequency.value = 3400;
+    const syncSec = this.getSyncDelaySec();
+    this.delayLeftNode = ctx.createDelay(1.0);
+    this.delayLeftNode.delayTime.value = syncSec;
+    this.delayRightNode = ctx.createDelay(1.0);
+    this.delayRightNode.delayTime.value = syncSec;
+
+    const fbLeftToRight = ctx.createGain();
+    fbLeftToRight.gain.value = 0.36;
+    const fbRightToLeft = ctx.createGain();
+    fbRightToLeft.gain.value = 0.32;
+    const panLeft = ctx.createStereoPanner();
+    panLeft.pan.value = -0.55;
+    const panRight = ctx.createStereoPanner();
+    panRight.pan.value = 0.55;
+    this.delayReturnGain = ctx.createGain();
+    this.delayReturnGain.gain.value = this.fxBypassed ? 0 : this.delayReturnLevel;
+
+    this.delaySendBus.connect(delayFilter);
+    delayFilter.connect(this.delayLeftNode);
+    this.delayLeftNode.connect(fbLeftToRight);
+    fbLeftToRight.connect(this.delayRightNode);
+    this.delayRightNode.connect(fbRightToLeft);
+    fbRightToLeft.connect(this.delayLeftNode);
+
+    this.delayLeftNode.connect(panLeft);
+    this.delayRightNode.connect(panRight);
+    panLeft.connect(this.delayReturnGain);
+    panRight.connect(this.delayReturnGain);
+    this.delayReturnGain.connect(this.masterGain);
   }
 
   private getActiveLoopBoundsSec(): { startSec: number; endSec: number } {
@@ -115,6 +240,7 @@ export class MultiTrackAudioEngine {
       this.masterGain.connect(this.limiter);
       this.limiter.connect(this.analyser);
       this.analyser.connect(this.ctx.destination);
+      this.setupFxBuses(this.ctx);
     }
     if (this.ctx.state === 'suspended') {
       void this.ctx.resume();
@@ -122,20 +248,78 @@ export class MultiTrackAudioEngine {
     return this.ctx;
   }
 
-  private getOrCreateChannelNodes(trackId: string): { gain: GainNode; panner: StereoPannerNode } {
+  private getOrCreateChannelNodes(trackId: string): {
+    gain: GainNode;
+    lowEq: BiquadFilterNode;
+    midEq: BiquadFilterNode;
+    highEq: BiquadFilterNode;
+    panner: StereoPannerNode;
+    reverbSendGain: GainNode;
+    delaySendGain: GainNode;
+  } {
     const ctx = this.ensureContext();
     let gain = this.channelGains.get(trackId);
+    let lowEq = this.channelLowEq.get(trackId);
+    let midEq = this.channelMidEq.get(trackId);
+    let highEq = this.channelHighEq.get(trackId);
+    let analyser = this.channelAnalysers.get(trackId);
     let panner = this.channelPanners.get(trackId);
+    let reverbSendGain = this.channelReverbSends.get(trackId);
+    let delaySendGain = this.channelDelaySends.get(trackId);
 
-    if (!gain || !panner) {
+    if (
+      !gain ||
+      !lowEq ||
+      !midEq ||
+      !highEq ||
+      !analyser ||
+      !panner ||
+      !reverbSendGain ||
+      !delaySendGain
+    ) {
       gain = ctx.createGain();
+      lowEq = ctx.createBiquadFilter();
+      lowEq.type = 'lowshelf';
+      lowEq.frequency.value = 110;
+
+      midEq = ctx.createBiquadFilter();
+      midEq.type = 'peaking';
+      midEq.frequency.value = 1000;
+      midEq.Q.value = 0.9;
+
+      highEq = ctx.createBiquadFilter();
+      highEq.type = 'highshelf';
+      highEq.frequency.value = 6500;
+
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
       panner = ctx.createStereoPanner();
-      gain.connect(panner);
+      reverbSendGain = ctx.createGain();
+      reverbSendGain.gain.value = 0;
+      delaySendGain = ctx.createGain();
+      delaySendGain.gain.value = 0;
+
+      gain.connect(lowEq);
+      lowEq.connect(midEq);
+      midEq.connect(highEq);
+      highEq.connect(analyser);
+      analyser.connect(panner);
       panner.connect(this.masterGain!);
+      panner.connect(reverbSendGain);
+      reverbSendGain.connect(this.reverbSendBus!);
+      panner.connect(delaySendGain);
+      delaySendGain.connect(this.delaySendBus!);
+
       this.channelGains.set(trackId, gain);
+      this.channelLowEq.set(trackId, lowEq);
+      this.channelMidEq.set(trackId, midEq);
+      this.channelHighEq.set(trackId, highEq);
+      this.channelAnalysers.set(trackId, analyser);
       this.channelPanners.set(trackId, panner);
+      this.channelReverbSends.set(trackId, reverbSendGain);
+      this.channelDelaySends.set(trackId, delaySendGain);
     }
-    return { gain, panner };
+    return { gain, lowEq, midEq, highEq, panner, reverbSendGain, delaySendGain };
   }
 
   public subscribe(listener: TransportListener): () => void {
@@ -160,10 +344,23 @@ export class MultiTrackAudioEngine {
       durationSec: this.durationSec,
       bpm: this.bpm,
       loopEnabled: this.loopEnabled,
+      metronomeEnabled: this.metronomeEnabled,
       loopRegionBars: this.loopRegionBars,
       abMode: this.abMode,
       masterPeakDb: this.measureMasterPeakDb(),
+      channelPeakDb: this.measureAllChannelPeaksDb(),
     };
+  }
+
+  public setMetronomeEnabled(enabled: boolean): void {
+    this.metronomeEnabled = enabled;
+    if (this.isPlayingState) {
+      const cur = this.getCurrentTimeSec();
+      this.stopSourcesOnly();
+      this.startFromOffset(cur);
+    } else {
+      this.emit();
+    }
   }
 
   public getCurrentTimeSec(): number {
@@ -184,17 +381,35 @@ export class MultiTrackAudioEngine {
 
   private measureMasterPeakDb(): number {
     if (!this.analyser || !this.isPlayingState) return -60;
-    const data = new Float32Array(this.analyser.fftSize);
-    this.analyser.getFloatTimeDomainData(data);
+    if (this.masterMeterScratch.length !== this.analyser.fftSize) {
+      this.masterMeterScratch = new Float32Array(this.analyser.fftSize);
+    }
+    this.analyser.getFloatTimeDomainData(this.masterMeterScratch);
     let peak = 0;
-    for (let i = 0; i < data.length; i++) {
-      const abs = Math.abs(data[i]);
+    for (let i = 0; i < this.masterMeterScratch.length; i++) {
+      const abs = Math.abs(this.masterMeterScratch[i]);
       if (abs > peak) peak = abs;
     }
     if (peak <= 0.0001) return -60;
     const db = 20 * Math.log10(peak);
     // Clamped to reflect master limiter ceiling <= -1.0 dBFS
     return Math.min(db, -1.0);
+  }
+
+  private measureAllChannelPeaksDb(): Record<string, number> {
+    const out: Record<string, number> = {};
+    if (!this.isPlayingState) return out;
+
+    for (const [trackId, analyser] of this.channelAnalysers.entries()) {
+      analyser.getFloatTimeDomainData(this.channelMeterScratch);
+      let peak = 0;
+      for (let i = 0; i < this.channelMeterScratch.length; i++) {
+        const abs = Math.abs(this.channelMeterScratch[i]);
+        if (abs > peak) peak = abs;
+      }
+      out[trackId] = peak <= 0.0001 ? -60 : Math.min(-0.5, 20 * Math.log10(peak));
+    }
+    return out;
   }
 
   public async loadAudioFromBlob(slotKey: string, blob: Blob): Promise<AudioBuffer | null> {
@@ -256,12 +471,38 @@ export class MultiTrackAudioEngine {
     if (this.lastProjectId && this.lastProjectId !== project.project_id) {
       this.stop();
       this.invalidateSlots();
+      this.channelConfigs.clear();
+      this.lastArrangementSig = '';
     }
     this.lastProjectId = project.project_id;
     this.currentProject = project;
     this.bpm = project.analysis.bpm || 100;
 
-    // Update channel mute/solo/volume/pan
+    const nextArrangementSig = [
+      project.analysis.bpm,
+      project.analysis.time_signature,
+      project.song_structure.total_bars,
+      Object.entries(project.tracks)
+        .filter(([, t]) => Boolean(t))
+        .map(([id, t]) =>
+          t!.type === 'audio'
+            ? `${id}:a:${t!.clips
+                .map(
+                  (c) =>
+                    `${c.id}:${c.source}:${c.start_bar}:${c.trim_start_sec}:${c.trim_end_sec ?? ''}:${c.offset_ms ?? 0}`
+                )
+                .join(',')}`
+            : `${id}:m:${t!.instrument || ''}:${t!.notes
+                .map((n) => `${n.pitch}:${n.start_beat}:${n.duration}`)
+                .join(';')}`
+        )
+        .join('|'),
+    ].join('::');
+    const arrangementChanged =
+      this.lastArrangementSig !== '' && this.lastArrangementSig !== nextArrangementSig;
+    this.lastArrangementSig = nextArrangementSig;
+
+    // Update channel mute/solo/volume/pan/3-band EQ/Send FX
     for (const [trackId, track] of Object.entries(project.tracks)) {
       if (!track) continue;
       this.setChannelConfig({
@@ -270,8 +511,14 @@ export class MultiTrackAudioEngine {
         solo: Boolean(track.solo),
         volume: track.volume ?? 0.85,
         pan: track.pan ?? 0.0,
+        lowDb: track.low_db ?? 0.0,
+        midDb: track.mid_db ?? 0.0,
+        highDb: track.high_db ?? 0.0,
+        reverbSend: track.reverb_send ?? 0.0,
+        delaySend: track.delay_send ?? 0.0,
       });
     }
+    this.updateDelayTempo();
 
     // Fetch backend audio refs when missing, forced, or source revision changed
     const pid = project.project_id;
@@ -337,7 +584,7 @@ export class MultiTrackAudioEngine {
     );
 
     this.recomputeDuration();
-    if (reloadedForced && this.isPlayingState) {
+    if ((reloadedForced || arrangementChanged) && this.isPlayingState) {
       const offset = this.getCurrentTimeSec();
       this.stopSourcesOnly();
       this.startFromOffset(offset);
@@ -374,6 +621,75 @@ export class MultiTrackAudioEngine {
   public getClipBufferDuration(clip: AudioClip, trackId = 'vocal'): number | null {
     const buf = this.resolveBufferForClip(clip, trackId);
     return buf ? buf.duration : null;
+  }
+
+  /**
+   * Sample normalized amplitude peaks [0..1] for a given decoded AudioBuffer slice.
+   * Uses a WeakMap cache keyed by buffer + slice bounds for smooth 60fps DAW rendering.
+   */
+  private extractBufferPeaks(
+    buf: AudioBuffer,
+    startSec: number,
+    endSec: number,
+    bucketCount = 72
+  ): number[] {
+    const buckets = Math.max(8, Math.min(512, Math.round(bucketCount)));
+    const safeStart = Math.max(0, Math.min(buf.duration, startSec));
+    const safeEnd = Math.max(safeStart + 0.05, Math.min(buf.duration, endSec));
+    const cacheKey = `${safeStart.toFixed(2)}:${safeEnd.toFixed(2)}:${buckets}`;
+
+    let bufCache = this.waveformCache.get(buf);
+    if (!bufCache) {
+      bufCache = new Map();
+      this.waveformCache.set(buf, bufCache);
+    }
+    const cached = bufCache.get(cacheKey);
+    if (cached) return cached;
+
+    const data = buf.getChannelData(0);
+    const totalSamples = data.length;
+    const startIdx = Math.max(0, Math.floor((safeStart / buf.duration) * totalSamples));
+    const endIdx = Math.min(totalSamples, Math.ceil((safeEnd / buf.duration) * totalSamples));
+    const span = Math.max(1, endIdx - startIdx);
+    const step = span / buckets;
+    const stride = Math.max(1, Math.floor(step / 48));
+
+    const rawPeaks = new Array<number>(buckets).fill(0);
+    let maxPeak = 0.001;
+    for (let b = 0; b < buckets; b++) {
+      const from = startIdx + Math.floor(b * step);
+      const to = Math.min(endIdx, startIdx + Math.ceil((b + 1) * step));
+      let peak = 0;
+      for (let i = from; i < to; i += stride) {
+        const v = Math.abs(data[i]);
+        if (v > peak) peak = v;
+      }
+      rawPeaks[b] = peak;
+      if (peak > maxPeak) maxPeak = peak;
+    }
+
+    const scale = maxPeak > 0.05 ? 1 / maxPeak : 1;
+    const normalized = rawPeaks.map((p) => Math.max(0.06, Math.min(1, p * scale)));
+    bufCache.set(cacheKey, normalized);
+    return normalized;
+  }
+
+  public getWaveformPeaksForSlot(slotKey: string, bucketCount = 72): number[] | null {
+    const buf = this.buffers.get(slotKey);
+    if (!buf) return null;
+    return this.extractBufferPeaks(buf, 0, buf.duration, bucketCount);
+  }
+
+  public getWaveformPeaksForClip(
+    clip: AudioClip,
+    trackId = 'vocal',
+    bucketCount = 72
+  ): number[] | null {
+    const buf = this.resolveBufferForClip(clip, trackId);
+    if (!buf) return null;
+    const startSec = clip.trim_start_sec || 0;
+    const endSec = clip.trim_end_sec ?? buf.duration;
+    return this.extractBufferPeaks(buf, startSec, endSec, bucketCount);
   }
 
   private resolveBufferForClip(clip: AudioClip, trackId: string): AudioBuffer | undefined {
@@ -416,21 +732,145 @@ export class MultiTrackAudioEngine {
     return undefined;
   }
 
+  private clampEqDb(value: number | undefined, fallback = 0): number {
+    return Math.max(-12, Math.min(12, value ?? fallback));
+  }
+
+  private clampSend(value: number | undefined, fallback = 0): number {
+    return Math.max(0, Math.min(1, value ?? fallback));
+  }
+
+  private updateDelayTempo(): void {
+    if (!this.ctx || !this.delayLeftNode || !this.delayRightNode) return;
+    const syncSec = this.getSyncDelaySec();
+    const now = this.ctx.currentTime;
+    this.delayLeftNode.delayTime.setTargetAtTime(syncSec, now, 0.03);
+    this.delayRightNode.delayTime.setTargetAtTime(syncSec, now, 0.03);
+  }
+
   public setChannelConfig(cfg: TrackChannelConfig): void {
-    this.channelConfigs.set(cfg.id, cfg);
+    const prev = this.channelConfigs.get(cfg.id);
+    this.channelConfigs.set(cfg.id, {
+      ...cfg,
+      lowDb: this.clampEqDb(cfg.lowDb, prev?.lowDb ?? 0),
+      midDb: this.clampEqDb(cfg.midDb, prev?.midDb ?? 0),
+      highDb: this.clampEqDb(cfg.highDb, prev?.highDb ?? 0),
+      reverbSend: this.clampSend(cfg.reverbSend, prev?.reverbSend ?? 0),
+      delaySend: this.clampSend(cfg.delaySend, prev?.delaySend ?? 0),
+    });
     this.applyChannelRouting();
+  }
+
+  public setChannelEq(
+    trackId: string,
+    eq: { lowDb?: number; midDb?: number; highDb?: number }
+  ): void {
+    const prev = this.channelConfigs.get(trackId);
+    this.channelConfigs.set(trackId, {
+      id: trackId,
+      mute: prev?.mute ?? false,
+      solo: prev?.solo ?? false,
+      volume: prev?.volume ?? 0.85,
+      pan: prev?.pan ?? 0,
+      lowDb: this.clampEqDb(eq.lowDb, prev?.lowDb ?? 0),
+      midDb: this.clampEqDb(eq.midDb, prev?.midDb ?? 0),
+      highDb: this.clampEqDb(eq.highDb, prev?.highDb ?? 0),
+      reverbSend: this.clampSend(prev?.reverbSend, 0),
+      delaySend: this.clampSend(prev?.delaySend, 0),
+    });
+    this.applyChannelRouting();
+  }
+
+  public setChannelSends(
+    trackId: string,
+    sends: { reverbSend?: number; delaySend?: number }
+  ): void {
+    const prev = this.channelConfigs.get(trackId);
+    this.channelConfigs.set(trackId, {
+      id: trackId,
+      mute: prev?.mute ?? false,
+      solo: prev?.solo ?? false,
+      volume: prev?.volume ?? 0.85,
+      pan: prev?.pan ?? 0,
+      lowDb: this.clampEqDb(prev?.lowDb, 0),
+      midDb: this.clampEqDb(prev?.midDb, 0),
+      highDb: this.clampEqDb(prev?.highDb, 0),
+      reverbSend: this.clampSend(sends.reverbSend, prev?.reverbSend ?? 0),
+      delaySend: this.clampSend(sends.delaySend, prev?.delaySend ?? 0),
+    });
+    this.applyChannelRouting();
+  }
+
+  public setFxBusConfig(cfg: {
+    reverbReturn?: number;
+    delayReturn?: number;
+    bypassed?: boolean;
+  }): void {
+    if (cfg.reverbReturn !== undefined) {
+      this.reverbReturnLevel = Math.max(0, Math.min(1.2, cfg.reverbReturn));
+    }
+    if (cfg.delayReturn !== undefined) {
+      this.delayReturnLevel = Math.max(0, Math.min(1.2, cfg.delayReturn));
+    }
+    if (cfg.bypassed !== undefined) {
+      this.fxBypassed = cfg.bypassed;
+    }
+    if (this.ctx) {
+      const now = this.ctx.currentTime;
+      if (this.reverbReturnGain) {
+        this.reverbReturnGain.gain.setTargetAtTime(
+          this.fxBypassed ? 0 : this.reverbReturnLevel,
+          now,
+          0.02
+        );
+      }
+      if (this.delayReturnGain) {
+        this.delayReturnGain.gain.setTargetAtTime(
+          this.fxBypassed ? 0 : this.delayReturnLevel,
+          now,
+          0.02
+        );
+      }
+    }
   }
 
   private applyChannelRouting(): void {
     if (!this.ctx) return;
     const anySolo = Array.from(this.channelConfigs.values()).some((c) => c.solo);
+    const now = this.ctx.currentTime;
 
     for (const [id, cfg] of this.channelConfigs.entries()) {
-      const { gain, panner } = this.getOrCreateChannelNodes(id);
+      const { gain, lowEq, midEq, highEq, panner, reverbSendGain, delaySendGain } =
+        this.getOrCreateChannelNodes(id);
       const audible = !cfg.mute && (!anySolo || cfg.solo);
       const targetGain = audible ? Math.max(0, Math.min(1.2, cfg.volume)) : 0;
-      gain.gain.setTargetAtTime(targetGain, this.ctx.currentTime, 0.015);
-      panner.pan.setTargetAtTime(Math.max(-1, Math.min(1, cfg.pan)), this.ctx.currentTime, 0.015);
+      gain.gain.setTargetAtTime(targetGain, now, 0.015);
+      lowEq.gain.setTargetAtTime(this.clampEqDb(cfg.lowDb), now, 0.02);
+      midEq.gain.setTargetAtTime(this.clampEqDb(cfg.midDb), now, 0.02);
+      highEq.gain.setTargetAtTime(this.clampEqDb(cfg.highDb), now, 0.02);
+      panner.pan.setTargetAtTime(Math.max(-1, Math.min(1, cfg.pan)), now, 0.015);
+      reverbSendGain.gain.setTargetAtTime(
+        audible ? this.clampSend(cfg.reverbSend) * 0.55 : 0,
+        now,
+        0.02
+      );
+      delaySendGain.gain.setTargetAtTime(
+        audible ? this.clampSend(cfg.delaySend) * 0.5 : 0,
+        now,
+        0.02
+      );
+    }
+  }
+
+  public setPreferPreRenderedMix(enabled: boolean): void {
+    if (this.preferPreRenderedMix === enabled) return;
+    this.preferPreRenderedMix = enabled;
+    if (this.isPlayingState) {
+      const offset = this.getCurrentTimeSec();
+      this.stopSourcesOnly();
+      this.startFromOffset(offset);
+    } else {
+      this.emit();
     }
   }
 
@@ -478,9 +918,23 @@ export class MultiTrackAudioEngine {
   }
 
   public setBpm(bpm: number): void {
-    this.bpm = Math.max(40, Math.min(220, bpm));
+    const clamped = Math.max(40, Math.min(220, bpm));
+    const prevSecPerBeat = this.getSecPerBeat();
+    const curSec = this.getCurrentTimeSec();
+    const curBeat = prevSecPerBeat > 0 ? curSec / prevSecPerBeat : 0;
+
+    this.bpm = clamped;
     this.recomputeDuration();
-    this.emit();
+    this.updateDelayTempo();
+
+    const nextSec = Math.max(0, Math.min(this.durationSec, curBeat * this.getSecPerBeat()));
+    this.pauseOffsetSec = nextSec;
+    if (this.isPlayingState) {
+      this.stopSourcesOnly();
+      this.startFromOffset(nextSec);
+    } else {
+      this.emit();
+    }
   }
 
   public play(fromSec?: number): void {
@@ -531,24 +985,40 @@ export class MultiTrackAudioEngine {
     const ctx = this.ensureContext();
     this.stopSourcesOnly();
 
+    const { startSec: loopStartSec, endSec: loopEndSec } = this.getActiveLoopBoundsSec();
+    if (this.loopEnabled && this.loopRegionBars && loopEndSec > loopStartSec) {
+      if (offsetSec < loopStartSec || offsetSec >= loopEndSec) {
+        offsetSec = loopStartSec;
+      }
+      this.pauseOffsetSec = offsetSec;
+    }
+
     // Common sample-accurate anchor t=0 (+25ms lookahead for <10ms sync)
     const scheduleAnchor = ctx.currentTime + 0.025;
     this.startContextTime = scheduleAnchor - offsetSec;
     this.isPlayingState = true;
 
-    const { startSec: loopStartSec, endSec: loopEndSec } = this.getActiveLoopBoundsSec();
     const playbackEndSec = this.loopEnabled ? loopEndSec : this.durationSec;
 
     const vocalClips = this.currentProject?.tracks.vocal?.clips || [];
     const textureClips = this.currentProject?.tracks.texture?.clips || [];
     const hasExplicitClips = vocalClips.length > 0 || textureClips.length > 0;
+    const tracks = this.currentProject?.tracks;
+    const hasMidiNotes = Boolean(
+      tracks &&
+        (tracks.drums?.notes?.length ||
+          tracks.bass?.notes?.length ||
+          tracks.harmony?.notes?.length ||
+          tracks.lead?.notes?.length)
+    );
 
-    // 1. Check whether we should play a pre-rendered full mix buffer (CreatePage Step 4 or unmodified Studio)
+    // 1. Pre-rendered full mix buffer only when CreatePage requests it; Studio DAW always uses live multi-track mixer
     const activeKey = this.pickActiveBufferKey();
     const isPreRenderedFullMix =
-      activeKey === 'preserve' ||
-      activeKey === 'enhance' ||
-      (activeKey === 'ai_mix' && !hasExplicitClips && this.buffers.has('ai_mix'));
+      this.preferPreRenderedMix &&
+      (activeKey === 'preserve' ||
+        activeKey === 'enhance' ||
+        (activeKey === 'ai_mix' && !hasExplicitClips && this.buffers.has('ai_mix')));
 
     if (isPreRenderedFullMix && activeKey) {
       const fullBuf = this.buffers.get(activeKey);
@@ -591,8 +1061,9 @@ export class MultiTrackAudioEngine {
         }
       }
 
-      // 2. Accompaniment buffer or Web Audio MIDI synthesizer tracks
+      // 2. Live multi-track MIDI synth in Studio DAW; pre-rendered accompaniment when CreatePage prefers it or no MIDI notes exist
       if (
+        (this.preferPreRenderedMix || !hasMidiNotes) &&
         (this.abMode === 'dry' || this.abMode === 'autotune' || this.abMode === 'raw') &&
         this.buffers.has('accompaniment')
       ) {
@@ -610,6 +1081,10 @@ export class MultiTrackAudioEngine {
       } else {
         this.scheduleMidiTracks(scheduleAnchor, offsetSec, playbackEndSec);
       }
+    }
+
+    if (this.metronomeEnabled) {
+      this.scheduleTransportMetronome(ctx, scheduleAnchor, offsetSec, playbackEndSec);
     }
 
     // Re-trigger loop boundary seamlessly at loopEndSec -> loopStartSec
@@ -687,8 +1162,8 @@ export class MultiTrackAudioEngine {
       fadeInSec > 0 && alreadyElapsed < fadeInSec
         ? Math.max(0.0001, alreadyElapsed / fadeInSec)
         : alreadyElapsed > fadeOutStartRel && fadeOutSec > 0
-        ? Math.max(0.0001, (fullClipEndRel - alreadyElapsed) / fadeOutSec)
-        : 1.0;
+          ? Math.max(0.0001, (fullClipEndRel - alreadyElapsed) / fadeOutSec)
+          : 1.0;
 
     clipGain.gain.setValueAtTime(startGain, playWhen);
     if (fadeInSec > 0 && alreadyElapsed < fadeInSec) {
@@ -748,20 +1223,209 @@ export class MultiTrackAudioEngine {
     return this.getVocalSlot();
   }
 
+  private getOrCreateNoiseBuffer(ctx: AudioContext): AudioBuffer {
+    if (this.noiseBuffer && this.noiseBuffer.sampleRate === ctx.sampleRate) {
+      return this.noiseBuffer;
+    }
+    const len = Math.floor(ctx.sampleRate * 0.5);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    this.noiseBuffer = buf;
+    return buf;
+  }
+
+  private static readonly MELODIC_PROFILES: Record<
+    string,
+    { wave: OscillatorType; attack: number; releaseRatio: number; cutoffHz: number; q: number }
+  > = {
+    finger_bass: { wave: 'triangle', attack: 0.008, releaseRatio: 0.85, cutoffHz: 850, q: 1.4 },
+    synth_bass: { wave: 'sawtooth', attack: 0.006, releaseRatio: 0.9, cutoffHz: 620, q: 3.0 },
+    upright_bass: { wave: 'triangle', attack: 0.015, releaseRatio: 0.72, cutoffHz: 460, q: 1.0 },
+    grand_piano: { wave: 'triangle', attack: 0.008, releaseRatio: 0.9, cutoffHz: 2800, q: 0.8 },
+    acoustic_guitar: { wave: 'triangle', attack: 0.005, releaseRatio: 0.78, cutoffHz: 2400, q: 0.9 },
+    warm_pad: { wave: 'sawtooth', attack: 0.08, releaseRatio: 1.0, cutoffHz: 950, q: 0.7 },
+    electric_piano: { wave: 'sine', attack: 0.01, releaseRatio: 0.92, cutoffHz: 2200, q: 1.0 },
+    synth_lead: { wave: 'sawtooth', attack: 0.012, releaseRatio: 0.95, cutoffHz: 3200, q: 1.8 },
+    flute: { wave: 'sine', attack: 0.045, releaseRatio: 0.92, cutoffHz: 1800, q: 0.6 },
+  };
+
+  private triggerMelodicNote(
+    ctx: AudioContext,
+    trackId: string,
+    instrument: string | undefined,
+    pitch: number,
+    playAt: number,
+    durSec: number,
+    velGain: number,
+    dest: GainNode,
+    trackOsc: boolean
+  ): void {
+    const defaultKey =
+      trackId === 'bass' ? 'finger_bass' : trackId === 'lead' ? 'synth_lead' : 'grand_piano';
+    const profile =
+      (instrument && MultiTrackAudioEngine.MELODIC_PROFILES[instrument]) ||
+      MultiTrackAudioEngine.MELODIC_PROFILES[defaultKey];
+
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const env = ctx.createGain();
+
+    osc.type = profile.wave;
+    osc.frequency.value = midiToFreq(pitch);
+    filter.type = 'lowpass';
+    filter.frequency.value = profile.cutoffHz;
+    filter.Q.value = profile.q;
+
+    const safeDur = Math.max(0.05, durSec);
+    const attack = Math.min(profile.attack, safeDur * 0.45);
+    const releaseEnd = Math.max(playAt + attack + 0.03, playAt + safeDur * profile.releaseRatio);
+
+    env.gain.setValueAtTime(0.0001, playAt);
+    env.gain.linearRampToValueAtTime(Math.max(0.001, velGain), playAt + attack);
+    env.gain.exponentialRampToValueAtTime(0.0001, releaseEnd);
+
+    osc.connect(filter);
+    filter.connect(env);
+    env.connect(dest);
+    osc.start(playAt);
+    osc.stop(releaseEnd + 0.02);
+    if (trackOsc) {
+      this.activeOscillators.push(osc);
+    }
+  }
+
+  private triggerDrumVoice(
+    ctx: AudioContext,
+    pitch: number,
+    when: number,
+    velGain: number,
+    dest: GainNode,
+    instrument = 'acoustic_kit'
+  ): void {
+    const kit = (instrument || 'acoustic_kit').toLowerCase();
+    const is808 = kit === 'electronic_808';
+    const isLofi = kit === 'lofi_kit';
+
+    if (pitch <= 37) {
+      // Kick: deep sub-tail for 808, warm thud for lo-fi, balanced punch for acoustic
+      const osc = ctx.createOscillator();
+      const env = ctx.createGain();
+      osc.type = 'sine';
+      const startHz = is808 ? 135 : isLofi ? 122 : 155;
+      const endHz = is808 ? 36 : isLofi ? 48 : 42;
+      const pitchDur = is808 ? 0.17 : isLofi ? 0.09 : 0.11;
+      const decayDur = is808 ? 0.4 : isLofi ? 0.19 : 0.24;
+      const peakGain = velGain * (is808 ? 1.55 : isLofi ? 1.25 : 1.45);
+
+      osc.frequency.setValueAtTime(startHz, when);
+      osc.frequency.exponentialRampToValueAtTime(endHz, when + pitchDur);
+      env.gain.setValueAtTime(peakGain, when);
+      env.gain.exponentialRampToValueAtTime(0.0001, when + decayDur);
+      osc.connect(env);
+      env.connect(dest);
+      osc.start(when);
+      osc.stop(when + decayDur + 0.02);
+      this.activeOscillators.push(osc);
+      return;
+    }
+
+    if (pitch >= 42) {
+      // Closed / Open Hi-Hat & Ride shaped by drum kit timbre
+      const noise = ctx.createBufferSource();
+      noise.buffer = this.getOrCreateNoiseBuffer(ctx);
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = is808 ? 7800 : isLofi ? 4800 : 6500;
+      const env = ctx.createGain();
+      const dur = isLofi ? (pitch >= 45 ? 0.16 : 0.05) : pitch >= 45 ? 0.22 : 0.065;
+      const hatGain = velGain * (isLofi ? 0.48 : is808 ? 0.78 : 0.72);
+      env.gain.setValueAtTime(hatGain, when);
+      env.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+      noise.connect(hp);
+      hp.connect(env);
+      env.connect(dest);
+      noise.start(when);
+      noise.stop(when + dur + 0.02);
+      this.activeSources.push(noise);
+      return;
+    }
+
+    // Snare / Clap: tonal body + bandpassed noise snap
+    const bodyOsc = ctx.createOscillator();
+    const bodyEnv = ctx.createGain();
+    bodyOsc.type = 'triangle';
+    bodyOsc.frequency.setValueAtTime(is808 ? 220 : isLofi ? 170 : 195, when);
+    bodyOsc.frequency.exponentialRampToValueAtTime(is808 ? 125 : isLofi ? 105 : 115, when + 0.08);
+    bodyEnv.gain.setValueAtTime(velGain * (isLofi ? 0.65 : 0.8), when);
+    bodyEnv.gain.exponentialRampToValueAtTime(0.0001, when + 0.1);
+    bodyOsc.connect(bodyEnv);
+    bodyEnv.connect(dest);
+    bodyOsc.start(when);
+    bodyOsc.stop(when + 0.12);
+    this.activeOscillators.push(bodyOsc);
+
+    const snareNoise = ctx.createBufferSource();
+    snareNoise.buffer = this.getOrCreateNoiseBuffer(ctx);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value =
+      pitch === 39 ? (isLofi ? 1350 : 1800) : is808 ? 3100 : isLofi ? 1600 : 2600;
+    const noiseEnv = ctx.createGain();
+    const noiseDur = isLofi ? 0.11 : 0.15;
+    noiseEnv.gain.setValueAtTime(velGain * (isLofi ? 0.75 : 0.95), when);
+    noiseEnv.gain.exponentialRampToValueAtTime(0.0001, when + noiseDur);
+    snareNoise.connect(bp);
+    bp.connect(noiseEnv);
+    noiseEnv.connect(dest);
+    snareNoise.start(when);
+    snareNoise.stop(when + noiseDur + 0.02);
+    this.activeSources.push(snareNoise);
+  }
+
+  private scheduleTransportMetronome(
+    ctx: AudioContext,
+    anchorTime: number,
+    offsetSec: number,
+    maxEndSec: number
+  ): void {
+    const secPerBeat = this.getSecPerBeat();
+    const beatsPerBar = this.getBeatsPerBar();
+    const firstBeat = Math.ceil((offsetSec - 0.001) / secPerBeat);
+    const lastBeat = Math.floor((maxEndSec - 0.01) / secPerBeat);
+
+    for (let b = Math.max(0, firstBeat); b <= lastBeat; b++) {
+      const beatTimeSec = b * secPerBeat;
+      const playAt = anchorTime + Math.max(0, beatTimeSec - offsetSec);
+      const isDownbeat = b % beatsPerBar === 0;
+      const osc = ctx.createOscillator();
+      const env = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = isDownbeat ? 1200 : 820;
+      env.gain.setValueAtTime(isDownbeat ? 0.18 : 0.1, playAt);
+      env.gain.exponentialRampToValueAtTime(0.0001, playAt + 0.045);
+      osc.connect(env);
+      env.connect(this.masterGain!);
+      osc.start(playAt);
+      osc.stop(playAt + 0.055);
+      this.activeOscillators.push(osc);
+    }
+  }
+
   private scheduleMidiTracks(anchorTime: number, offsetSec: number, maxEndSec = this.durationSec): void {
     if (!this.ctx || !this.currentProject) return;
     const secPerBeat = this.getSecPerBeat();
     const tracks = this.currentProject.tracks;
 
-    const midiEntries: Array<[string, MidiNote[], OscillatorType]> = [
-      ['bass', tracks.bass?.notes || [], 'triangle'],
-      ['harmony', tracks.harmony?.notes || [], 'sine'],
-      ['lead', tracks.lead?.notes || [], 'sawtooth'],
-      ['drums', tracks.drums?.notes || [], 'square'],
-    ];
+    const midiTrackIds = ['bass', 'harmony', 'lead', 'drums'] as const;
 
-    for (const [trackId, notes, wave] of midiEntries) {
+    for (const trackId of midiTrackIds) {
+      const track = tracks[trackId];
+      const notes: MidiNote[] = track?.notes || [];
       if (!notes.length) continue;
+      const instrument = track?.instrument ?? undefined;
       const { gain } = this.getOrCreateChannelNodes(trackId);
 
       for (const note of notes) {
@@ -774,56 +1438,44 @@ export class MultiTrackAudioEngine {
         const alreadyIntoNote = Math.max(0, offsetSec - noteStartSec);
         const remainingDur = Math.max(0.04, noteDurSec - alreadyIntoNote);
         const playAt = anchorTime + Math.max(0, noteStartSec - offsetSec);
+        const velGain = Math.min(0.28, ((note.velocity || 85) / 127) * 0.24);
 
-        const osc = this.ctx.createOscillator();
-        const env = this.ctx.createGain();
-        osc.type = wave;
-        osc.frequency.value = trackId === 'drums' ? (note.pitch <= 40 ? 90 : 220) : midiToFreq(note.pitch);
+        if (trackId === 'drums') {
+          this.triggerDrumVoice(this.ctx, note.pitch, playAt, velGain, gain, instrument);
+          continue;
+        }
 
-        const velGain = Math.min(0.25, ((note.velocity || 80) / 127) * 0.22);
-        env.gain.setValueAtTime(0.0001, playAt);
-        env.gain.linearRampToValueAtTime(velGain, playAt + 0.01);
-        env.gain.exponentialRampToValueAtTime(
-          0.0001,
-          playAt + (trackId === 'drums' ? Math.min(0.09, remainingDur) : remainingDur)
+        this.triggerMelodicNote(
+          this.ctx,
+          trackId,
+          instrument,
+          note.pitch,
+          playAt,
+          remainingDur,
+          velGain,
+          gain,
+          true
         );
-
-        osc.connect(env);
-        env.connect(gain);
-        osc.start(playAt);
-        osc.stop(playAt + remainingDur + 0.02);
-        this.activeOscillators.push(osc);
       }
     }
   }
 
   /**
-   * Immediately audition a single MIDI note (used by Piano Roll keyboard & note editing).
+   * Immediately audition a single MIDI note (used by Piano Roll keyboard, Step Sequencer & note editing).
    */
   public auditionMidiNote(pitch: number, trackId = 'harmony'): void {
     const ctx = this.ensureContext();
     const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const env = ctx.createGain();
+    const { gain } = this.getOrCreateChannelNodes(trackId);
+    const track = this.currentProject?.tracks[trackId];
+    const instrument = track && track.type === 'midi' ? track.instrument ?? undefined : undefined;
 
-    const waveMap: Record<string, OscillatorType> = {
-      bass: 'triangle',
-      harmony: 'sine',
-      lead: 'sawtooth',
-      drums: 'square',
-    };
-    osc.type = waveMap[trackId] || 'triangle';
-    osc.frequency.value = trackId === 'drums' ? (pitch <= 40 ? 90 : 220) : midiToFreq(pitch);
+    if (trackId === 'drums') {
+      this.triggerDrumVoice(ctx, pitch, now, 0.25, gain, instrument);
+      return;
+    }
 
-    const dur = trackId === 'drums' ? 0.12 : 0.35;
-    env.gain.setValueAtTime(0.0001, now);
-    env.gain.linearRampToValueAtTime(0.22, now + 0.01);
-    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-
-    osc.connect(env);
-    env.connect(this.masterGain!);
-    osc.start(now);
-    osc.stop(now + dur + 0.02);
+    this.triggerMelodicNote(ctx, trackId, instrument, pitch, now, 0.35, 0.22, gain, false);
   }
 
   private stopSourcesOnly(): void {
@@ -914,6 +1566,21 @@ export class MultiTrackAudioEngine {
   public dispose(): void {
     this.stop();
     this.stopMetronome();
+    this.channelAnalysers.clear();
+    this.channelGains.clear();
+    this.channelLowEq.clear();
+    this.channelMidEq.clear();
+    this.channelHighEq.clear();
+    this.channelPanners.clear();
+    this.channelReverbSends.clear();
+    this.channelDelaySends.clear();
+    this.reverbSendBus = null;
+    this.reverbReturnGain = null;
+    this.delaySendBus = null;
+    this.delayReturnGain = null;
+    this.delayLeftNode = null;
+    this.delayRightNode = null;
+    this.hallImpulseBuffer = null;
     if (this.ctx) {
       void this.ctx.close();
       this.ctx = null;

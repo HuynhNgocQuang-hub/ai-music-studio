@@ -3,21 +3,26 @@ import { useNavigate } from 'react-router-dom';
 import {
   ChevronLeft,
   ChevronRight,
+  Copy,
   Database,
   FolderOpen,
   HardDrive,
   Loader2,
-  RotateCcw,
+  Plus,
   Search,
+  SlidersHorizontal,
   Trash2,
   Upload,
 } from 'lucide-react';
 import {
   ApiError,
+  deleteProject,
   getProject,
   importAimusic,
   listProjects,
+  syncProject,
 } from '@/lib/api/client';
+import { buildProjectFromTemplate, DAW_TEMPLATES } from '@/lib/music/presets';
 import {
   clearAllDrafts,
   deleteDraft,
@@ -58,6 +63,7 @@ export default function LibraryPage() {
     totalBytes: 0,
   });
   const [importing, setImporting] = useState(false);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
 
   const refreshLocalDrafts = useCallback(async () => {
     try {
@@ -82,7 +88,7 @@ export default function LibraryPage() {
       setRemoteError(
         err instanceof ApiError
           ? err.detail
-          : 'Backend Redis chưa trực tuyến — đang hiển thị bản nháp IndexedDB cục bộ.'
+          : 'Backend ngoại tuyến — đang hiển thị các session lưu cục bộ.'
       );
     } finally {
       setLoadingRemote(false);
@@ -126,6 +132,44 @@ export default function LibraryPage() {
     await refreshLocalDrafts();
   };
 
+  const handleNewBlankSession = () => {
+    const blankTpl = DAW_TEMPLATES.find((t) => t.id === 'blank_session') ?? DAW_TEMPLATES[0];
+    const fresh = buildProjectFromTemplate(blankTpl);
+    loadProjectIntoSession(fresh, { dirty: true });
+    navigate(`/studio/${encodeURIComponent(fresh.project_id)}`);
+  };
+
+  const handleDeleteRemoteProject = async (projectId: string) => {
+    setConfirmDeleteKey(null);
+    try {
+      await deleteProject(projectId);
+      await deleteDraft(projectId).catch(() => {});
+      await Promise.all([fetchRemoteProjects(), refreshLocalDrafts()]);
+    } catch (err) {
+      setRemoteError(err instanceof ApiError ? err.detail : 'Không thể xóa session trên máy chủ.');
+    }
+  };
+
+  const handleDuplicateRemoteProject = async (projectId: string) => {
+    try {
+      const src = await getProject(projectId);
+      const copyId = `proj_${Date.now()}`;
+      const copyTitle = `${src.title || src.project_id} (Copy)`;
+      const dup = {
+        ...src,
+        project_id: copyId,
+        title: copyTitle,
+        version: 1,
+        config: { ...src.config, title: copyTitle },
+      };
+      const saved = await syncProject(copyId, dup).catch(() => dup);
+      loadProjectIntoSession(saved, { dirty: true });
+      navigate(`/studio/${encodeURIComponent(saved.project_id)}`);
+    } catch (err) {
+      setRemoteError(err instanceof ApiError ? err.detail : 'Không thể nhân bản session.');
+    }
+  };
+
   const filteredDrafts = drafts.filter((d) => {
     if (sourceFilter === 'saved') return false;
     const matchesSearch =
@@ -136,33 +180,40 @@ export default function LibraryPage() {
     return matchesSearch && matchesGenre;
   });
 
-  const visibleRemoteItems =
-    sourceFilter === 'draft' ? [] : remoteItems;
-
-  const latestDraft = drafts[0] ?? null;
+  const visibleRemoteItems = sourceFilter === 'draft' ? [] : remoteItems;
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white">Thư viện Dự án & Bản nháp</h1>
+          <h1 className="font-display text-2xl font-bold text-white">Kho Session &amp; Dự án</h1>
           <p className="text-xs text-slate-400">
-            Quản lý dự án Redis, khôi phục bản nháp Auto-Save (IndexedDB) và mở file `.aimusic`.
+            Quản lý session cục bộ, bản phối đã đồng bộ và mở trực tiếp gói dự án{' '}
+            <code>.aimusic</code> vào Phòng thu.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-[#121622] px-3 py-2 text-xs text-slate-300">
-            <HardDrive className="h-4 w-4 text-amber-400" />
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleNewBlankSession}
+            className="flex items-center gap-1.5 rounded border border-white/15 bg-[#1b1e25] px-3.5 py-1.5 text-xs font-bold text-white transition hover:border-amber-400/60 hover:bg-[#232732]"
+          >
+            <Plus className="h-3.5 w-3.5 text-amber-400" />
+            <span>Tạo Session mới</span>
+          </button>
+
+          <div className="flex items-center gap-2 rounded border border-white/10 bg-[#181b22] px-3 py-1.5 text-xs text-slate-300">
+            <HardDrive className="h-3.5 w-3.5 text-amber-400" />
             <span>
-              IndexedDB: <strong>{storageInfo.draftsCount}/5</strong> nháp (
-              {formatBytes(storageInfo.totalBytes)})
+              Local: <strong>{storageInfo.draftsCount}/5</strong> ({formatBytes(storageInfo.totalBytes)})
             </span>
             {storageInfo.draftsCount > 0 && (
               <button
                 type="button"
                 onClick={() => void handleClearDrafts()}
-                title="Dọn toàn bộ bản nháp cũ"
+                aria-label="Xóa toàn bộ bản nháp cục bộ"
+                title="Xóa toàn bộ bản nháp"
                 className="ml-1 rounded p-1 text-rose-400 hover:bg-rose-500/20"
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -170,13 +221,18 @@ export default function LibraryPage() {
             )}
           </div>
 
-          <label className="flex cursor-pointer items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500">
-            <Upload className="h-4 w-4" />
+          <label
+            htmlFor="library-import-aimusic"
+            className="flex cursor-pointer items-center gap-2 rounded bg-amber-500 px-4 py-1.5 text-xs font-bold text-slate-950 transition hover:bg-amber-400"
+          >
+            <Upload className="h-3.5 w-3.5" />
             <span>{importing ? 'Đang mở...' : 'Import .aimusic'}</span>
             <input
+              id="library-import-aimusic"
+              name="aimusicFile"
               type="file"
               accept=".aimusic,.zip"
-              className="hidden"
+              className="sr-only"
               onChange={(e) => {
                 const f = e.target.files?.[0];
                 if (f) void handleImportAimusic(f);
@@ -186,86 +242,75 @@ export default function LibraryPage() {
         </div>
       </div>
 
-      {/* Pinned Latest Draft Recovery Card */}
-      {latestDraft && (
-        <section className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4">
-          <div className="flex items-center gap-3">
-            <RotateCcw className="h-5 w-5 text-amber-400" />
-            <div>
-              <p className="text-sm font-semibold text-white">
-                Khôi phục phiên làm việc gần nhất:{' '}
-                <span className="text-amber-300">
-                  {latestDraft.state.title || latestDraft.project_id}
-                </span>
-              </p>
-              <p className="text-xs text-amber-200/80">
-                {latestDraft.state.config.genre} • {latestDraft.state.analysis.bpm} BPM • Cập nhật{' '}
-                {new Date(latestDraft.updated_at).toLocaleString()}
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              acceptRestoreDraft(latestDraft);
-              navigate(`/studio/${encodeURIComponent(latestDraft.project_id)}`);
-            }}
-            className="rounded-xl bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400"
-          >
-            Khôi phục vào Studio
-          </button>
-        </section>
-      )}
-
-      {/* Search & Filters Bar */}
-      <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-800 bg-[#121622] p-4">
+      {/* Filters */}
+      <section className="flex flex-wrap items-center gap-2.5 rounded-lg border border-white/10 bg-[#181b22] p-3">
         <div className="relative min-w-[220px] flex-1">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+          <label htmlFor="library-search-input" className="sr-only">
+            Tìm theo tên session
+          </label>
+          <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
           <input
-            type="text"
+            id="library-search-input"
+            name="search"
+            type="search"
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
               setPage(1);
             }}
-            placeholder="Tìm theo tên dự án..."
-            className="w-full rounded-xl border border-slate-700 bg-[#0b0d14] py-2 pl-9 pr-3 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+            placeholder="Tìm tên session hoặc mã project..."
+            className="w-full rounded border border-white/10 bg-[#111317] py-1.5 pl-9 pr-3 text-xs text-white placeholder-slate-500 focus:border-amber-400 focus:outline-none"
           />
         </div>
 
+        <label htmlFor="library-genre-filter" className="sr-only">
+          Thể loại
+        </label>
         <select
+          id="library-genre-filter"
+          name="genreFilter"
           value={genre}
           onChange={(e) => {
             setGenre(e.target.value);
             setPage(1);
           }}
-          className="rounded-xl border border-slate-700 bg-[#0b0d14] px-3 py-2 text-sm text-white"
+          className="rounded border border-white/10 bg-[#111317] px-3 py-1.5 text-xs text-white"
         >
           {GENRES.map((g) => (
             <option key={g || 'all'} value={g}>
-              {g ? `Genre: ${g}` : 'Tất cả Thể loại'}
+              {g ? `Genre: ${g}` : 'Tất cả thể loại'}
             </option>
           ))}
         </select>
 
+        <label htmlFor="library-source-filter" className="sr-only">
+          Nguồn
+        </label>
         <select
+          id="library-source-filter"
+          name="sourceFilter"
           value={sourceFilter}
           onChange={(e) => setSourceFilter(e.target.value as 'all' | 'draft' | 'saved')}
-          className="rounded-xl border border-slate-700 bg-[#0b0d14] px-3 py-2 text-sm text-white"
+          className="rounded border border-white/10 bg-[#111317] px-3 py-1.5 text-xs text-white"
         >
           <option value="all">Tất cả nguồn</option>
-          <option value="draft">Bản nháp Auto-Save (IndexedDB)</option>
-          <option value="saved">Đã lưu (Redis)</option>
+          <option value="draft">Nháp cục bộ</option>
+          <option value="saved">Đã lưu máy chủ</option>
         </select>
 
+        <label htmlFor="library-page-limit" className="sr-only">
+          Số mục mỗi trang
+        </label>
         <select
+          id="library-page-limit"
+          name="pageLimit"
           aria-label="Số mục mỗi trang"
           value={limit}
           onChange={(e) => {
             setLimit(Number(e.target.value) as 12 | 24 | 48);
             setPage(1);
           }}
-          className="rounded-xl border border-slate-700 bg-[#0b0d14] px-3 py-2 text-sm text-white"
+          className="rounded border border-white/10 bg-[#111317] px-3 py-1.5 text-xs text-white"
         >
           <option value={12}>12 mục / trang</option>
           <option value={24}>24 mục / trang</option>
@@ -274,56 +319,78 @@ export default function LibraryPage() {
       </section>
 
       {remoteError && (
-        <div className="rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-2.5 text-xs text-slate-300">
+        <div className="rounded border border-white/10 bg-[#181b22] px-3.5 py-2 text-xs text-slate-300">
           {remoteError}
         </div>
       )}
 
-      {/* Local IndexedDB Drafts */}
+      {/* Local Drafts */}
       {filteredDrafts.length > 0 && (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-slate-300">
-            Bản nháp Auto-Save trong IndexedDB ({filteredDrafts.length})
+        <section className="space-y-2.5">
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+            Local Sessions ({filteredDrafts.length})
           </h2>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {filteredDrafts.map((d) => (
               <div
                 key={d.project_id}
-                className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-[#121622] p-4"
+                className="flex flex-col justify-between rounded-lg border border-white/10 bg-[#181b22] p-3.5"
               >
                 <div>
                   <div className="flex items-center justify-between gap-2">
-                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
-                      Auto-Save Draft
+                    <span className="rounded bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                      Local Draft
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => void deleteDraft(d.project_id).then(refreshLocalDrafts)}
-                      className="text-slate-500 hover:text-rose-400"
-                      title="Xóa bản nháp"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    {confirmDeleteKey === `draft:${d.project_id}` ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDeleteKey(null);
+                            void deleteDraft(d.project_id).then(refreshLocalDrafts);
+                          }}
+                          className="rounded bg-rose-500 px-1.5 py-0.5 text-[10px] font-bold text-white hover:bg-rose-400"
+                        >
+                          Xóa
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteKey(null)}
+                          className="rounded border border-white/15 px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-white/10"
+                        >
+                          Hủy
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteKey(`draft:${d.project_id}`)}
+                        aria-label={`Xóa ${d.state.title || d.project_id}`}
+                        className="text-slate-500 hover:text-rose-400"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
-                  <h3 className="mt-2 truncate text-base font-semibold text-white">
+                  <h3 className="mt-2 truncate text-sm font-bold text-white">
                     {d.state.title || d.project_id}
                   </h3>
-                  <p className="mt-1 text-xs text-slate-400">
+                  <p className="mt-0.5 text-xs text-slate-400 tabular-nums">
                     {d.state.config.genre} • {d.state.analysis.bpm} BPM • {d.state.analysis.detected_key}{' '}
                     {d.state.analysis.detected_scale}
                   </p>
                 </div>
-                <div className="mt-4 flex items-center justify-between border-t border-slate-800 pt-3 text-xs">
-                  <span className="text-slate-500">{formatBytes(d.size_bytes)}</span>
+                <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-xs">
+                  <span className="text-[11px] text-slate-500">{formatBytes(d.size_bytes)}</span>
                   <button
                     type="button"
                     onClick={() => {
                       acceptRestoreDraft(d);
                       navigate(`/studio/${encodeURIComponent(d.project_id)}`);
                     }}
-                    className="rounded-lg bg-indigo-600/20 px-3 py-1 font-medium text-indigo-300 hover:bg-indigo-600/30"
+                    className="inline-flex items-center gap-1 rounded bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-amber-500 hover:text-slate-950"
                   >
-                    Mở trong Studio
+                    <SlidersHorizontal className="h-3 w-3" /> Mở DAW
                   </button>
                 </div>
               </div>
@@ -332,50 +399,91 @@ export default function LibraryPage() {
         </section>
       )}
 
-      {/* Remote Redis Projects with Pagination */}
-      <section className="space-y-3">
+      {/* Server Saved Projects */}
+      <section className="space-y-2.5">
         <div className="flex items-center justify-between">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-300">
-            <Database className="h-4 w-4 text-indigo-400" />
-            <span>Dự án trên Redis ({totalRemote})</span>
+          <h2 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-400">
+            <Database className="h-3.5 w-3.5 text-sky-400" />
+            <span>Saved Sessions ({totalRemote})</span>
           </h2>
-          {loadingRemote && <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />}
+          {loadingRemote && <Loader2 className="h-4 w-4 animate-spin text-amber-400" />}
         </div>
 
         {visibleRemoteItems.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-800 bg-[#121622] py-12 text-center">
-            <FolderOpen className="h-8 w-8 text-slate-600" />
-            <p className="mt-2 text-sm text-slate-400">Chưa có dự án nào phù hợp bộ lọc trên Redis.</p>
+          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-white/10 bg-[#16191f] py-10 text-center">
+            <FolderOpen className="h-7 w-7 text-slate-600" />
+            <p className="mt-2 text-xs text-slate-400">Chưa có session phù hợp bộ lọc.</p>
           </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {visibleRemoteItems.map((item) => (
               <div
                 key={item.project_id}
-                className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-[#121622] p-4"
+                className="flex flex-col justify-between rounded-lg border border-white/10 bg-[#181b22] p-3.5"
               >
                 <div>
-                  <span className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
-                    Redis Saved
-                  </span>
-                  <h3 className="mt-2 truncate text-base font-semibold text-white">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-300">
+                      Saved
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void handleDuplicateRemoteProject(item.project_id)}
+                        aria-label={`Nhân bản ${item.title || item.project_id}`}
+                        title="Nhân bản thành session mới"
+                        className="rounded p-1 text-slate-400 hover:bg-white/10 hover:text-sky-300"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                      {confirmDeleteKey === `remote:${item.project_id}` ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteRemoteProject(item.project_id)}
+                            className="rounded bg-rose-500 px-1.5 py-0.5 text-[10px] font-bold text-white hover:bg-rose-400"
+                          >
+                            Xóa
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteKey(null)}
+                            className="rounded border border-white/15 px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-white/10"
+                          >
+                            Hủy
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteKey(`remote:${item.project_id}`)}
+                          aria-label={`Xóa session ${item.title || item.project_id}`}
+                          title="Xóa session khỏi máy chủ"
+                          className="rounded p-1 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <h3 className="mt-2 truncate text-sm font-bold text-white">
                     {item.title || item.project_id}
                   </h3>
-                  <p className="mt-1 text-xs text-slate-400">
+                  <p className="mt-0.5 text-xs text-slate-400 tabular-nums">
                     {item.genre || 'Pop'} • {item.bpm || 100} BPM • {item.key || 'C'}{' '}
                     {item.scale || 'major'}
                   </p>
                 </div>
-                <div className="mt-4 flex items-center justify-between border-t border-slate-800 pt-3 text-xs">
-                  <span className="text-slate-500">
+                <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-xs">
+                  <span className="text-[11px] text-slate-500">
                     {item.updated_at ? new Date(item.updated_at).toLocaleDateString() : '—'}
                   </span>
                   <button
                     type="button"
                     onClick={() => void handleOpenRemoteProject(item.project_id)}
-                    className="rounded-lg bg-emerald-600/20 px-3 py-1 font-medium text-emerald-300 hover:bg-emerald-600/30"
+                    className="inline-flex items-center gap-1 rounded bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-amber-500 hover:text-slate-950"
                   >
-                    Mở Studio
+                    <SlidersHorizontal className="h-3 w-3" /> Mở DAW
                   </button>
                 </div>
               </div>
@@ -383,7 +491,6 @@ export default function LibraryPage() {
           </div>
         )}
 
-        {/* Pagination Controls */}
         <div className="flex items-center justify-between pt-2 text-xs text-slate-400">
           <span>
             Trang {page} / {totalPages}
@@ -393,7 +500,7 @@ export default function LibraryPage() {
               type="button"
               disabled={page <= 1}
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+              className="flex items-center gap-1 rounded border border-white/15 px-3 py-1 text-slate-200 hover:bg-white/10 disabled:opacity-40"
             >
               <ChevronLeft className="h-3.5 w-3.5" /> Trước
             </button>
@@ -401,7 +508,7 @@ export default function LibraryPage() {
               type="button"
               disabled={page >= totalPages}
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              className="flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+              className="flex items-center gap-1 rounded border border-white/15 px-3 py-1 text-slate-200 hover:bg-white/10 disabled:opacity-40"
             >
               Sau <ChevronRight className="h-3.5 w-3.5" />
             </button>

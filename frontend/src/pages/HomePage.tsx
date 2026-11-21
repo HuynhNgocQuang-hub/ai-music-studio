@@ -1,154 +1,286 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
+  Clock,
+  Disc3,
   FolderOpen,
-  Mic2,
-  Music4,
-  RotateCcw,
-  Settings,
-  Sliders,
+  Mic,
+  Play,
+  SlidersHorizontal,
   Sparkles,
-  Wand2,
+  Trash2,
 } from 'lucide-react';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
-import { listDrafts, type StoredDraft } from '@/lib/storage/indexeddb';
+import { deleteProject, getProject, listProjects } from '@/lib/api/client';
+import { DAW_TEMPLATES, buildProjectFromTemplate, type DAWStarterTemplate } from '@/lib/music/presets';
+import { deleteDraft, listDrafts, type StoredDraft } from '@/lib/storage/indexeddb';
+import type { ProjectState, ProjectSummary } from '@/types/project';
+
+interface SessionEntry {
+  project_id: string;
+  title: string;
+  genre: string;
+  bpm: number;
+  key: string;
+  scale: string;
+  updated_at?: string;
+  isDraft: boolean;
+  fullState?: ProjectState;
+}
 
 export default function HomePage() {
   const navigate = useNavigate();
-  const { project, acceptRestoreDraft } = useProjectSession();
+  const { project, loadProjectIntoSession, acceptRestoreDraft } = useProjectSession();
+
   const [recentDrafts, setRecentDrafts] = useState<StoredDraft[]>([]);
+  const [remoteItems, setRemoteItems] = useState<ProjectSummary[]>([]);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   useEffect(() => {
-    void listDrafts().then(setRecentDrafts).catch(() => {});
+    void listDrafts().then(setRecentDrafts).catch(() => { });
+    void listProjects({ page: 1, limit: 8 })
+      .then((res) => setRemoteItems(res.items || []))
+      .catch(() => { });
   }, []);
 
+  const sessions = useMemo<SessionEntry[]>(() => {
+    const map = new Map<string, SessionEntry>();
+    for (const d of recentDrafts) {
+      map.set(d.project_id, {
+        project_id: d.project_id,
+        title: d.state.title || 'Untitled Session',
+        genre: d.state.config.genre || 'Pop',
+        bpm: d.state.analysis.bpm || 100,
+        key: d.state.analysis.detected_key || 'C',
+        scale: d.state.analysis.detected_scale || 'major',
+        updated_at: d.updated_at,
+        isDraft: true,
+        fullState: d.state,
+      });
+    }
+    for (const r of remoteItems) {
+      if (!map.has(r.project_id)) {
+        map.set(r.project_id, {
+          project_id: r.project_id,
+          title: r.title || r.project_id,
+          genre: r.genre || 'Pop',
+          bpm: r.bpm || 100,
+          key: r.key || 'C',
+          scale: r.scale || 'major',
+          updated_at: r.updated_at,
+          isDraft: r.source === 'draft',
+        });
+      }
+    }
+    return Array.from(map.values()).slice(0, 8);
+  }, [recentDrafts, remoteItems]);
+
+  const handleLaunchTemplate = (tpl: DAWStarterTemplate) => {
+    const state = buildProjectFromTemplate(tpl);
+    loadProjectIntoSession(state, { dirty: true });
+    navigate(`/studio/${encodeURIComponent(state.project_id)}`);
+  };
+
+  const handleOpenSession = async (item: SessionEntry) => {
+    if (item.fullState) {
+      const draft = recentDrafts.find((d) => d.project_id === item.project_id);
+      if (draft) {
+        acceptRestoreDraft(draft);
+      } else {
+        loadProjectIntoSession(item.fullState, { dirty: false });
+      }
+      navigate(`/studio/${encodeURIComponent(item.project_id)}`);
+      return;
+    }
+    try {
+      const remote = await getProject(item.project_id);
+      loadProjectIntoSession(remote, { dirty: false });
+    } catch {
+      // ignore if offline
+    }
+    navigate(`/studio/${encodeURIComponent(item.project_id)}`);
+  };
+
+  const handleDeleteSession = async (item: SessionEntry) => {
+    setConfirmDeleteId(null);
+    await deleteDraft(item.project_id).catch(() => {});
+    await deleteProject(item.project_id).catch(() => {});
+    setRecentDrafts((prev) => prev.filter((d) => d.project_id !== item.project_id));
+    setRemoteItems((prev) => prev.filter((r) => r.project_id !== item.project_id));
+  };
+
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      {/* Hero */}
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-[#141a2e] via-[#101526] to-[#0d121d] p-6 md:p-10">
-        <div className="max-w-2xl space-y-4">
-          <div className="inline-flex items-center gap-2 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-300">
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>Phase 1 MVP • Dual LLM Multi-Agent + DSP</span>
+    <div className="mx-auto max-w-6xl space-y-7">
+      {/* Logic Pro / Ableton Project Chooser Header */}
+      <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-white/10 bg-[#181b22] p-6">
+        <div className="space-y-1.5">
+          <div className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-amber-400">
+            <Disc3 className="h-3.5 w-3.5" />
+            <span>Production Workstation</span>
           </div>
-          <h1 className="text-3xl font-bold tracking-tight text-white md:text-4xl">
-            Biến đoạn ngân nga thành bản phối hoàn chỉnh
+          <h1 className="font-display text-2xl font-extrabold tracking-tight text-white md:text-3xl">
+            Bắt đầu Session Làm nhạc Mới
           </h1>
-          <p className="text-sm leading-relaxed text-slate-300 md:text-base">
-            Thu âm hoặc tải giọng hát mộc, lọc ồn AI Denoise, chỉnh phô Auto-Tune, phối khí đa
-            track bằng Multi-Agent (Gemini / OpenAI) và tinh chỉnh trong Hybrid Studio với
-            Auto-Save chống mất bài.
+          <p className="max-w-2xl text-xs text-slate-400 md:text-sm">
+            Chọn nhanh một bộ Starter Kit bên dưới để vào ngay Phòng thu DAW (Step Sequencer, Piano
+            Roll, Console Mixer), hoặc thu âm giọng ngân nga để AI tự phối khí.
           </p>
-          <div className="flex flex-wrap gap-3 pt-2">
-            <Link
-              to="/create"
-              className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:bg-indigo-500"
-            >
-              <Mic2 className="h-4 w-4" />
-              <span>Bắt đầu tạo nhạc mới</span>
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-            <Link
-              to={`/studio/${encodeURIComponent(project.project_id)}`}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800/70 px-5 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
-            >
-              <Sliders className="h-4 w-4 text-emerald-400" />
-              <span>Mở Phòng thu Studio</span>
-            </Link>
-          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Link
+            to="/create"
+            className="inline-flex items-center gap-2 rounded-lg border border-sky-400/40 bg-sky-500/15 px-4 py-2.5 text-xs font-bold text-sky-200 transition hover:bg-sky-500/25"
+          >
+            <Mic className="h-4 w-4" />
+            <span>AI Hum-to-Music</span>
+          </Link>
+          <Link
+            to={`/studio/${encodeURIComponent(project.project_id)}`}
+            className="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-5 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-amber-400"
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            <span>Mở Studio hiện tại</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
         </div>
       </section>
 
-      {/* Quick Navigation Cards */}
-      <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Link
-          to="/create"
-          className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-indigo-500/50"
-        >
-          <Wand2 className="h-6 w-6 text-indigo-400" />
-          <h2 className="mt-3 text-base font-semibold text-white">1. Wizard Tạo nhạc</h2>
-          <p className="mt-1 text-xs text-slate-400">
-            4 bước: Input & Dry Check → Analyze & Auto-Tune → Style & AI Generate → Quick Preview.
-          </p>
-        </Link>
+      {/* Instant 1-Click DAW Templates Grid */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-sm font-bold uppercase tracking-wider text-slate-300">
+            1. Starter Templates (Mở thẳng vào Studio với Drums, Bass &amp; Hợp âm sẵn)
+          </h2>
+        </div>
 
-        <Link
-          to={`/studio/${encodeURIComponent(project.project_id)}`}
-          className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-emerald-500/50"
-        >
-          <Music4 className="h-6 w-6 text-emerald-400" />
-          <h2 className="mt-3 text-base font-semibold text-white">2. Hybrid Studio</h2>
-          <p className="mt-1 text-xs text-slate-400">
-            Transport Bar, Multi-Track Mixer (M/S/Lock/Vol/Pan), Auto-Tune Pro, Lyrics & AI Coach.
-          </p>
-        </Link>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {DAW_TEMPLATES.map((tpl) => (
+            <button
+              key={tpl.id}
+              type="button"
+              onClick={() => handleLaunchTemplate(tpl)}
+              className="group flex flex-col justify-between rounded-lg border border-white/10 bg-[#181b22] p-4 text-left transition hover:border-amber-400/60 hover:bg-[#1f232c]"
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span
+                    className={`rounded border px-2 py-0.5 text-[10px] font-bold uppercase ${tpl.accentColor}`}
+                  >
+                    {tpl.genre}
+                  </span>
+                  <span className="font-mono text-[11px] font-semibold tabular-nums text-slate-400">
+                    {tpl.bpm} BPM • {tpl.key} {tpl.scale}
+                  </span>
+                </div>
+                <h3 className="mt-2.5 text-base font-bold text-white group-hover:text-amber-300">
+                  {tpl.name}
+                </h3>
+                <p className="mt-1 text-xs text-slate-400">{tpl.subtitle}</p>
+              </div>
 
-        <Link
-          to="/library"
-          className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-amber-500/50"
-        >
-          <FolderOpen className="h-6 w-6 text-amber-400" />
-          <h2 className="mt-3 text-base font-semibold text-white">3. Thư viện & Bản nháp</h2>
-          <p className="mt-1 text-xs text-slate-400">
-            Tìm kiếm, phân trang 12/24/48, khôi phục bản nháp IndexedDB & import file `.aimusic`.
-          </p>
-        </Link>
-
-        <Link
-          to="/settings"
-          className="group rounded-2xl border border-slate-800 bg-[#121622] p-5 transition hover:border-sky-500/50"
-        >
-          <Settings className="h-6 w-6 text-sky-400" />
-          <h2 className="mt-3 text-base font-semibold text-white">4. Cài đặt & Sức khỏe</h2>
-          <p className="mt-1 text-xs text-slate-400">
-            Cấu hình Gemini / OpenAI API Key, phân vai Agent và kiểm tra Spring Boot / Redis / SoundFont.
-          </p>
-        </Link>
+              <div className="mt-4 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-[11px]">
+                <span className="font-mono text-slate-400">{tpl.chords.join(' – ')}</span>
+                <span className="inline-flex items-center gap-1 font-bold text-amber-400">
+                  <Play className="h-3 w-3 fill-current" /> Khởi tạo
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
       </section>
 
-      {/* Recent IndexedDB Drafts */}
-      {recentDrafts.length > 0 && (
-        <section className="rounded-2xl border border-slate-800 bg-[#121622] p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
-              <RotateCcw className="h-4 w-4 text-amber-400" />
-              <span>Bản nháp gần đây (IndexedDB Rolling Cap: tối đa 5)</span>
-            </h3>
-            <Link to="/library" className="text-xs text-indigo-400 hover:underline">
-              Xem tất cả →
+      {/* Recent Sessions Table */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-sm font-bold uppercase tracking-wider text-slate-300">
+            2. Recent Sessions ({sessions.length})
+          </h2>
+          <Link
+            to="/library"
+            className="inline-flex items-center gap-1 text-xs font-semibold text-sky-400 hover:underline"
+          >
+            <FolderOpen className="h-3.5 w-3.5" /> Mở Kho Session (.aimusic)
+          </Link>
+        </div>
+
+        {sessions.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-white/10 bg-[#16191f] py-10 text-center text-xs text-slate-400">
+            Chưa có session nào. Hãy chọn một Starter Template phía trên hoặc mở{' '}
+            <Link to="/create" className="text-amber-400 underline">
+              AI Hum-to-Music
             </Link>
+            .
           </div>
-          <div className="grid gap-3 md:grid-cols-3">
-            {recentDrafts.slice(0, 3).map((d) => (
-              <div
-                key={d.project_id}
-                className="flex items-center justify-between rounded-xl border border-slate-800 bg-[#171c2b] p-3"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-white">
-                    {d.state.title || d.project_id}
-                  </p>
-                  <p className="text-xs text-slate-400">
-                    {d.state.config.genre} • {d.state.analysis.bpm} BPM •{' '}
-                    {d.state.analysis.detected_key} {d.state.analysis.detected_scale}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    acceptRestoreDraft(d);
-                    navigate(`/studio/${encodeURIComponent(d.project_id)}`);
-                  }}
-                  className="shrink-0 rounded-lg bg-indigo-600/20 px-2.5 py-1 text-xs font-medium text-indigo-300 hover:bg-indigo-600/30"
+        ) : (
+          <div className="overflow-hidden rounded-lg border border-white/10 bg-[#16191f]">
+            <div className="divide-y divide-white/[0.06]">
+              {sessions.map((item) => (
+                <div
+                  key={item.project_id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 transition hover:bg-white/[0.04]"
                 >
-                  Mở
-                </button>
-              </div>
-            ))}
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                    <Sparkles className="h-4 w-4 shrink-0 text-amber-400" />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-white">{item.title}</p>
+                      <p className="text-[11px] text-slate-400 tabular-nums">
+                        {item.genre} • {item.bpm} BPM • {item.key} {item.scale}
+                        {item.isDraft ? ' • Nháp cục bộ' : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    {item.updated_at && (
+                      <span className="hidden items-center gap-1 text-[11px] text-slate-500 sm:inline-flex">
+                        <Clock className="h-3 w-3" />
+                        {new Date(item.updated_at).toLocaleDateString()}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenSession(item)}
+                      className="rounded border border-white/15 bg-[#232730] px-3 py-1 text-xs font-semibold text-white transition hover:border-amber-400 hover:bg-amber-500 hover:text-slate-950"
+                    >
+                      Mở trong Studio
+                    </button>
+                    {confirmDeleteId === item.project_id ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteSession(item)}
+                          className="rounded bg-rose-500 px-2 py-0.5 text-[11px] font-bold text-white hover:bg-rose-400"
+                        >
+                          Xác nhận
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="rounded border border-white/15 px-2 py-0.5 text-[11px] text-slate-300 hover:bg-white/10"
+                        >
+                          Hủy
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(item.project_id)}
+                        aria-label={`Xóa session ${item.title}`}
+                        title="Xóa session"
+                        className="rounded p-1.5 text-slate-500 transition hover:bg-rose-500/20 hover:text-rose-300"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
-        </section>
-      )}
+        )}
+      </section>
     </div>
   );
 }

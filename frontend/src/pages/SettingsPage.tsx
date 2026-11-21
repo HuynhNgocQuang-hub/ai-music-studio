@@ -20,9 +20,10 @@ import {
   DEFAULT_LLM_SETTINGS,
   loadStudioSettings,
   saveStudioSettings,
+  testLlmConnection,
 } from '@/lib/api/client';
 import { clearAllDrafts, getStorageUsageBytes } from '@/lib/storage/indexeddb';
-import type { HealthResponse, LLMProvider, StudioLLMSettings } from '@/types/project';
+import type { HealthResponse, LLMProvider, LlmTestResponse, StudioLLMSettings } from '@/types/project';
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<StudioLLMSettings>(DEFAULT_LLM_SETTINGS);
@@ -34,6 +35,8 @@ export default function SettingsPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [testingLlm, setTestingLlm] = useState(false);
+  const [llmTestResult, setLlmTestResult] = useState<LlmTestResponse | null>(null);
   const [storageInfo, setStorageInfo] = useState({ draftsCount: 0, totalBytes: 0 });
 
   const refreshHealth = useCallback(async () => {
@@ -92,28 +95,47 @@ export default function SettingsPage() {
     setTimeout(() => setCacheNotice(null), 3000);
   };
 
+  const handleTestLlm = async () => {
+    saveStudioSettings(settings);
+    setTestingLlm(true);
+    setLlmTestResult(null);
+    try {
+      const res = await testLlmConnection();
+      setLlmTestResult(res);
+      void refreshHealth();
+    } catch (err) {
+      setLlmTestResult({
+        ok: false,
+        provider: settings.defaultProvider,
+        message: err instanceof Error ? err.message : 'Không thể kết nối Backend để kiểm tra API Key.',
+      });
+    } finally {
+      setTestingLlm(false);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white">Cài đặt Dual LLM & Sức khỏe Hệ thống</h1>
+        <h1 className="font-display text-2xl font-bold text-white">Cài đặt &amp; Hệ thống</h1>
         <p className="text-xs text-slate-400">
-          Cấu hình Gemini API Key, OpenAI API Key, phân vai Agent và kiểm tra kết nối Spring Boot /
-          Redis / FluidSynth.
+          Cấu hình Gemini / OpenAI API Key, phân vai Multi-Agent và kiểm tra trạng thái Spring Boot,
+          Redis, FluidSynth Audio Worker.
         </p>
       </div>
 
       {/* Infrastructure Health Card */}
-      <section className="rounded-2xl border border-slate-800 bg-[#121622] p-5 space-y-4">
+      <section className="space-y-4 rounded-2xl border border-white/[0.08] bg-[#16191f] p-5">
         <div className="flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
             <Activity className="h-4 w-4 text-emerald-400" />
-            <span>Trạng thái Hạ tầng Local (Docker + Node)</span>
+            <span>Trạng thái Hạ tầng Local (Docker + Spring Boot)</span>
           </h2>
           <button
             type="button"
             disabled={checkingHealth}
             onClick={() => void refreshHealth()}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800"
+            className="flex items-center gap-1.5 rounded-full border border-white/10 px-3.5 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/10"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${checkingHealth ? 'animate-spin' : ''}`} />
             <span>Kiểm tra lại</span>
@@ -127,8 +149,8 @@ export default function SettingsPage() {
           </div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-3.5">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-xl border border-white/[0.08] bg-[#1b1e25] p-3.5">
             <div className="flex items-center justify-between text-xs text-slate-400">
               <span className="flex items-center gap-1.5">
                 <Server className="h-3.5 w-3.5" /> Backend Spring Boot
@@ -144,7 +166,7 @@ export default function SettingsPage() {
             </p>
           </div>
 
-          <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-3.5">
+          <div className="rounded-xl border border-white/[0.08] bg-[#1b1e25] p-3.5">
             <div className="flex items-center justify-between text-xs text-slate-400">
               <span className="flex items-center gap-1.5">
                 <Database className="h-3.5 w-3.5" /> Redis State
@@ -164,7 +186,7 @@ export default function SettingsPage() {
             </p>
           </div>
 
-          <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-3.5">
+          <div className="rounded-xl border border-white/[0.08] bg-[#1b1e25] p-3.5">
             <div className="flex items-center justify-between text-xs text-slate-400">
               <span className="flex items-center gap-1.5">
                 <Cpu className="h-3.5 w-3.5" /> FluidSynth / DSP
@@ -185,43 +207,75 @@ export default function SettingsPage() {
                 : 'Unknown'}
             </p>
           </div>
+
+          <div className="rounded-xl border border-white/[0.08] bg-[#1b1e25] p-3.5">
+            <div className="flex items-center justify-between text-xs text-slate-400">
+              <span className="flex items-center gap-1.5">
+                <KeyRound className="h-3.5 w-3.5" /> LLM AI Provider
+              </span>
+              {health?.llm_providers?.gemini_configured || health?.llm_providers?.openai_configured ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+              ) : (
+                <Activity className="h-4 w-4 text-amber-400" />
+              )}
+            </div>
+            <p className="mt-1.5 text-sm font-semibold text-white">
+              {health?.llm_providers?.gemini_configured
+                ? 'Gemini Key Ready'
+                : health?.llm_providers?.openai_configured
+                ? 'OpenAI Key Ready'
+                : 'Mock Fallback Mode'}
+            </p>
+          </div>
         </div>
       </section>
 
       {/* Dual LLM API Key Form */}
       <form
         onSubmit={handleSave}
-        className="space-y-5 rounded-2xl border border-slate-800 bg-[#121622] p-5"
+        autoComplete="off"
+        className="space-y-5 rounded-2xl border border-white/[0.08] bg-[#16191f] p-5"
       >
         <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
-          <KeyRound className="h-4 w-4 text-indigo-400" />
-          <span>Dual LLM API Keys & Phân vai Multi-Agent</span>
+          <KeyRound className="h-4 w-4 text-amber-400" />
+          <span>Dual LLM API Keys &amp; Phân vai Multi-Agent</span>
         </h2>
 
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-300">
+            <label
+              htmlFor="settings-backend-url"
+              className="mb-1.5 block text-xs font-medium text-slate-300"
+            >
               Backend Spring Boot URL
             </label>
             <input
+              id="settings-backend-url"
+              name="backendUrl"
               type="url"
+              autoComplete="url"
               value={settings.backendUrl}
               onChange={(e) => setSettings((s) => ({ ...s, backendUrl: e.target.value }))}
               placeholder="http://localhost:8000"
-              className="w-full rounded-xl border border-slate-700 bg-[#0b0d14] px-3 py-2 text-sm text-white"
+              className="w-full rounded-xl border border-white/10 bg-[#0b0d11] px-3 py-2 text-sm text-white focus:border-amber-400 focus:outline-none"
             />
           </div>
 
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-300">
+            <label
+              htmlFor="settings-default-provider"
+              className="mb-1.5 block text-xs font-medium text-slate-300"
+            >
               Provider Mặc định (khi không truyền Key dùng Mock)
             </label>
             <select
+              id="settings-default-provider"
+              name="defaultProvider"
               value={settings.defaultProvider}
               onChange={(e) =>
                 setSettings((s) => ({ ...s, defaultProvider: e.target.value as LLMProvider }))
               }
-              className="w-full rounded-xl border border-slate-700 bg-[#0b0d14] px-3 py-2 text-sm text-white"
+              className="w-full rounded-xl border border-white/10 bg-[#0b0d11] px-3 py-2 text-sm text-white focus:border-amber-400 focus:outline-none"
             >
               <option value="gemini">Google Gemini API</option>
               <option value="openai">OpenAI API</option>
@@ -232,21 +286,28 @@ export default function SettingsPage() {
 
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-300">
+            <label
+              htmlFor="settings-gemini-key"
+              className="mb-1.5 block text-xs font-medium text-slate-300"
+            >
               Gemini API Key (Google AI Studio)
             </label>
             <div className="relative">
               <input
+                id="settings-gemini-key"
+                name="geminiApiKey"
                 type={showGemini ? 'text' : 'password'}
+                autoComplete="off"
                 value={settings.geminiApiKey}
                 onChange={(e) => setSettings((s) => ({ ...s, geminiApiKey: e.target.value }))}
-                placeholder="AIza..."
-                className="w-full rounded-xl border border-slate-700 bg-[#0b0d14] py-2 pl-3 pr-10 text-sm text-white"
+                placeholder="AQ... hoặc AIza..."
+                className="w-full rounded-xl border border-white/10 bg-[#0b0d11] py-2 pl-3 pr-10 text-sm text-white focus:border-amber-400 focus:outline-none"
               />
               <button
                 type="button"
+                aria-label={showGemini ? 'Ẩn Gemini API Key' : 'Hiện Gemini API Key'}
                 onClick={() => setShowGemini((v) => !v)}
-                className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
+                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-white"
               >
                 {showGemini ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
@@ -254,21 +315,28 @@ export default function SettingsPage() {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-300">
+            <label
+              htmlFor="settings-openai-key"
+              className="mb-1.5 block text-xs font-medium text-slate-300"
+            >
               OpenAI API Key (OpenAI Platform)
             </label>
             <div className="relative">
               <input
+                id="settings-openai-key"
+                name="openaiApiKey"
                 type={showOpenai ? 'text' : 'password'}
+                autoComplete="off"
                 value={settings.openaiApiKey}
                 onChange={(e) => setSettings((s) => ({ ...s, openaiApiKey: e.target.value }))}
                 placeholder="sk-..."
-                className="w-full rounded-xl border border-slate-700 bg-[#0b0d14] py-2 pl-3 pr-10 text-sm text-white"
+                className="w-full rounded-xl border border-white/10 bg-[#0b0d11] py-2 pl-3 pr-10 text-sm text-white focus:border-amber-400 focus:outline-none"
               />
               <button
                 type="button"
+                aria-label={showOpenai ? 'Ẩn OpenAI API Key' : 'Hiện OpenAI API Key'}
                 onClick={() => setShowOpenai((v) => !v)}
-                className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
+                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-white"
               >
                 {showOpenai ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
@@ -289,9 +357,16 @@ export default function SettingsPage() {
                 ['qa', 'QA Reviewer'],
               ] as const
             ).map(([key, label]) => (
-              <div key={key} className="rounded-xl border border-slate-800 bg-[#171c2b] p-2.5">
-                <label className="block text-[11px] font-medium text-slate-300 mb-1">{label}</label>
+              <div key={key} className="rounded-xl border border-white/[0.08] bg-[#1b1e25] p-2.5">
+                <label
+                  htmlFor={`agent-provider-${key}`}
+                  className="mb-1 block text-[11px] font-medium text-slate-300"
+                >
+                  {label}
+                </label>
                 <select
+                  id={`agent-provider-${key}`}
+                  name={`agentProvider_${key}`}
                   value={settings.agentProviders[key]}
                   onChange={(e) =>
                     setSettings((s) => ({
@@ -302,7 +377,7 @@ export default function SettingsPage() {
                       },
                     }))
                   }
-                  className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white"
+                  className="w-full rounded-lg border border-white/10 bg-[#0b0d11] px-2 py-1 text-xs text-white"
                 >
                   <option value="gemini">Gemini</option>
                   <option value="openai">OpenAI</option>
@@ -312,6 +387,34 @@ export default function SettingsPage() {
             ))}
           </div>
         </div>
+
+        {llmTestResult && (
+          <div
+            className={`flex items-center justify-between gap-2 rounded-xl border px-3.5 py-2.5 text-xs ${
+              llmTestResult.ok
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                : llmTestResult.is_mock
+                ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+                : 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {llmTestResult.ok ? (
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+              ) : (
+                <XCircle className="h-4 w-4 shrink-0 text-rose-400" />
+              )}
+              <span>
+                <strong>[{llmTestResult.provider.toUpperCase()}]</strong> {llmTestResult.message}
+              </span>
+            </div>
+            {typeof llmTestResult.latency_ms === 'number' && llmTestResult.latency_ms > 0 && (
+              <span className="shrink-0 font-mono text-[11px] opacity-85">
+                {llmTestResult.latency_ms}ms
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
           <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -323,20 +426,29 @@ export default function SettingsPage() {
             <button
               type="button"
               onClick={() => void handleClearCache()}
-              className="inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-rose-300 hover:bg-rose-500/20"
+              className="inline-flex items-center gap-1 rounded-full border border-rose-500/30 bg-rose-500/10 px-3 py-1 text-rose-300 transition hover:bg-rose-500/20"
             >
               <Trash2 className="h-3 w-3" /> Dọn Cache
             </button>
             {cacheNotice && <span className="text-emerald-400">{cacheNotice}</span>}
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             {savedToast && (
               <span className="text-xs font-medium text-emerald-400">Đã lưu cài đặt!</span>
             )}
             <button
+              type="button"
+              disabled={testingLlm}
+              onClick={() => void handleTestLlm()}
+              className="flex items-center gap-1.5 rounded-lg border border-sky-400/40 bg-sky-500/15 px-4 py-2 text-xs font-bold text-sky-200 transition hover:bg-sky-500/25 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${testingLlm ? 'animate-spin' : ''}`} />
+              <span>{testingLlm ? 'Đang kiểm tra...' : 'Test API Key'}</span>
+            </button>
+            <button
               type="submit"
-              className="flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
+              className="flex items-center gap-2 rounded-lg bg-amber-500 px-5 py-2 text-sm font-bold text-slate-950 transition hover:bg-amber-400"
             >
               <Save className="h-4 w-4" />
               <span>Lưu cấu hình</span>

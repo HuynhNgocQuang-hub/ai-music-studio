@@ -1,13 +1,23 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0b0d14;
-  --foreground: #f1f5f9;
-  --panel: #121622;
-  --panel-elevated: #181d2d;
-  --border: #252c40;
-  --accent: #6366f1;
+  --background: #111317;
+  --foreground: #e6e9ef;
+  --sidebar: #16191f;
+  --panel: #1b1e25;
+  --panel-elevated: #232730;
+  --panel-hover: #2a2f3a;
+  --track-lane: #121419;
+  --lcd: #0a0c10;
+  --border: rgba(255, 255, 255, 0.08);
+  --accent: #f59e0b;
+  --accent-ai: #38bdf8;
+  --accent-cyan: #22d3ee;
   --accent-emerald: #10b981;
+  --accent-rose: #f43f5e;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Plus Jakarta Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 * {
@@ -15,29 +25,83 @@
 }
 
 html,
-body {
+body,
+#root {
+  width: 100%;
+  height: 100%;
   background-color: var(--background);
   color: var(--foreground);
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: var(--font-sans);
   margin: 0;
   padding: 0;
 }
 
-/* Custom sleek scrollbars for DAW panels */
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-mono,
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Precision DAW scrollbars */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0f131f;
+  background: #101216;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2b334a;
-  border-radius: 9999px;
+  background: #303542;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3e4969;
+  background: #464d5e;
+}
+
+/* Standard vertical console fader */
+.daw-fader {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 22px;
+  height: 60px;
+  background: transparent;
+  cursor: pointer;
+  accent-color: #f59e0b;
+}
+
+/* Animated signal bars */
+@keyframes eqPulse {
+  0%,
+  100% {
+    transform: scaleY(0.28);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.eq-bar {
+  transform-origin: bottom;
+  animation: eqPulse 0.85s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eq-bar {
+    animation: none;
+    transform: scaleY(0.65);
+  }
 }

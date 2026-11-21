@@ -16,6 +16,7 @@ import type {
   JobRearrangeRequest,
   JobRegenerateTrackRequest,
   JobSSEEvent,
+  LlmTestResponse,
   LyricsSuggestRequest,
   LyricsSuggestResponse,
   OverdubFitCheckResponse,
@@ -196,6 +197,13 @@ export function validateAudioFileClient(file: File): string | null {
 // ============================================================
 export async function checkHealth(): Promise<HealthResponse> {
   return requestJson<HealthResponse>('/api/health', { method: 'GET' });
+}
+
+export async function testLlmConnection(): Promise<LlmTestResponse> {
+  return requestJson<LlmTestResponse>('/api/health/llm-test', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 }
 
 export async function clearBackendCache(): Promise<{ status: string; cleared_assets?: number }> {
@@ -492,6 +500,15 @@ export async function syncProject(projectId: string, state: ProjectState): Promi
   return hydrateProjectTitle(res);
 }
 
+export async function deleteProject(projectId: string): Promise<{ status: string; project_id: string }> {
+  return requestJson<{ status: string; project_id: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: 'DELETE',
+    }
+  );
+}
+
 export async function exportAimusic(projectId: string): Promise<Blob> {
   return requestBlob(`/api/projects/${encodeURIComponent(projectId)}/export/aimusic`, {
     method: 'POST',
@@ -499,9 +516,10 @@ export async function exportAimusic(projectId: string): Promise<Blob> {
   });
 }
 
-export async function importAimusic(file: File): Promise<ProjectState> {
+export async function importAimusic(file: File, overwrite = false): Promise<ProjectState> {
   const formData = new FormData();
   formData.append('file', file, file.name);
+  formData.append('overwrite', String(overwrite));
   const res = await requestJson<ProjectState>('/api/projects/import', {
     method: 'POST',
     body: formData,
@@ -513,11 +531,12 @@ export async function exportAudio(
   projectId: string,
   format: 'wav' | 'mp3' | 'stems',
   applyMastering = true,
-  mode: 'ai_mix' | 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance' = 'ai_mix'
+  mode: 'ai_mix' | 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance' = 'ai_mix',
+  bitrate: '192k' | '320k' = '320k'
 ): Promise<Blob> {
   return requestBlob(`/api/projects/${encodeURIComponent(projectId)}/export/audio`, {
     method: 'POST',
-    body: JSON.stringify({ format, apply_mastering: applyMastering, mode }),
+    body: JSON.stringify({ format, apply_mastering: applyMastering, mode, bitrate }),
   });
 }
 

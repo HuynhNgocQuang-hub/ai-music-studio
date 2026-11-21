@@ -45,7 +45,10 @@ import {
   type VocalABMode,
 } from '@/lib/audio/player';
 import { saveAudioBlob } from '@/lib/storage/indexeddb';
+import { GENRES, MOODS } from '@/lib/music/presets';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
+import { TrackArtwork, getGenreTheme } from '@/components/shared/TrackArtwork';
+import WaveformClipCanvas from '@/components/studio/WaveformClipCanvas';
 import type {
   AutoTunePreset,
   AutotuneSettings,
@@ -57,8 +60,6 @@ import type {
   StructurePreset,
 } from '@/types/project';
 
-const GENRES = ['Pop', 'Ballad', 'Lo-fi', 'R&B', 'Hip-hop', 'EDM', 'Acoustic', 'Rock'];
-const MOODS = ['Uplifting', 'Emotional', 'Chill', 'Energetic', 'Melancholic', 'Romantic'];
 const KEYS = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
 const SCALES = ['major', 'minor', 'pentatonic_major', 'pentatonic_minor', 'chromatic'];
 
@@ -70,11 +71,11 @@ const AUTOTUNE_PRESETS: Array<{
   humanize: number;
   mix_percent: number;
 }> = [
-  { id: 'off', label: 'Off', desc: 'Giữ nguyên giọng mộc', retune_speed_ms: 200, humanize: 1.0, mix_percent: 0 },
-  { id: 'natural', label: 'Nhẹ', desc: 'Tự nhiên, giữ độ rung', retune_speed_ms: 45, humanize: 0.7, mix_percent: 75 },
-  { id: 'balanced', label: 'Vừa', desc: 'Cân bằng Pop / Ballad', retune_speed_ms: 20, humanize: 0.4, mix_percent: 90 },
-  { id: 'modern', label: 'Mạnh', desc: 'Sắc nét, hiện đại', retune_speed_ms: 5, humanize: 0.15, mix_percent: 100 },
-];
+    { id: 'off', label: 'Off', desc: 'Giữ nguyên giọng mộc', retune_speed_ms: 200, humanize: 1.0, mix_percent: 0 },
+    { id: 'natural', label: 'Nhẹ', desc: 'Tự nhiên, giữ độ rung', retune_speed_ms: 45, humanize: 0.7, mix_percent: 75 },
+    { id: 'balanced', label: 'Vừa', desc: 'Cân bằng Pop / Ballad', retune_speed_ms: 20, humanize: 0.4, mix_percent: 90 },
+    { id: 'modern', label: 'Mạnh', desc: 'Sắc nét, hiện đại', retune_speed_ms: 5, humanize: 0.15, mix_percent: 100 },
+  ];
 
 const STEPS = [
   { num: 1, title: 'Nhập & Làm sạch', sub: 'Input & Dry Check' },
@@ -109,7 +110,20 @@ export default function CreateWizardPage() {
   const [autoTrim, setAutoTrim] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [denoising, setDenoising] = useState(false);
-  const [fileMeta, setFileMeta] = useState<{ name: string; durationSec?: number; warning?: string } | null>(null);
+  const [fileMeta, setFileMeta] = useState<{
+    name: string;
+    durationSec?: number;
+    sampleRate?: number;
+    warning?: string;
+  } | null>(() =>
+    project.audio_assets.raw_input_ref
+      ? {
+        name: project.title || 'Session Audio',
+        durationSec: project.analysis.duration_sec || undefined,
+        sampleRate: 44100,
+      }
+      : null
+  );
   const [stepError, setStepError] = useState<string | null>(null);
 
   // Step 2: Analysis & Auto-Tune
@@ -166,10 +180,12 @@ export default function CreateWizardPage() {
   }, [refreshMicDevices]);
 
   useEffect(() => {
+    engine.setPreferPreRenderedMix(true);
     const unsub = engine.subscribe(setTransport);
     return () => {
       unsub();
       engine.stopMetronome();
+      engine.setPreferPreRenderedMix(false);
     };
   }, [engine]);
 
@@ -257,6 +273,7 @@ export default function CreateWizardPage() {
         setFileMeta({
           name: uploadRes.filename || filename,
           durationSec: uploadRes.duration_sec || dur,
+          sampleRate: uploadRes.sample_rate || 44100,
           warning: warningMsg,
         });
 
@@ -510,9 +527,9 @@ export default function CreateWizardPage() {
         ...(current.analysis.bpm_locked ? { bpm_override: current.analysis.bpm } : {}),
         ...(current.analysis.key_locked
           ? {
-              key_override: current.analysis.detected_key,
-              scale_override: current.analysis.detected_scale,
-            }
+            key_override: current.analysis.detected_key,
+            scale_override: current.analysis.detected_scale,
+          }
           : {}),
       });
       updateProject((prev) => {
@@ -591,8 +608,8 @@ export default function CreateWizardPage() {
       autotune_settings: nextSettings,
       ...(isOff
         ? {
-            audio_assets: { ...prev.audio_assets, tuned_vocal_ref: null },
-          }
+          audio_assets: { ...prev.audio_assets, tuned_vocal_ref: null },
+        }
         : {}),
     }));
 
@@ -743,9 +760,9 @@ export default function CreateWizardPage() {
         previewLayer === 'preserve' || previewLayer === 'enhance'
           ? previewLayer
           : previewLayer === 'dry'
-          ? 'dry_beat'
-          : 'autotune_beat';
-      const blob = await exportAudio(project.project_id, format, true, exportMode);
+            ? 'dry_beat'
+            : 'autotune_beat';
+      const blob = await exportAudio(project.project_id, format, true, exportMode, '320k');
       const safeName = (project.title || project.project_id).replace(/[^a-zA-Z0-9_-]/g, '_');
       triggerBlobDownload(blob, `${safeName}.${format}`);
     } catch (err) {
@@ -756,42 +773,56 @@ export default function CreateWizardPage() {
   };
 
   const hasAudioInput = Boolean(project.audio_assets.raw_input_ref || engine.hasBuffer('raw'));
+  const hasGeneratedTracks =
+    (project.tracks.drums?.notes?.length ?? 0) > 0 ||
+    (project.tracks.harmony?.notes?.length ?? 0) > 0;
+  const activeDrySlot = transport.abMode === 'raw' ? 'raw' : 'dry';
+  const dryPeaks = engine.getWaveformPeaksForSlot(activeDrySlot, 72);
+  const activePreviewSlot =
+    previewLayer === 'preserve' && engine.hasBuffer('preserve')
+      ? 'preserve'
+      : previewLayer === 'enhance' && engine.hasBuffer('enhance')
+        ? 'enhance'
+        : previewLayer === 'autotune' && engine.hasBuffer('autotune')
+          ? 'autotune'
+          : engine.hasBuffer('dry')
+            ? 'dry'
+            : 'raw';
+  const previewPeaks = engine.getWaveformPeaksForSlot(activePreviewSlot, 96);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
-      {/* 4-Step Stepper */}
+      {/* Studio Stepper Header */}
       <nav aria-label="Wizard Steps" className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
         {STEPS.map((s) => {
           const isCurrent = step === s.num;
           const isDone = step > s.num;
-          const clickable = s.num <= step || (s.num === 2 && hasAudioInput);
+          const clickable = s.num <= step || (s.num === 2 && hasAudioInput) || (hasGeneratedTracks && s.num <= 4);
           return (
             <button
               key={s.num}
               type="button"
               disabled={!clickable}
               onClick={() => clickable && setStep(s.num)}
-              className={`flex items-center gap-3 rounded-xl border p-3 text-left transition ${
-                isCurrent
-                  ? 'border-indigo-500 bg-indigo-600/15 text-white'
-                  : isDone
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15'
-                  : 'border-slate-800 bg-[#121622] text-slate-400 disabled:opacity-50'
-              }`}
+              className={`flex items-center gap-3 rounded-2xl border p-3.5 text-left transition ${isCurrent
+                ? 'border-amber-400/70 bg-gradient-to-br from-amber-500/20 to-orange-500/10 text-white shadow-lg shadow-black/40'
+                : isDone
+                  ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15'
+                  : 'border-white/[0.08] bg-[#16191f] text-slate-400 disabled:opacity-45'
+                }`}
             >
               <span
-                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
-                  isCurrent
-                    ? 'bg-indigo-500 text-white'
-                    : isDone
+                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${isCurrent
+                  ? 'bg-amber-500 text-slate-950'
+                  : isDone
                     ? 'bg-emerald-500 text-slate-950'
-                    : 'bg-slate-800 text-slate-400'
-                }`}
+                    : 'bg-white/10 text-slate-400'
+                  }`}
               >
                 {isDone ? <Check className="h-4 w-4" /> : s.num}
               </span>
               <div className="min-w-0">
-                <p className="truncate text-xs font-semibold">{s.title}</p>
+                <p className="truncate text-xs font-bold">{s.title}</p>
                 <p className="truncate text-[11px] text-slate-400">{s.sub}</p>
               </div>
             </button>
@@ -800,51 +831,55 @@ export default function CreateWizardPage() {
       </nav>
 
       {stepError && (
-        <div className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 text-sm text-rose-200">
+        <div className="flex items-start gap-2.5 rounded-2xl border border-rose-500/40 bg-rose-500/10 p-3.5 text-sm text-rose-200">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
           <p>{stepError}</p>
         </div>
       )}
 
-      {/* STEP 1: Input & Dry Check */}
+      {/* STEP 1: Recording Booth & Dry Check */}
       {step === 1 && (
-        <section className="space-y-6 rounded-2xl border border-slate-800 bg-[#121622] p-6">
+        <section className="space-y-6 rounded-3xl border border-white/[0.08] bg-[#16191f] p-6 shadow-xl shadow-black/30">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h1 className="text-xl font-bold text-white">Bước 1: Nhập giai điệu & Kiểm tra Giọng mộc</h1>
+              <h1 className="font-display text-xl font-bold text-white">
+                Bước 1: Nhập giai điệu &amp; Kiểm tra Giọng mộc
+              </h1>
               <p className="text-xs text-slate-400">
                 Hỗ trợ WAV, MP3, M4A, OGG, FLAC (tối thiểu 3 giây, tối đa 50 MB).
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {/* Mode toggle: Hum <= 60s vs Vocal <= 5 min */}
-              <div className="inline-flex rounded-xl border border-slate-800 bg-[#0b0d14] p-1">
+              <div className="inline-flex rounded-full border border-white/10 bg-[#0b0d11] p-1">
                 <button
                   type="button"
                   onClick={() => setAudioUploadMode('hum')}
-                  className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                    audioUploadMode === 'hum' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold transition ${audioUploadMode === 'hum'
+                    ? 'bg-emerald-500 text-slate-950'
+                    : 'text-slate-400 hover:text-white'
+                    }`}
                 >
                   Hum (&le; 60s)
                 </button>
                 <button
                   type="button"
                   onClick={() => setAudioUploadMode('vocal')}
-                  className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                    audioUploadMode === 'vocal' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold transition ${audioUploadMode === 'vocal'
+                    ? 'bg-emerald-500 text-slate-950'
+                    : 'text-slate-400 hover:text-white'
+                    }`}
                 >
                   Vocal (&le; 5 phút)
                 </button>
               </div>
-              <div className="inline-flex rounded-xl border border-slate-800 bg-[#0b0d14] p-1">
+              <div className="inline-flex rounded-full border border-white/10 bg-[#0b0d11] p-1">
                 <button
                   type="button"
                   onClick={() => setInputMode('mic')}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                    inputMode === 'mic' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
+                  className={`flex items-center gap-1.5 rounded-full px-3.5 py-1 text-xs font-semibold transition ${inputMode === 'mic'
+                    ? 'bg-violet-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                    }`}
                 >
                   <Mic className="h-3.5 w-3.5" />
                   Ghi âm Mic
@@ -852,9 +887,10 @@ export default function CreateWizardPage() {
                 <button
                   type="button"
                   onClick={() => setInputMode('upload')}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                    inputMode === 'upload' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
+                  className={`flex items-center gap-1.5 rounded-full px-3.5 py-1 text-xs font-semibold transition ${inputMode === 'upload'
+                    ? 'bg-violet-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                    }`}
                 >
                   <Upload className="h-3.5 w-3.5" />
                   Upload File
@@ -864,24 +900,34 @@ export default function CreateWizardPage() {
           </div>
 
           {inputMode === 'mic' ? (
-            <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-5 space-y-4">
+            <div className="rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-5 space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div className="flex flex-wrap items-center gap-3">
-                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                  <label
+                    htmlFor="create-countin-checkbox"
+                    className="flex cursor-pointer items-center gap-2 text-xs text-slate-300"
+                  >
                     <input
+                      id="create-countin-checkbox"
+                      name="countInEnabled"
                       type="checkbox"
                       checked={countInEnabled}
                       onChange={(e) => setCountInEnabled(e.target.checked)}
-                      className="rounded border-slate-600 bg-slate-800 text-indigo-500"
+                      className="rounded border-slate-600 bg-slate-800 accent-amber-400"
                     />
-                    <span>Đếm nhịp 1 ô nhịp trước khi thu (Count-in Metronome)</span>
+                    <span>Đếm nhịp 1 ô nhịp trước khi thu (Count-in)</span>
+                  </label>
+                  <label htmlFor="create-mic-select" className="sr-only">
+                    Chọn thiết bị Microphone
                   </label>
                   <select
+                    id="create-mic-select"
+                    name="selectedMicId"
                     aria-label="Chọn thiết bị Microphone"
                     disabled={isRecording}
                     value={selectedMicId}
                     onChange={(e) => setSelectedMicId(e.target.value)}
-                    className="max-w-[220px] rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-200 disabled:opacity-50"
+                    className="max-w-[230px] rounded-xl border border-white/10 bg-[#0b0d11] px-3 py-1.5 text-xs text-slate-200 disabled:opacity-50"
                   >
                     {micDevices.length === 0 ? (
                       <option value="">Microphone mặc định</option>
@@ -894,21 +940,36 @@ export default function CreateWizardPage() {
                     )}
                   </select>
                 </div>
-                <span className="font-mono text-sm font-semibold text-indigo-300">
+                <span className="rounded-full border border-white/10 bg-[#0b0d11] px-3.5 py-1 font-mono text-xs font-semibold tabular-nums text-cyan-300">
                   {countInBeat !== null
                     ? `Đếm nhịp: ${countInBeat} / 4`
                     : isRecording
-                    ? `${isRecordingPaused ? 'Tạm dừng' : 'Đang thu'}: 00:${String(recordSec).padStart(2, '0')}`
-                    : 'Sẵn sàng thu'}
+                      ? `${isRecordingPaused ? 'Tạm dừng' : 'REC'}: 00:${String(recordSec).padStart(2, '0')}`
+                      : 'Sẵn sàng thu'}
                 </span>
               </div>
 
-              {/* VU Meter */}
-              <div className="h-3 w-full overflow-hidden rounded-full bg-slate-900">
-                <div
-                  className="h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500 transition-all duration-75"
-                  style={{ width: `${vuLevel}%` }}
-                />
+              {/* Segmented Studio LED VU Bar */}
+              <div className="space-y-1.5">
+                <div className="grid grid-cols-24 gap-1 rounded-xl border border-white/[0.06] bg-[#0b0d11] p-2">
+                  {Array.from({ length: 24 }, (_, idx) => {
+                    const threshold = ((idx + 1) / 24) * 100;
+                    const lit = vuLevel >= threshold - 3;
+                    const segColor =
+                      idx >= 20
+                        ? 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.7)]'
+                        : idx >= 15
+                          ? 'bg-amber-400'
+                          : 'bg-emerald-400';
+                    return (
+                      <span
+                        key={idx}
+                        className={`h-2.5 rounded-xs transition-colors duration-75 ${lit ? segColor : 'bg-white/[0.06]'
+                          }`}
+                      />
+                    );
+                  })}
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
@@ -917,7 +978,7 @@ export default function CreateWizardPage() {
                     type="button"
                     disabled={uploading}
                     onClick={() => void startRecording()}
-                    className="flex items-center gap-2 rounded-xl bg-rose-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-rose-500 disabled:opacity-50"
+                    className="flex items-center gap-2 rounded-full bg-rose-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-rose-600/30 transition hover:bg-rose-500 disabled:opacity-50"
                   >
                     <Mic className="h-4 w-4" />
                     <span>Bắt đầu Ghi âm</span>
@@ -927,7 +988,7 @@ export default function CreateWizardPage() {
                     <button
                       type="button"
                       onClick={togglePauseRecording}
-                      className="flex items-center gap-2 rounded-xl border border-amber-500/50 bg-amber-500/20 px-4 py-2.5 text-sm font-semibold text-amber-200 hover:bg-amber-500/30"
+                      className="flex items-center gap-2 rounded-full border border-amber-500/50 bg-amber-500/20 px-4 py-2.5 text-sm font-semibold text-amber-200 hover:bg-amber-500/30"
                     >
                       {isRecordingPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
                       <span>{isRecordingPaused ? 'Tiếp tục' : 'Tạm dừng'}</span>
@@ -935,7 +996,7 @@ export default function CreateWizardPage() {
                     <button
                       type="button"
                       onClick={stopRecording}
-                      className="flex items-center gap-2 rounded-xl bg-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-950 hover:bg-white"
+                      className="flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-slate-950 hover:bg-slate-200"
                     >
                       <Square className="h-4 w-4 fill-current" />
                       <span>Dừng thu</span>
@@ -943,15 +1004,16 @@ export default function CreateWizardPage() {
                   </>
                 )}
                 {uploading && (
-                  <span className="flex items-center gap-2 text-xs text-indigo-300">
+                  <span className="flex items-center gap-2 text-xs text-violet-300">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Đang tải lên & lọc ồn AI Denoise...
+                    Đang tải lên &amp; lọc ồn AI Denoise...
                   </span>
                 )}
               </div>
             </div>
           ) : (
             <label
+              htmlFor="create-audio-file-input"
               onDragOver={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -969,24 +1031,27 @@ export default function CreateWizardPage() {
                 const f = e.dataTransfer?.files?.[0];
                 if (f) void handleFileUpload(f);
               }}
-              className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center transition ${
-                isDraggingOver
-                  ? 'border-indigo-400 bg-indigo-600/15'
-                  : 'border-slate-700 bg-[#171c2b] hover:border-indigo-500'
-              }`}
+              className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed p-10 text-center transition ${isDraggingOver
+                ? 'border-violet-400 bg-violet-600/15'
+                : 'border-white/15 bg-[#1b1e25] hover:border-violet-500/70'
+                }`}
             >
-              <FileAudio className="h-10 w-10 text-indigo-400" />
-              <p className="mt-3 text-sm font-medium text-white">
-                Bấm để chọn file hoặc kéo thả vào đây
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-violet-500/15 text-violet-300">
+                <FileAudio className="h-7 w-7" />
+              </div>
+              <p className="mt-3 text-sm font-semibold text-white">
+                Kéo thả file âm thanh vào đây hoặc bấm để chọn
               </p>
               <p className="mt-1 text-xs text-slate-400">
                 WAV, MP3, M4A, OGG, FLAC • Tối đa 50 MB •{' '}
                 {audioUploadMode === 'vocal' ? 'Vocal (tối đa 5 phút)' : 'Hum (tối đa 60 giây)'}
               </p>
               <input
+                id="create-audio-file-input"
+                name="audioFile"
                 type="file"
                 accept=".wav,.mp3,.m4a,.ogg,.flac,audio/*"
-                className="hidden"
+                className="sr-only"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (f) void handleFileUpload(f);
@@ -995,56 +1060,84 @@ export default function CreateWizardPage() {
             </label>
           )}
 
-          {/* Denoise & Dry Check Controls */}
+          {/* Denoise & Dry Check Waveform Deck */}
           <div className="grid gap-4 md:grid-cols-2">
-            <div className="rounded-xl border border-slate-800 bg-[#161b29] p-4 space-y-3">
+            <div className="space-y-3 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-4">
               <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-white">Tiền xử lý AI Denoise & Trim</span>
+                <span className="text-sm font-semibold text-white">Tiền xử lý AI Denoise &amp; Trim</span>
                 <button
                   type="button"
                   disabled={!hasAudioInput || denoising}
                   onClick={() => void handleRerunDenoise()}
-                  className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-indigo-300 hover:bg-slate-800 disabled:opacity-40"
+                  className="rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-violet-200 transition hover:bg-white/10 disabled:opacity-40"
                 >
                   {denoising ? 'Đang lọc...' : 'Áp dụng lại'}
                 </button>
               </div>
-              <label className="flex items-center justify-between text-xs text-slate-300">
+              <label
+                htmlFor="create-enable-denoise"
+                className="flex cursor-pointer items-center justify-between text-xs text-slate-300"
+              >
                 <span>Bật AI Denoise (lọc ồn nền)</span>
                 <input
+                  id="create-enable-denoise"
+                  name="enableDenoise"
                   type="checkbox"
                   checked={enableDenoise}
                   onChange={(e) => setEnableDenoise(e.target.checked)}
-                  className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-indigo-500"
+                  className="h-4 w-4 rounded border-slate-600 bg-slate-800 accent-amber-400"
                 />
               </label>
-              <label className="flex items-center justify-between text-xs text-slate-300">
+              <label
+                htmlFor="create-auto-trim"
+                className="flex cursor-pointer items-center justify-between text-xs text-slate-300"
+              >
                 <span>AI Auto-Trim (cắt khoảng lặng đầu/cuối)</span>
                 <input
+                  id="create-auto-trim"
+                  name="autoTrim"
                   type="checkbox"
                   checked={autoTrim}
                   onChange={(e) => setAutoTrim(e.target.checked)}
-                  className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-indigo-500"
+                  className="h-4 w-4 rounded border-slate-600 bg-slate-800 accent-amber-400"
                 />
               </label>
             </div>
 
-            {/* Dry Check A/B Player */}
-            <div className="rounded-xl border border-slate-800 bg-[#161b29] p-4 space-y-3">
+            <div className="space-y-3 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-4">
               <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-white">Kiểm tra Giọng mộc (Dry Check)</span>
+                <span className="text-sm font-semibold text-white">Nghe kiểm tra (Dry Check)</span>
                 {fileMeta && (
-                  <span className="text-xs text-emerald-400">
-                    {fileMeta.name} ({(fileMeta.durationSec || 0).toFixed(1)}s)
+                  <span className="truncate text-xs text-emerald-400">
+                    {fileMeta.name} ({(fileMeta.durationSec || 0).toFixed(1)}s • {((fileMeta.sampleRate || 44100) / 1000).toFixed(1)} kHz)
                   </span>
                 )}
               </div>
+
+              {hasAudioInput && (
+                <div className="h-9 rounded-xl border border-white/[0.06] bg-[#0b0d11] px-2 py-1">
+                  <WaveformClipCanvas
+                    peaks={dryPeaks}
+                    seed={project.project_id}
+                    color={
+                      transport.abMode === 'raw'
+                        ? 'rgba(245, 158, 11, 0.72)'
+                        : 'rgba(16, 185, 129, 0.75)'
+                    }
+                    playedColor="rgba(34, 211, 238, 0.95)"
+                    playProgress={
+                      transport.durationSec > 0 ? transport.currentTimeSec / transport.durationSec : 0
+                    }
+                  />
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   disabled={!hasAudioInput}
                   onClick={() => (transport.isPlaying ? engine.pause() : engine.play())}
-                  className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-40"
+                  className="flex items-center gap-1.5 rounded-full bg-violet-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-40"
                 >
                   {transport.isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
                   <span>{transport.isPlaying ? 'Tạm dừng' : 'Nghe thử'}</span>
@@ -1053,30 +1146,26 @@ export default function CreateWizardPage() {
                   type="button"
                   disabled={!hasAudioInput}
                   onClick={() => engine.setABMode('raw')}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium border ${
-                    transport.abMode === 'raw'
-                      ? 'border-amber-500 bg-amber-500/20 text-amber-200'
-                      : 'border-slate-700 text-slate-400'
-                  }`}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-medium ${transport.abMode === 'raw'
+                    ? 'border-amber-500 bg-amber-500/20 text-amber-200'
+                    : 'border-white/10 text-slate-400 hover:text-white'
+                    }`}
                 >
-                  Giọng mộc gốc
+                  Giọng gốc
                 </button>
                 <button
                   type="button"
                   disabled={!hasAudioInput}
                   onClick={() => engine.setABMode('dry')}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium border ${
-                    transport.abMode === 'dry'
-                      ? 'border-emerald-500 bg-emerald-500/20 text-emerald-200'
-                      : 'border-slate-700 text-slate-400'
-                  }`}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-medium ${transport.abMode === 'dry'
+                    ? 'border-emerald-500 bg-emerald-500/20 text-emerald-200'
+                    : 'border-white/10 text-slate-400 hover:text-white'
+                    }`}
                 >
-                  Đã lọc ồn (Denoised)
+                  Đã lọc ồn
                 </button>
               </div>
-              {fileMeta?.warning && (
-                <p className="text-xs text-amber-300">{fileMeta.warning}</p>
-              )}
+              {fileMeta?.warning && <p className="text-xs text-amber-300">{fileMeta.warning}</p>}
             </div>
           </div>
 
@@ -1085,46 +1174,52 @@ export default function CreateWizardPage() {
               type="button"
               disabled={!hasAudioInput || uploading || denoising}
               onClick={() => void goToStep2AndAnalyze()}
-              className="flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-40"
+              className="flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-600/25 transition hover:brightness-110 disabled:opacity-40"
             >
-              <span>Tiếp tục: Phân tích & Auto-Tune</span>
+              <span>Tiếp tục: Phân tích &amp; Auto-Tune</span>
               <ArrowRight className="h-4 w-4" />
             </button>
           </div>
         </section>
       )}
 
-      {/* STEP 2: Analyze & Auto-Tune Quick Bar */}
+      {/* STEP 2: Pitch, Tempo & Auto-Tune Lab */}
       {step === 2 && (
-        <section className="space-y-6 rounded-2xl border border-slate-800 bg-[#121622] p-6">
+        <section className="space-y-6 rounded-3xl border border-white/[0.08] bg-[#16191f] p-6 shadow-xl shadow-black/30">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-bold text-white">Bước 2: Phân tích Giai điệu & Auto-Tune nhanh</h1>
+              <h1 className="font-display text-xl font-bold text-white">
+                Bước 2: Phân tích Giai điệu &amp; Auto-Tune nhanh
+              </h1>
               <p className="text-xs text-slate-400">
-                Kiểm tra BPM, Key/Scale và chỉnh phô bằng 4 mức Quick Presets.
+                Kiểm tra nhịp BPM, Tông bài hát và chỉnh phô với 4 mức Auto-Tune.
               </p>
             </div>
             {analyzing && (
-              <span className="flex items-center gap-2 text-xs text-indigo-300">
+              <span className="flex items-center gap-2 text-xs text-violet-300">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Đang trích xuất BPM, Key & Pitch MIDI...
+                Đang phân tích giai điệu...
               </span>
             )}
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
             {/* BPM + Tap Tempo + Metronome */}
-            <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-4 space-y-2.5">
+            <div className="space-y-2.5 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-4">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium text-slate-400">Tempo (BPM: 40–220)</label>
+                <label htmlFor="create-bpm-input" className="text-xs font-medium text-slate-400">
+                  Tempo (BPM: 40–220)
+                </label>
                 {project.analysis.bpm_locked && (
-                  <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] text-indigo-300">
+                  <span className="rounded-full bg-violet-500/20 px-2 py-0.5 text-[10px] font-medium text-violet-200">
                     Đã khóa
                   </span>
                 )}
               </div>
               <div className="flex items-center gap-2">
                 <input
+                  id="create-bpm-input"
+                  name="bpm"
                   type="number"
                   min={40}
                   max={220}
@@ -1137,23 +1232,22 @@ export default function CreateWizardPage() {
                     }));
                     engine.setBpm(val);
                   }}
-                  className="w-24 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm font-bold text-white"
+                  className="w-20 rounded-xl border border-white/10 bg-[#0b0d11] px-3 py-1.5 font-mono text-base font-bold tabular-nums text-white"
                 />
                 <button
                   type="button"
                   onClick={handleTapTempo}
-                  className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-white/10"
                 >
                   Tap Tempo
                 </button>
                 <button
                   type="button"
                   onClick={toggleMetronome}
-                  className={`rounded-lg px-2.5 py-1.5 text-xs font-medium ${
-                    metronomeOn
-                      ? 'bg-emerald-600 text-white'
-                      : 'border border-slate-700 text-slate-300 hover:bg-slate-800'
-                  }`}
+                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold ${metronomeOn
+                    ? 'bg-emerald-500 text-slate-950'
+                    : 'border border-white/10 text-slate-300 hover:bg-white/10'
+                    }`}
                 >
                   {metronomeOn ? 'Tắt Click' : 'Metronome'}
                 </button>
@@ -1161,24 +1255,28 @@ export default function CreateWizardPage() {
             </div>
 
             {/* Key / Scale */}
-            <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-4 space-y-2.5">
+            <div className="space-y-2.5 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-4">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium text-slate-400">Key / Scale</label>
+                <label htmlFor="create-key-select" className="text-xs font-medium text-slate-400">
+                  Key / Scale
+                </label>
                 <div className="flex items-center gap-1.5">
                   {project.analysis.key_locked && (
-                    <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] text-indigo-300">
+                    <span className="rounded-full bg-violet-500/20 px-2 py-0.5 text-[10px] font-medium text-violet-200">
                       Đã khóa
                     </span>
                   )}
                   {(project.analysis.key_confidence ?? 1) < 0.6 && (
-                    <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300">
-                      Gợi ý (độ tin cậy thấp)
+                    <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] text-amber-300">
+                      Gợi ý
                     </span>
                   )}
                 </div>
               </div>
               <div className="flex gap-2">
                 <select
+                  id="create-key-select"
+                  name="detectedKey"
                   value={project.analysis.detected_key}
                   onChange={(e) =>
                     updateProject((prev) => ({
@@ -1189,7 +1287,7 @@ export default function CreateWizardPage() {
                         : prev.autotune_settings,
                     }))
                   }
-                  className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-white"
+                  className="rounded-xl border border-white/10 bg-[#0b0d11] px-3 py-1.5 text-sm font-semibold text-white"
                 >
                   {KEYS.map((k) => (
                     <option key={k} value={k}>
@@ -1198,6 +1296,9 @@ export default function CreateWizardPage() {
                   ))}
                 </select>
                 <select
+                  id="create-scale-select"
+                  name="detectedScale"
+                  aria-label="Scale bài hát"
                   value={project.analysis.detected_scale}
                   onChange={(e) =>
                     updateProject((prev) => ({
@@ -1208,7 +1309,7 @@ export default function CreateWizardPage() {
                         : prev.autotune_settings,
                     }))
                   }
-                  className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-white"
+                  className="flex-1 rounded-xl border border-white/10 bg-[#0b0d11] px-3 py-1.5 text-sm text-white"
                 >
                   {SCALES.map((sc) => (
                     <option key={sc} value={sc}>
@@ -1219,32 +1320,57 @@ export default function CreateWizardPage() {
               </div>
             </div>
 
-            {/* Bars & Notes */}
-            <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-4 space-y-1.5">
-              <p className="text-xs font-medium text-slate-400">Cấu trúc phát hiện</p>
-              <p className="text-lg font-bold text-white">
-                {project.analysis.bars || 8} ô nhịp ({project.analysis.time_signature})
+            {/* Bars, Time Signature & Notes */}
+            <div className="space-y-1.5 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-4">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="create-timesig-select" className="text-xs font-medium text-slate-400">
+                  Cấu trúc &amp; Nhịp
+                </label>
+                <select
+                  id="create-timesig-select"
+                  name="timeSignature"
+                  aria-label="Loại nhịp"
+                  value={project.analysis.time_signature || '4/4'}
+                  onChange={(e) => {
+                    const nextTs = e.target.value;
+                    const beats = nextTs === '6/8' ? 6 : nextTs === '3/4' ? 3 : 4;
+                    const durSec = project.analysis.duration_sec || fileMeta?.durationSec || 8;
+                    const nextBars = Math.max(1, Math.round(durSec / (beats * (60 / (project.analysis.bpm || 100)))));
+                    updateProject((prev) => ({
+                      ...prev,
+                      analysis: { ...prev.analysis, time_signature: nextTs, bars: nextBars },
+                    }));
+                  }}
+                  className="rounded-lg border border-white/10 bg-[#0b0d11] px-2 py-0.5 font-mono text-xs font-semibold text-sky-300"
+                >
+                  <option value="4/4">4/4</option>
+                  <option value="3/4">3/4</option>
+                  <option value="6/8">6/8</option>
+                </select>
+              </div>
+              <p className="font-mono text-lg font-bold tabular-nums text-white">
+                {project.analysis.bars || 8} ô nhịp ({project.analysis.time_signature || '4/4'})
               </p>
-              <p className="text-xs text-slate-400">
-                {project.analysis.raw_melody_midi.length} nốt MIDI trích xuất
+              <p className="text-xs text-cyan-300">
+                {project.analysis.raw_melody_midi.length} nốt giai điệu trích xuất
               </p>
             </div>
           </div>
 
           {/* Auto-Tune Quick Bar */}
-          <div className="rounded-xl border border-slate-800 bg-[#171c2b] p-5 space-y-4">
+          <div className="space-y-4 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-sm font-semibold text-white">Auto-Tune Quick Bar</h2>
+                <h2 className="text-sm font-bold text-white">Chỉnh phô Auto-Tune nhanh</h2>
                 <p className="text-xs text-slate-400">
-                  Chọn mức chỉnh cao độ và nghe so sánh A/B ngay lập tức.
+                  Chọn mức độ xử lý cao độ và nghe so sánh A/B trực tiếp.
                 </p>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => (transport.isPlaying ? engine.pause() : engine.play())}
-                  className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+                  className="flex items-center gap-1.5 rounded-full bg-violet-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-violet-500"
                 >
                   {transport.isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
                   <span>{transport.isPlaying ? 'Dừng' : 'Nghe A/B'}</span>
@@ -1252,7 +1378,7 @@ export default function CreateWizardPage() {
                 <button
                   type="button"
                   onClick={() => engine.setABMode(transport.abMode === 'autotune' ? 'dry' : 'autotune')}
-                  className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800"
+                  className="rounded-full border border-white/15 px-3.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/10"
                 >
                   Đang phát: {transport.abMode === 'autotune' ? 'Auto-Tune (Wet)' : 'Giọng mộc (Dry)'}
                 </button>
@@ -1268,11 +1394,10 @@ export default function CreateWizardPage() {
                     type="button"
                     disabled={tuning}
                     onClick={() => void handleSelectAutotunePreset(p)}
-                    className={`rounded-xl border p-3.5 text-left transition ${
-                      active
-                        ? 'border-indigo-500 bg-indigo-600/20 text-white'
-                        : 'border-slate-700 bg-[#121622] text-slate-300 hover:border-slate-600'
-                    }`}
+                    className={`rounded-2xl border p-3.5 text-left transition ${active
+                      ? 'border-violet-500 bg-violet-600/20 text-white shadow-md shadow-violet-950/30'
+                      : 'border-white/10 bg-[#16191f] text-slate-300 hover:border-white/25'
+                      }`}
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-bold">{p.label}</span>
@@ -1289,7 +1414,7 @@ export default function CreateWizardPage() {
             <button
               type="button"
               onClick={() => setStep(1)}
-              className="flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+              className="flex items-center gap-2 rounded-full border border-white/15 px-5 py-2 text-sm text-slate-300 hover:bg-white/10"
             >
               <ArrowLeft className="h-4 w-4" />
               <span>Quay lại</span>
@@ -1301,7 +1426,7 @@ export default function CreateWizardPage() {
                 setMetronomeOn(false);
                 setStep(3);
               }}
-              className="flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-500"
+              className="flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-indigo-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-600/25 hover:brightness-110"
             >
               <span>Tiếp tục: Cấu hình Phối khí</span>
               <ArrowRight className="h-4 w-4" />
@@ -1312,20 +1437,43 @@ export default function CreateWizardPage() {
 
       {/* STEP 3: Style & Multi-Agent Generate */}
       {step === 3 && (
-        <section className="space-y-6 rounded-2xl border border-slate-800 bg-[#121622] p-6">
-          <div>
-            <h1 className="text-xl font-bold text-white">Bước 3: Cấu hình AI & Phối khí Multi-Agent</h1>
-            <p className="text-xs text-slate-400">
-              Chọn cách xử lý giai điệu, phạm vi bài hát, thể loại và theo dõi tiến trình Agent theo thời gian thực.
-            </p>
+        <section className="space-y-6 rounded-3xl border border-white/[0.08] bg-[#16191f] p-6 shadow-xl shadow-black/30">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h1 className="font-display text-xl font-bold text-white">
+                Bước 3: Chọn phong cách &amp; AI Phối khí
+              </h1>
+              <p className="text-xs text-slate-400">
+                Thiết lập tên bài hát, thể loại, cảm xúc và cấu trúc phối khí tự động.
+              </p>
+            </div>
+            <div className="min-w-[220px]">
+              <label htmlFor="create-song-title" className="sr-only">
+                Tên bài hát
+              </label>
+              <input
+                id="create-song-title"
+                name="songTitle"
+                type="text"
+                value={project.title || ''}
+                onChange={(e) =>
+                  updateProject((prev) => ({
+                    ...prev,
+                    title: e.target.value,
+                    config: { ...prev.config, title: e.target.value },
+                  }))
+                }
+                placeholder="Đặt tên bài hát..."
+                className="w-full rounded-full border border-white/10 bg-[#0b0d11] px-4 py-1.5 text-xs font-semibold text-white placeholder-slate-500 focus:border-amber-400 focus:outline-none"
+              />
+            </div>
           </div>
 
           <div className="grid gap-5 md:grid-cols-2">
-            {/* Melody Mode */}
             <div className="space-y-2">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              <span className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
                 1. Chế độ giai điệu
-              </label>
+              </span>
               <div className="grid grid-cols-2 gap-2.5">
                 {(
                   [
@@ -1342,24 +1490,22 @@ export default function CreateWizardPage() {
                         config: { ...prev.config, melody_mode: opt.id },
                       }))
                     }
-                    className={`rounded-xl border p-3 text-left ${
-                      project.config.melody_mode === opt.id
-                        ? 'border-indigo-500 bg-indigo-600/20 text-white'
-                        : 'border-slate-700 bg-[#171c2b] text-slate-300'
-                    }`}
+                    className={`rounded-2xl border p-3.5 text-left transition ${project.config.melody_mode === opt.id
+                      ? 'border-violet-500 bg-violet-600/20 text-white'
+                      : 'border-white/10 bg-[#1b1e25] text-slate-300 hover:border-white/25'
+                      }`}
                   >
-                    <p className="text-sm font-semibold">{opt.title}</p>
+                    <p className="text-sm font-bold">{opt.title}</p>
                     <p className="text-[11px] text-slate-400">{opt.desc}</p>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Output Mode */}
             <div className="space-y-2">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              <span className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
                 2. Phạm vi đầu ra
-              </label>
+              </span>
               <div className="grid grid-cols-2 gap-2.5">
                 {(
                   [
@@ -1376,13 +1522,12 @@ export default function CreateWizardPage() {
                         config: { ...prev.config, output_mode: opt.id },
                       }))
                     }
-                    className={`rounded-xl border p-3 text-left ${
-                      project.config.output_mode === opt.id
-                        ? 'border-emerald-500 bg-emerald-600/20 text-white'
-                        : 'border-slate-700 bg-[#171c2b] text-slate-300'
-                    }`}
+                    className={`rounded-2xl border p-3.5 text-left transition ${project.config.output_mode === opt.id
+                      ? 'border-emerald-500 bg-emerald-500/20 text-white'
+                      : 'border-white/10 bg-[#1b1e25] text-slate-300 hover:border-white/25'
+                      }`}
                   >
-                    <p className="text-sm font-semibold">{opt.title}</p>
+                    <p className="text-sm font-bold">{opt.title}</p>
                     <p className="text-[11px] text-slate-400">{opt.desc}</p>
                   </button>
                 ))}
@@ -1390,13 +1535,46 @@ export default function CreateWizardPage() {
             </div>
           </div>
 
-          {/* Full Song extra options */}
+          {project.config.output_mode === 'accompaniment' && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[0.08] bg-[#1b1e25] px-4 py-3">
+              <div>
+                <p className="text-xs font-semibold text-white">Độ dài Nhạc đệm (Accompaniment)</p>
+                <p className="text-[11px] text-slate-400">
+                  Mặc định khớp chính xác số ô nhịp câu ngân nga; có thể thêm Count-in &amp; Tail nhẹ đầu/cuối.
+                </p>
+              </div>
+              <label
+                htmlFor="create-countin-tail"
+                className="flex cursor-pointer items-center gap-2 text-xs text-slate-200"
+              >
+                <input
+                  id="create-countin-tail"
+                  name="addCountInTail"
+                  type="checkbox"
+                  checked={Boolean(project.config.add_count_in_tail)}
+                  onChange={(e) =>
+                    updateProject((prev) => ({
+                      ...prev,
+                      config: { ...prev.config, add_count_in_tail: e.target.checked },
+                    }))
+                  }
+                  className="rounded border-slate-600 bg-slate-800 accent-amber-400"
+                />
+                <span>Thêm 1 bar Count-in &amp; 1 bar Outro nhẹ</span>
+              </label>
+            </div>
+          )}
+
           {project.config.output_mode === 'full_song' && (
-            <div className="space-y-4 rounded-xl border border-slate-800 bg-[#171c2b] p-4">
+            <div className="space-y-4 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-4">
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
-                  <span className="text-xs font-medium text-slate-300">Vị trí đặt mô-típ ngân nga:</span>
+                  <label htmlFor="create-motif-pos" className="text-xs font-medium text-slate-300">
+                    Vị trí đặt mô-típ ngân nga:
+                  </label>
                   <select
+                    id="create-motif-pos"
+                    name="motifPosition"
                     value={project.config.motif_position}
                     onChange={(e) =>
                       updateProject((prev) => ({
@@ -1404,15 +1582,20 @@ export default function CreateWizardPage() {
                         config: { ...prev.config, motif_position: e.target.value as MotifPosition },
                       }))
                     }
-                    className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white"
+                    className="rounded-xl border border-white/10 bg-[#0b0d11] px-3 py-1.5 text-xs text-white"
                   >
                     <option value="chorus">Chorus (Mặc định)</option>
                     <option value="verse">Verse</option>
                     <option value="auto">Theo AI đề xuất</option>
                   </select>
                 </div>
-                <label className="flex items-center gap-2 text-xs text-slate-300">
+                <label
+                  htmlFor="create-lead-karaoke"
+                  className="flex cursor-pointer items-center gap-2 text-xs text-slate-300"
+                >
                   <input
+                    id="create-lead-karaoke"
+                    name="enableLeadKaraoke"
                     type="checkbox"
                     checked={Boolean(project.config.enable_lead_karaoke)}
                     onChange={(e) =>
@@ -1421,14 +1604,16 @@ export default function CreateWizardPage() {
                         config: { ...prev.config, enable_lead_karaoke: e.target.checked },
                       }))
                     }
-                    className="rounded border-slate-600 bg-slate-800 text-indigo-500"
+                    className="rounded border-slate-600 bg-slate-800 accent-amber-400"
                   />
                   <span>Bật Lead Karaoke Guide + Gợi ý lời</span>
                 </label>
               </div>
 
-              <div className="space-y-2 border-t border-slate-800 pt-3">
-                <span className="text-xs font-medium text-slate-300">Cấu trúc bài hát (Structure Preset):</span>
+              <div className="space-y-2 border-t border-white/[0.07] pt-3">
+                <span className="text-xs font-medium text-slate-300">
+                  Cấu trúc bài hát (Structure Preset):
+                </span>
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                   {(
                     [
@@ -1455,13 +1640,12 @@ export default function CreateWizardPage() {
                             config: { ...prev.config, structure_preset: preset.id },
                           }))
                         }
-                        className={`rounded-xl border p-2.5 text-left transition ${
-                          active
-                            ? 'border-emerald-500 bg-emerald-600/20 text-white'
-                            : 'border-slate-700 bg-[#121622] text-slate-300 hover:border-slate-600'
-                        }`}
+                        className={`rounded-xl border p-3 text-left transition ${active
+                          ? 'border-emerald-500 bg-emerald-500/20 text-white'
+                          : 'border-white/10 bg-[#16191f] text-slate-300 hover:border-white/25'
+                          }`}
                       >
-                        <p className="text-xs font-semibold">{preset.title}</p>
+                        <p className="text-xs font-bold">{preset.title}</p>
                         <p className="mt-0.5 text-[11px] text-slate-400">{preset.desc}</p>
                       </button>
                     );
@@ -1471,35 +1655,46 @@ export default function CreateWizardPage() {
             </div>
           )}
 
-          {/* Genre, Mood & Prompt */}
-          <div className="grid gap-4 md:grid-cols-2">
+          {/* Genre & Mood Chip Clouds */}
+          <div className="grid gap-5 md:grid-cols-2">
             <div>
-              <label className="mb-1.5 block text-xs font-semibold text-slate-400">Thể loại (Genre)</label>
+              <span className="mb-2 block text-xs font-semibold text-slate-400">
+                Thể loại (Genre)
+              </span>
               <div className="flex flex-wrap gap-2">
-                {GENRES.map((g) => (
-                  <button
-                    key={g}
-                    type="button"
-                    onClick={() =>
-                      updateProject((prev) => ({
-                        ...prev,
-                        config: { ...prev.config, genre: g },
-                      }))
-                    }
-                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                      project.config.genre === g
-                        ? 'bg-indigo-600 text-white'
-                        : 'border border-slate-700 bg-[#171c2b] text-slate-300 hover:bg-slate-800'
-                    }`}
-                  >
-                    {g}
-                  </button>
-                ))}
+                {GENRES.map((g) => {
+                  const theme = getGenreTheme(g);
+                  const active = project.config.genre === g;
+                  return (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() =>
+                        updateProject((prev) => ({
+                          ...prev,
+                          config: { ...prev.config, genre: g },
+                        }))
+                      }
+                      className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold transition ${active
+                        ? 'bg-violet-600 text-white shadow-md shadow-violet-600/25'
+                        : 'border border-white/10 bg-[#1b1e25] text-slate-300 hover:bg-white/10'
+                        }`}
+                    >
+                      <span
+                        className="h-2 w-2 rounded-full"
+                        style={{ background: `linear-gradient(135deg, ${theme.from}, ${theme.to})` }}
+                      />
+                      {g}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
             <div>
-              <label className="mb-1.5 block text-xs font-semibold text-slate-400">Cảm xúc (Mood)</label>
+              <span className="mb-2 block text-xs font-semibold text-slate-400">
+                Cảm xúc (Mood)
+              </span>
               <div className="flex flex-wrap gap-2">
                 {MOODS.map((m) => (
                   <button
@@ -1511,11 +1706,10 @@ export default function CreateWizardPage() {
                         config: { ...prev.config, mood: m },
                       }))
                     }
-                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                      project.config.mood === m
-                        ? 'bg-emerald-600 text-white'
-                        : 'border border-slate-700 bg-[#171c2b] text-slate-300 hover:bg-slate-800'
-                    }`}
+                    className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition ${project.config.mood === m
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'border border-white/10 bg-[#1b1e25] text-slate-300 hover:bg-white/10'
+                      }`}
                   >
                     {m}
                   </button>
@@ -1526,14 +1720,16 @@ export default function CreateWizardPage() {
 
           <div>
             <div className="mb-1.5 flex items-center justify-between">
-              <label className="text-xs font-semibold text-slate-400">
-                Mô tả thêm cho AI (Prompt — tùy chọn)
+              <label htmlFor="create-prompt-textarea" className="text-xs font-semibold text-slate-400">
+                Mô tả ý tưởng phối khí cho AI (tùy chọn)
               </label>
-              <span className="text-[11px] text-slate-500">
+              <span className="text-[11px] tabular-nums text-slate-500">
                 {project.config.user_prompt.length} / 500
               </span>
             </div>
             <textarea
+              id="create-prompt-textarea"
+              name="userPrompt"
               rows={3}
               maxLength={500}
               value={project.config.user_prompt}
@@ -1543,28 +1739,28 @@ export default function CreateWizardPage() {
                   config: { ...prev.config, user_prompt: e.target.value.slice(0, 500) },
                 }))
               }
-              placeholder="Ví dụ: Thêm tiếng piano nhẹ ở đầu, bass ấm và trống pop nhẹ nhàng..."
-              className="w-full rounded-xl border border-slate-700 bg-[#171c2b] p-3 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+              placeholder="Ví dụ: Mở đầu bằng tiếng piano nhẹ, vào điệp khúc trống Pop dồn dập và bass ấm..."
+              className="w-full rounded-2xl border border-white/10 bg-[#1b1e25] p-3.5 text-sm text-white placeholder-slate-500 focus:border-amber-400 focus:outline-none"
             />
           </div>
 
           {/* SSE Multi-Agent Progress Panel */}
           {(isGenerating || agentLogs.length > 0) && (
-            <div className="rounded-xl border border-indigo-500/30 bg-[#151a2b] p-4 space-y-3">
+            <div className="space-y-3 rounded-2xl border border-violet-500/35 bg-[#151829] p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   {isGenerating ? (
-                    <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+                    <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
                   ) : (
                     <Activity className="h-4 w-4 text-emerald-400" />
                   )}
-                  <span className="text-sm font-semibold text-white">
-                    Tiến trình Multi-Agent ({jobProgress}%)
+                  <span className="text-sm font-bold text-white tabular-nums">
+                    AI Producer đang phối khí ({jobProgress}%)
                   </span>
                 </div>
                 <div className="flex items-center gap-3">
                   {isGenerating && (
-                    <span className="font-mono text-xs text-amber-300">
+                    <span className="font-mono text-xs tabular-nums text-amber-300">
                       Timeout: {countdownSec}s
                     </span>
                   )}
@@ -1572,18 +1768,18 @@ export default function CreateWizardPage() {
                     <button
                       type="button"
                       onClick={() => void handleCancelJob()}
-                      className="flex items-center gap-1 rounded-lg bg-rose-600/20 px-3 py-1 text-xs font-semibold text-rose-300 hover:bg-rose-600/30"
+                      className="flex items-center gap-1 rounded-full bg-rose-600/20 px-3 py-1 text-xs font-semibold text-rose-300 hover:bg-rose-600/35"
                     >
                       <XCircle className="h-3.5 w-3.5" />
-                      <span>Hủy (Cancel)</span>
+                      <span>Hủy</span>
                     </button>
                   )}
                 </div>
               </div>
 
-              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-900">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-[#0b0d11]">
                 <div
-                  className="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 transition-all duration-300"
+                  className="h-full bg-gradient-to-r from-violet-500 via-indigo-400 to-cyan-400 transition-all duration-300"
                   style={{ width: `${jobProgress}%` }}
                 />
               </div>
@@ -1591,7 +1787,7 @@ export default function CreateWizardPage() {
               <div className="max-h-36 space-y-1.5 overflow-y-auto text-xs">
                 {agentLogs.map((log, i) => (
                   <div key={i} className="flex items-center gap-2 text-slate-300">
-                    <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-indigo-300">
+                    <span className="rounded-md bg-white/10 px-2 py-0.5 font-mono text-[10px] text-violet-300">
                       {log.agent || log.type}
                     </span>
                     <span>{log.message || log.step || log.warning || log.error}</span>
@@ -1606,7 +1802,7 @@ export default function CreateWizardPage() {
               type="button"
               disabled={isGenerating}
               onClick={() => setStep(2)}
-              className="flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+              className="flex items-center gap-2 rounded-full border border-white/15 px-5 py-2 text-sm text-slate-300 hover:bg-white/10 disabled:opacity-40"
             >
               <ArrowLeft className="h-4 w-4" />
               <span>Quay lại</span>
@@ -1615,7 +1811,7 @@ export default function CreateWizardPage() {
               type="button"
               disabled={isGenerating}
               onClick={() => void handleStartGenerate()}
-              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 hover:opacity-95 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-500 px-7 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-600/30 transition hover:brightness-110 disabled:opacity-50"
             >
               <Wand2 className="h-4 w-4" />
               <span>{isGenerating ? 'Đang phối khí...' : 'Tạo nhạc bằng AI'}</span>
@@ -1624,17 +1820,29 @@ export default function CreateWizardPage() {
         </section>
       )}
 
-      {/* STEP 4: Quick Preview & Handoff to Studio */}
+      {/* STEP 4: Release Preview & Handoff to DAW */}
       {step === 4 && (
-        <section className="space-y-6 rounded-2xl border border-slate-800 bg-[#121622] p-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h1 className="text-xl font-bold text-white">Bước 4: Nghe thử nhanh & Chuyển vào Studio</h1>
-              <p className="text-xs text-slate-400">
-                So sánh trực tiếp 4 lớp âm thanh với Master Limiter (&le; -1.0 dBFS).
-              </p>
+        <section className="space-y-6 rounded-3xl border border-white/[0.08] bg-[#16191f] p-6 shadow-xl shadow-black/30">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <TrackArtwork
+                title={project.title}
+                genre={project.config.genre}
+                seed={project.project_id}
+                size="md"
+                isPlaying={transport.isPlaying}
+              />
+              <div>
+                <h1 className="font-display text-xl font-bold text-white">
+                  {project.title || 'Bản phối hoàn chỉnh'}
+                </h1>
+                <p className="text-xs text-slate-400">
+                  {project.config.genre} • {project.analysis.bpm} BPM •{' '}
+                  {project.analysis.detected_key} {project.analysis.detected_scale}
+                </p>
+              </div>
             </div>
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-1 text-xs font-medium text-emerald-300">
               <CheckCircle2 className="h-3.5 w-3.5" />
               QA {project.qa_status.approved ? 'Approved' : 'Completed'} ({project.qa_status.iterations}{' '}
               vòng)
@@ -1642,7 +1850,7 @@ export default function CreateWizardPage() {
           </div>
 
           {(jobWarning || project.qa_status.fallback_used) && (
-            <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-200">
+            <div className="flex items-start gap-2.5 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-200">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
               <p>
                 {jobWarning ||
@@ -1655,64 +1863,119 @@ export default function CreateWizardPage() {
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             {(
               [
-                { id: 'dry', label: 'Giọng mộc + Beat', desc: 'Dry vocal + nhạc đệm' },
-                { id: 'autotune', label: 'Auto-Tune + Beat', desc: 'Giọng chỉnh phô + beat' },
-                { id: 'preserve', label: 'Bản Preserve', desc: 'Bám sát giai điệu gốc' },
-                { id: 'enhance', label: 'Bản Enhance', desc: 'AI phát triển giai điệu' },
+                { id: 'dry', label: 'Giọng mộc + Beat', desc: 'Dry vocal gắn trực tiếp nền beat' },
+                { id: 'autotune', label: 'Auto-Tune + Beat', desc: 'Giọng đã chỉnh phô + beat' },
+                { id: 'preserve', label: 'Bản Preserve', desc: 'Giữ nguyên giai điệu gốc (Lead tắt)' },
+                { id: 'enhance', label: 'Bản Enhance', desc: 'Phát triển Lead + hòa âm dày hơn' },
               ] as const
             ).map((layer) => (
               <button
                 key={layer.id}
                 type="button"
                 onClick={() => handleSwitchPreviewLayer(layer.id)}
-                className={`rounded-xl border p-3.5 text-left transition ${
-                  previewLayer === layer.id
-                    ? 'border-indigo-500 bg-indigo-600/20 text-white'
-                    : 'border-slate-700 bg-[#171c2b] text-slate-300 hover:border-slate-600'
-                }`}
+                className={`rounded-2xl border p-3.5 text-left transition ${previewLayer === layer.id
+                  ? 'border-violet-500 bg-violet-600/20 text-white shadow-md shadow-violet-950/30'
+                  : 'border-white/10 bg-[#1b1e25] text-slate-300 hover:border-white/25'
+                  }`}
               >
-                <p className="text-sm font-semibold">{layer.label}</p>
+                <p className="text-sm font-bold">{layer.label}</p>
                 <p className="mt-0.5 text-[11px] text-slate-400">{layer.desc}</p>
               </button>
             ))}
           </div>
 
-          {/* Transport Player */}
-          <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-800 bg-[#171c2b] p-4">
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => (transport.isPlaying ? engine.pause() : engine.play())}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-indigo-600 text-white hover:bg-indigo-500"
-              >
-                {transport.isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 ml-0.5" />}
-              </button>
-              <button
-                type="button"
-                onClick={() => engine.stop()}
-                className="rounded-lg border border-slate-700 p-2 text-slate-300 hover:bg-slate-800"
-              >
-                <Square className="h-4 w-4" />
-              </button>
-              <div className="font-mono text-xs text-slate-300">
-                {transport.currentTimeSec.toFixed(1)}s / {transport.durationSec.toFixed(1)}s
+          {(previewLayer === 'preserve' || previewLayer === 'enhance') &&
+            previewLayer !== project.config.melody_mode && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-amber-500/35 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-100">
+                <span>
+                  Đang nghe thử đối chiếu góc độ mix{' '}
+                  <strong>{previewLayer === 'enhance' ? 'AI Enhance' : 'Preserve Original'}</strong>. Bấm tạo
+                  lại nếu muốn AI viết lại toàn bộ MIDI theo chế độ này trước khi vào Studio.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateProject((prev) => ({
+                      ...prev,
+                      config: { ...prev.config, melody_mode: previewLayer },
+                    }));
+                    setStep(3);
+                  }}
+                  className="shrink-0 rounded-full bg-amber-500 px-3 py-1 text-[11px] font-bold text-slate-950 hover:bg-amber-400"
+                >
+                  Đặt làm chế độ chính &amp; Tạo lại MIDI
+                </button>
               </div>
+            )}
+
+          {/* Interactive Waveform Transport Player */}
+          <div className="space-y-3 rounded-2xl border border-white/[0.08] bg-[#1b1e25] p-4">
+            <div className="relative h-14 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0b0d11] px-2 py-1.5">
+              <WaveformClipCanvas
+                peaks={previewPeaks}
+                seed={`${project.project_id}:${previewLayer}`}
+                color="rgba(139, 92, 246, 0.72)"
+                playedColor="rgba(34, 211, 238, 0.95)"
+                playProgress={
+                  transport.durationSec > 0 ? transport.currentTimeSec / transport.durationSec : 0
+                }
+              />
+              <input
+                id="create-preview-scrub"
+                name="previewScrub"
+                type="range"
+                aria-label="Tua đoạn nghe thử"
+                min={0}
+                max={Math.max(0.1, transport.durationSec)}
+                step={0.05}
+                value={Math.min(Math.max(0.1, transport.durationSec), transport.currentTimeSec)}
+                onChange={(e) => engine.seek(Number(e.target.value))}
+                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              />
             </div>
 
-            <div className="flex items-center gap-3 text-xs text-slate-400">
-              <Volume2 className="h-4 w-4 text-emerald-400" />
-              <span>Limiter Ceiling: {project.mastering.limiter_ceiling_db} dBFS</span>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  aria-label={transport.isPlaying ? 'Tạm dừng nghe thử' : 'Phát nghe thử'}
+                  onClick={() => (transport.isPlaying ? engine.pause() : engine.play())}
+                  className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-slate-950 shadow-md transition hover:scale-105"
+                >
+                  {transport.isPlaying ? (
+                    <Pause className="h-5 w-5 fill-current" />
+                  ) : (
+                    <Play className="ml-0.5 h-5 w-5 fill-current" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  aria-label="Dừng nghe thử"
+                  onClick={() => engine.stop()}
+                  className="rounded-full border border-white/15 p-2.5 text-slate-300 hover:bg-white/10"
+                >
+                  <Square className="h-4 w-4" />
+                </button>
+                <div className="font-mono text-xs tabular-nums text-slate-300">
+                  {transport.currentTimeSec.toFixed(1)}s / {transport.durationSec.toFixed(1)}s
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs text-slate-400">
+                <Volume2 className="h-4 w-4 text-emerald-400" />
+                <span>Master Limiter: {project.mastering.limiter_ceiling_db} dBFS</span>
+              </div>
             </div>
           </div>
 
           {/* Primary Actions */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <div className="flex flex-wrap gap-2.5">
               <button
                 type="button"
                 disabled={exportingFormat !== null}
                 onClick={() => void handleQuickExport('mp3')}
-                className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-4 py-2.5 text-sm font-medium text-white hover:bg-white/10 disabled:opacity-50"
               >
                 <Download className="h-4 w-4 text-emerald-400" />
                 <span>{exportingFormat === 'mp3' ? 'Đang xuất MP3...' : 'Tải nhanh MP3'}</span>
@@ -1721,9 +1984,9 @@ export default function CreateWizardPage() {
                 type="button"
                 disabled={exportingFormat !== null}
                 onClick={() => void handleQuickExport('wav')}
-                className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-4 py-2.5 text-sm font-medium text-white hover:bg-white/10 disabled:opacity-50"
               >
-                <Download className="h-4 w-4 text-indigo-400" />
+                <Download className="h-4 w-4 text-violet-400" />
                 <span>{exportingFormat === 'wav' ? 'Đang xuất WAV...' : 'Tải nhanh WAV'}</span>
               </button>
             </div>
@@ -1731,10 +1994,10 @@ export default function CreateWizardPage() {
             <button
               type="button"
               onClick={() => navigate(`/studio/${encodeURIComponent(project.project_id)}`)}
-              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 hover:opacity-95"
+              className="flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-600/30 transition hover:brightness-110"
             >
               <Sliders className="h-4 w-4" />
-              <span>Mở trong Hybrid Studio</span>
+              <span>Mở trong Phòng thu DAW</span>
               <Sparkles className="h-4 w-4" />
             </button>
           </div>

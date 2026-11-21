@@ -24,6 +24,7 @@ export interface ProjectConfig {
   mood: string;
   user_prompt: string;
   enable_lead_karaoke?: boolean;
+  add_count_in_tail?: boolean;
 }
 
 export interface AudioAssets {
@@ -111,6 +112,11 @@ export interface AudioTrackState {
   solo: boolean;
   volume: number;
   pan: number;
+  low_db?: number;
+  mid_db?: number;
+  high_db?: number;
+  reverb_send?: number;
+  delay_send?: number;
   clips: AudioClip[];
 }
 
@@ -121,6 +127,11 @@ export interface MidiTrackState {
   solo?: boolean;
   volume?: number;
   pan?: number;
+  low_db?: number;
+  mid_db?: number;
+  high_db?: number;
+  reverb_send?: number;
+  delay_send?: number;
   instrument?: string | null;
   notes: MidiNote[];
 }
@@ -395,6 +406,15 @@ export interface HealthResponse {
   };
 }
 
+export interface LlmTestResponse {
+  ok: boolean;
+  is_mock?: boolean;
+  provider: string;
+  model?: string;
+  latency_ms?: number;
+  message: string;
+}
+
 export interface StudioLLMSettings {
   geminiApiKey: string;
   openaiApiKey: string;
@@ -481,6 +501,11 @@ export function createDefaultProjectState(projectId?: string): ProjectState {
         solo: false,
         volume: 0.95,
         pan: 0.0,
+        low_db: 0,
+        mid_db: 0,
+        high_db: 0,
+        reverb_send: 0,
+        delay_send: 0,
         clips: [],
       },
       drums: {
@@ -490,6 +515,11 @@ export function createDefaultProjectState(projectId?: string): ProjectState {
         solo: false,
         volume: 0.85,
         pan: 0.0,
+        low_db: 0,
+        mid_db: 0,
+        high_db: 0,
+        reverb_send: 0,
+        delay_send: 0,
         instrument: 'acoustic_kit',
         notes: [],
       },
@@ -500,6 +530,11 @@ export function createDefaultProjectState(projectId?: string): ProjectState {
         solo: false,
         volume: 0.85,
         pan: 0.0,
+        low_db: 0,
+        mid_db: 0,
+        high_db: 0,
+        reverb_send: 0,
+        delay_send: 0,
         instrument: 'finger_bass',
         notes: [],
       },
@@ -510,6 +545,11 @@ export function createDefaultProjectState(projectId?: string): ProjectState {
         solo: false,
         volume: 0.8,
         pan: -0.1,
+        low_db: 0,
+        mid_db: 0,
+        high_db: 0,
+        reverb_send: 0,
+        delay_send: 0,
         instrument: 'grand_piano',
         notes: [],
       },
@@ -520,6 +560,11 @@ export function createDefaultProjectState(projectId?: string): ProjectState {
         solo: false,
         volume: 0.75,
         pan: 0.1,
+        low_db: 0,
+        mid_db: 0,
+        high_db: 0,
+        reverb_send: 0,
+        delay_send: 0,
         instrument: 'electric_piano',
         notes: [],
       },

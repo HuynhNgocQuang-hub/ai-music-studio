@@ -39,6 +39,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [restorableDraft, setRestorableDraft] = useState<StoredDraft | null>(null);
 
   const isDirtyRef = useRef(false);
+  const saveSeqRef = useRef(0);
   const latestProjectRef = useRef(project);
   latestProjectRef.current = project;
 
@@ -61,29 +62,35 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const persistDraft = useCallback(async (state: ProjectState, syncBackend = false) => {
+    const seq = ++saveSeqRef.current;
     setAutoSaveStatus('saving');
     try {
       const saved = await saveDraft(state, { dirty: true });
-      if (saved) {
+      if (saved && seq === saveSeqRef.current) {
         setLastSavedAt(saved.updated_at);
       }
       if (syncBackend) {
         try {
           await syncProject(state.project_id, state);
+          if (seq !== saveSeqRef.current) return;
           await markDraftSaved(state.project_id);
           setSyncError(null);
         } catch (err) {
+          if (seq !== saveSeqRef.current) return;
           const msg = err instanceof Error ? err.message : 'Lỗi đồng bộ state lên Redis.';
           setSyncError(msg);
           setAutoSaveStatus('error');
           return;
         }
-      } else {
+      } else if (seq === saveSeqRef.current) {
         setSyncError(null);
       }
-      isDirtyRef.current = false;
-      setAutoSaveStatus('saved');
+      if (seq === saveSeqRef.current) {
+        isDirtyRef.current = false;
+        setAutoSaveStatus('saved');
+      }
     } catch (err) {
+      if (seq !== saveSeqRef.current) return;
       setSyncError(err instanceof Error ? err.message : 'Lỗi lưu bản nháp IndexedDB.');
       setAutoSaveStatus('error');
     }
@@ -107,10 +114,11 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const updateProject = useCallback((updater: (prev: ProjectState) => ProjectState): ProjectState => {
+    saveSeqRef.current += 1;
     isDirtyRef.current = true;
     const prev = latestProjectRef.current;
     const next = updater(prev);
-    const effectiveTitle = next.title || next.config.title || 'Untitled Session';
+    const effectiveTitle = next.title ?? next.config.title ?? 'Untitled Session';
     const normalized: ProjectState = {
       ...next,
       title: effectiveTitle,
@@ -128,6 +136,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const loadProjectIntoSession = useCallback(
     (state: ProjectState, options: { dirty?: boolean } = {}) => {
+      saveSeqRef.current += 1;
       const effectiveTitle = state.config?.title || state.title || 'Untitled Session';
       const normalized: ProjectState = {
         ...state,
