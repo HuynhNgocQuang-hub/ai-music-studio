@@ -86,14 +86,15 @@ def export_wav(audio: np.ndarray, sample_rate: int = 44100) -> bytes:
     return buf.getvalue()
 
 
-def export_mp3(audio: np.ndarray, sample_rate: int = 44100, bitrate: str = "192k") -> bytes:
-    """Encode float32 audio into MP3 bytes using pydub + ffmpeg."""
+def export_mp3(audio: np.ndarray, sample_rate: int = 44100, bitrate: str = "320k") -> bytes:
+    """Encode float32 audio into MP3 bytes using pydub + ffmpeg (192k or 320k)."""
     if AudioSegment is None or shutil.which("ffmpeg") is None:
         raise RuntimeError("MP3 export requires pydub and ffmpeg to be installed.")
+    norm_bitrate = "192k" if str(bitrate).strip().startswith("192") else "320k"
     wav_bytes = export_wav(audio, sample_rate=sample_rate)
     seg = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
     out = io.BytesIO()
-    seg.export(out, format="mp3", bitrate=bitrate)
+    seg.export(out, format="mp3", bitrate=norm_bitrate)
     return out.getvalue()
 
 

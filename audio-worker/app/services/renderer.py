@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ from typing import Optional
 
 import mido
 import numpy as np
+from scipy.signal import fftconvolve, lfilter
 
 from app.schemas import MidiNote, ProjectState, TrackState
 from app.services.denoise import _resample_mono, decode_wav_bytes
@@ -381,6 +383,135 @@ def render_midi_tracks_to_audio(
     return rendered
 
 
+_HALL_IR_CACHE: dict[int, np.ndarray] = {}
+
+
+def _rbj_biquad(
+    kind: str,
+    f0: float,
+    sr: int,
+    db_gain: float,
+    q: float = 0.7071067811865476,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute normalized RBJ Audio EQ Cookbook biquad filter coefficients."""
+    if abs(db_gain) < 0.05 or f0 <= 0.0 or f0 >= 0.49 * sr:
+        return np.array([1.0], dtype=np.float64), np.array([1.0], dtype=np.float64)
+
+    a_lin = 10.0 ** (db_gain / 40.0)
+    w0 = 2.0 * math.pi * f0 / sr
+    cos_w = math.cos(w0)
+    sin_w = math.sin(w0)
+
+    if kind == "peaking":
+        alpha = sin_w / (2.0 * max(q, 0.1))
+        b0 = 1.0 + alpha * a_lin
+        b1 = -2.0 * cos_w
+        b2 = 1.0 - alpha * a_lin
+        a0 = 1.0 + alpha / a_lin
+        a1 = -2.0 * cos_w
+        a2 = 1.0 - alpha / a_lin
+    elif kind == "lowshelf":
+        alpha = sin_w / math.sqrt(2.0)
+        two_sqrt_a_alpha = 2.0 * math.sqrt(a_lin) * alpha
+        b0 = a_lin * ((a_lin + 1.0) - (a_lin - 1.0) * cos_w + two_sqrt_a_alpha)
+        b1 = 2.0 * a_lin * ((a_lin - 1.0) - (a_lin + 1.0) * cos_w)
+        b2 = a_lin * ((a_lin + 1.0) - (a_lin - 1.0) * cos_w - two_sqrt_a_alpha)
+        a0 = (a_lin + 1.0) + (a_lin - 1.0) * cos_w + two_sqrt_a_alpha
+        a1 = -2.0 * ((a_lin - 1.0) + (a_lin + 1.0) * cos_w)
+        a2 = (a_lin + 1.0) + (a_lin - 1.0) * cos_w - two_sqrt_a_alpha
+    else:
+        alpha = sin_w / math.sqrt(2.0)
+        two_sqrt_a_alpha = 2.0 * math.sqrt(a_lin) * alpha
+        b0 = a_lin * ((a_lin + 1.0) + (a_lin - 1.0) * cos_w + two_sqrt_a_alpha)
+        b1 = -2.0 * a_lin * ((a_lin - 1.0) + (a_lin + 1.0) * cos_w)
+        b2 = a_lin * ((a_lin + 1.0) + (a_lin - 1.0) * cos_w - two_sqrt_a_alpha)
+        a0 = (a_lin + 1.0) - (a_lin - 1.0) * cos_w + two_sqrt_a_alpha
+        a1 = 2.0 * ((a_lin - 1.0) - (a_lin + 1.0) * cos_w)
+        a2 = (a_lin + 1.0) - (a_lin - 1.0) * cos_w - two_sqrt_a_alpha
+
+    inv_a0 = 1.0 / max(abs(a0), 1e-12) * (1.0 if a0 >= 0.0 else -1.0)
+    return (
+        np.array([b0 * inv_a0, b1 * inv_a0, b2 * inv_a0], dtype=np.float64),
+        np.array([1.0, a1 * inv_a0, a2 * inv_a0], dtype=np.float64),
+    )
+
+
+def _apply_track_eq(mono: np.ndarray, track: TrackState, sr: int) -> np.ndarray:
+    """Apply channel 3-band EQ (Low 110Hz, Mid 1kHz Q=0.9, High 6.5kHz) matching Web Audio nodes."""
+    low_db = float(np.clip(getattr(track, "low_db", 0.0) or 0.0, -12.0, 12.0))
+    mid_db = float(np.clip(getattr(track, "mid_db", 0.0) or 0.0, -12.0, 12.0))
+    high_db = float(np.clip(getattr(track, "high_db", 0.0) or 0.0, -12.0, 12.0))
+    if abs(low_db) < 0.05 and abs(mid_db) < 0.05 and abs(high_db) < 0.05:
+        return mono
+
+    out = mono.astype(np.float64)
+    for kind, freq, gain_db, q in (
+        ("lowshelf", 110.0, low_db, 0.7071067811865476),
+        ("peaking", 1000.0, mid_db, 0.9),
+        ("highshelf", 6500.0, high_db, 0.7071067811865476),
+    ):
+        if abs(gain_db) >= 0.05:
+            b, a = _rbj_biquad(kind, freq, sr, gain_db, q=q)
+            out = lfilter(b, a, out)
+    return out.astype(np.float32)
+
+
+def _get_hall_ir(sr: int) -> np.ndarray:
+    if sr in _HALL_IR_CACHE:
+        return _HALL_IR_CACHE[sr]
+    dur_s = 1.45
+    n = max(64, int(round(dur_s * sr)))
+    pre = min(n - 1, int(round(0.018 * sr)))
+    rng = np.random.default_rng(seed=2026)
+    t = np.arange(n - pre, dtype=np.float64) / sr
+    decay = np.exp(-4.6 * t)
+    fade_len = min(len(t), max(1, int(0.015 * sr)))
+    decay[:fade_len] *= np.linspace(0.0, 1.0, fade_len)
+    ir = np.zeros((n, 2), dtype=np.float32)
+    for ch in range(2):
+        tail = rng.standard_normal(len(t)) * decay
+        tail = lfilter([0.45], [1.0, -0.55], tail)
+        l2 = float(np.sqrt(np.sum(tail * tail))) or 1.0
+        ir[pre:, ch] = (tail / l2 * 0.55).astype(np.float32)
+    _HALL_IR_CACHE[sr] = ir
+    return ir
+
+
+def _render_reverb_bus(send_stereo: np.ndarray, sr: int) -> np.ndarray:
+    n = len(send_stereo)
+    if n == 0:
+        return send_stereo
+    ir = _get_hall_ir(sr)
+    out = np.zeros_like(send_stereo)
+    for ch in range(2):
+        out[:, ch] = fftconvolve(send_stereo[:, ch], ir[:, ch], mode="full")[:n].astype(np.float32)
+    return out
+
+
+def _render_delay_bus(send_stereo: np.ndarray, bpm: float, sr: int) -> np.ndarray:
+    n = len(send_stereo)
+    if n == 0:
+        return send_stereo
+    delay_sec = float(np.clip(0.75 * (60.0 / max(bpm, 40.0)), 0.12, 0.75))
+    step = max(1, int(round(delay_sec * sr)))
+    filtered = lfilter([0.38], [1.0, -0.62], send_stereo, axis=0).astype(np.float32)
+    out = np.zeros_like(send_stereo)
+    gain = 0.44
+    for tap in range(1, 6):
+        offset = tap * step
+        if offset >= n:
+            break
+        src = filtered[: n - offset]
+        if tap % 2 == 1:
+            out[offset:, 0] += src[:, 1] * (gain * 0.85)
+            out[offset:, 1] += src[:, 0] * gain
+        else:
+            out[offset:, 0] += src[:, 0] * gain
+            out[offset:, 1] += src[:, 1] * (gain * 0.85)
+        gain *= 0.48
+    return out
+
+
 def render_project_mix(
     project: ProjectState,
     audio_assets: dict[str, bytes] | None = None,
@@ -388,19 +519,24 @@ def render_project_mix(
     apply_mastering: bool = True,
     sample_rate: int = 44100,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], int]:
-    """Render full multi-track stereo mix and equal-length stems with Master Limiter."""
+    """Render full multi-track stereo mix and equal-length stems with EQ, Send FX & Master Limiter."""
     if project.tracks and all(t.mute for t in project.tracks.values()):
         raise ValueError("All tracks are muted; unmute at least one track before exporting.")
 
     assets = audio_assets or {}
-    bpm = float(project.analysis.bpm or 120.0)
-    total_bars = max(project.song_structure.total_bars, project.analysis.bars, 1)
+    bpm = max(40.0, min(220.0, float(project.analysis.bpm or 120.0)))
+    raw_struct_bars = int(project.song_structure.total_bars or 0)
+    raw_analysis_bars = int(project.analysis.bars or 0)
+    if raw_struct_bars > 256 or raw_analysis_bars > 256:
+        raise ValueError("Project duration exceeds maximum supported 256 bars.")
+    total_bars = max(1, max(raw_struct_bars, raw_analysis_bars, 1))
     beats_per_bar = 4
     try:
-        beats_per_bar = int(project.analysis.time_signature.split("/")[0])
+        beats_per_bar = max(1, min(12, int(project.analysis.time_signature.split("/")[0])))
     except Exception:
         pass
-    total_samples = max(1, int(round(total_bars * beats_per_bar * (60.0 / bpm) * sample_rate)))
+    max_samples = max(sample_rate, sample_rate * 360)
+    total_samples = max(1, min(max_samples, int(round(total_bars * beats_per_bar * (60.0 / bpm) * sample_rate))))
 
     mode_norm = _normalize_render_mode(mode)
     include_midi = mode_norm not in VOCAL_ONLY_MODES
@@ -418,17 +554,44 @@ def render_project_mix(
         else {}
     )
 
-    stems: dict[str, np.ndarray] = {}
-    mix = np.zeros((total_samples, 2), dtype=np.float32)
-
+    raw_monos: dict[str, np.ndarray] = {}
     for name, track in project.tracks.items():
         if track.type == "audio":
             mono = _render_audio_track(
                 track, project, assets, total_samples, sample_rate, mode_norm, track_name=name
             )
-            mode_gain = 1.05 if mode_norm == "preserve" else 1.0
         else:
             mono = midi_monos.get(name, np.zeros(total_samples, dtype=np.float32))
+        raw_monos[name] = mono
+
+    vocal_track = project.tracks.get("vocal")
+    vocal_active = (
+        vocal_track is not None
+        and (not vocal_track.mute)
+        and (not any_solo or vocal_track.solo)
+        and "vocal" in raw_monos
+        and float(np.max(np.abs(raw_monos["vocal"]))) > 1e-4
+    )
+    apply_vocal_carve = (
+        vocal_active
+        and project.mastering.auto_mix_enabled
+        and mode_norm not in VOCAL_ONLY_MODES
+    )
+    if apply_vocal_carve:
+        carve_b, carve_a = _rbj_biquad("peaking", 2200.0, sample_rate, -2.5, q=1.1)
+
+    stems: dict[str, np.ndarray] = {}
+    mix = np.zeros((total_samples, 2), dtype=np.float32)
+    reverb_send_bus = np.zeros((total_samples, 2), dtype=np.float32)
+    delay_send_bus = np.zeros((total_samples, 2), dtype=np.float32)
+    has_reverb_send = False
+    has_delay_send = False
+
+    for name, track in project.tracks.items():
+        mono = raw_monos[name]
+        if track.type == "audio":
+            mode_gain = 1.05 if mode_norm == "preserve" else 1.0
+        else:
             if mode_norm == "preserve":
                 mode_gain = 0.0 if name.lower() == "lead" else 0.80
             elif mode_norm == "enhance":
@@ -436,11 +599,28 @@ def render_project_mix(
             else:
                 mode_gain = 1.0
 
+        eq_mono = _apply_track_eq(mono, track, sample_rate)
+        if apply_vocal_carve and name.lower() in ("harmony", "lead") and float(np.max(np.abs(eq_mono))) > 1e-5:
+            eq_mono = lfilter(carve_b, carve_a, eq_mono.astype(np.float64)).astype(np.float32)
+
         active = (not track.mute) and (not any_solo or track.solo)
-        stereo = _pan_stereo(mono, track.pan, track.volume * mode_gain if active else 0.0)
+        stereo = _pan_stereo(eq_mono, track.pan, track.volume * mode_gain if active else 0.0)
         stems[name] = stereo
         if active:
             mix += stereo
+            rev = float(np.clip(getattr(track, "reverb_send", 0.0) or 0.0, 0.0, 1.0))
+            dly = float(np.clip(getattr(track, "delay_send", 0.0) or 0.0, 0.0, 1.0))
+            if rev > 0.001:
+                reverb_send_bus += stereo * (rev * 0.55)
+                has_reverb_send = True
+            if dly > 0.001:
+                delay_send_bus += stereo * (dly * 0.50)
+                has_delay_send = True
+
+    if has_reverb_send:
+        mix += _render_reverb_bus(reverb_send_bus, sample_rate)
+    if has_delay_send:
+        mix += _render_delay_bus(delay_send_bus, bpm, sample_rate)
 
     if mode_norm == "enhance" and len(mix):
         air = np.diff(mix, axis=0, prepend=mix[:1])

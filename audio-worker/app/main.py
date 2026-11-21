@@ -23,6 +23,7 @@ from app.schemas import (
 from app.services.analyzer import analyze_audio, inspect_overdub_fit
 from app.services.autotune import apply_autotune, apply_preset
 from app.services.denoise import (
+    MAX_UPLOAD_MB,
     AudioValidationError,
     denoise_and_trim,
     normalize_to_wav_bytes,
@@ -40,6 +41,27 @@ app = FastAPI(
 
 def _has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
+
+
+MAX_WORKER_UPLOAD_BYTES = (MAX_UPLOAD_MB + 2) * 1024 * 1024
+
+
+async def _read_upload_bounded(upload: UploadFile, max_bytes: int = MAX_WORKER_UPLOAD_BYTES) -> bytes:
+    """Read multipart upload incrementally and abort early before OOM if payload exceeds max_bytes."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Uploaded file exceeds worker safety limit ({MAX_UPLOAD_MB} MB).",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _decode_assets_b64(assets_b64: dict[str, str]) -> dict[str, bytes]:
@@ -83,7 +105,7 @@ async def internal_denoise(
     validate_upload: bool = Form(default=False),
 ) -> DenoiseWorkerResponse:
     """Decode uploaded audio, optionally validate upload constraints, denoise, and auto-trim."""
-    raw_bytes = await file.read()
+    raw_bytes = await _read_upload_bounded(file)
     filename = file.filename or "audio.wav"
     warnings: list[str] = []
 
@@ -124,7 +146,7 @@ async def internal_analyze(
     scale_override: Optional[str] = Form(default=None),
 ) -> AnalyzeWorkerResponse:
     """Extract BPM, key/scale, bars, duration, and symbolic raw_melody_midi."""
-    raw_bytes = await file.read()
+    raw_bytes = await _read_upload_bounded(file)
     try:
         wav_bytes = normalize_to_wav_bytes(raw_bytes, filename=file.filename or "audio.wav")
     except AudioValidationError as exc:
@@ -153,7 +175,7 @@ async def internal_autotune(
     auto_follow_project_key: bool = Form(default=True),
 ) -> AutotuneWorkerResponse:
     """Apply scale-aware Auto-Tune DSP preserving duration and t=0 alignment."""
-    raw_bytes = await file.read()
+    raw_bytes = await _read_upload_bounded(file)
     try:
         wav_bytes = normalize_to_wav_bytes(raw_bytes, filename=file.filename or "audio.wav")
     except AudioValidationError as exc:
@@ -260,7 +282,7 @@ def internal_export(req: ExportRequest) -> Response:
         )
     if req.format == "mp3":
         try:
-            data = export_mp3(mix, sample_rate=sr)
+            data = export_mp3(mix, sample_rate=sr, bitrate=req.bitrate)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return Response(
@@ -291,7 +313,7 @@ async def internal_overdub_fit_check(
     scale: str = Form(default="major"),
 ) -> OverdubFitCheckResponse:
     """Inspect vocal overdub timing, scale pitch issues, gain levels, and one-click fixes."""
-    raw_bytes = await file.read()
+    raw_bytes = await _read_upload_bounded(file)
     try:
         result = inspect_overdub_fit(
             raw_bytes,

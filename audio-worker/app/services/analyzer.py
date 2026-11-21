@@ -333,6 +333,36 @@ def estimate_key_scale(
     return best_key, best_scale, round(confidence, 3)
 
 
+def estimate_time_signature(samples: np.ndarray, sr: int, bpm: float) -> str:
+    """Conservatively distinguish 3/4 or 6/8 triple/compound meters when clear periodic evidence exists."""
+    hop = max(1, int(0.01 * sr))
+    env = np.array(
+        [float(np.sqrt(np.mean(samples[i : i + hop] ** 2))) for i in range(0, len(samples), hop)],
+        dtype=np.float32,
+    )
+    fps = sr / hop
+    beat_sec = 60.0 / max(40.0, float(bpm))
+    lag3 = int(round(3.0 * beat_sec * fps))
+    lag4 = int(round(4.0 * beat_sec * fps))
+    if lag4 <= 0 or len(env) < lag4 * 3:
+        return "4/4"
+
+    onset = np.maximum(0.0, np.diff(env, prepend=env[0]))
+    n3 = max(1, len(onset) - lag3)
+    n4 = max(1, len(onset) - lag4)
+    s3 = float(np.dot(onset[:n3], onset[lag3 : lag3 + n3])) / n3
+    s4 = float(np.dot(onset[:n4], onset[lag4 : lag4 + n4])) / n4
+    if s3 > 1.38 * max(s4, 1e-6):
+        lag6 = lag3 * 2
+        if lag6 < len(onset) - 10:
+            n6 = max(1, len(onset) - lag6)
+            s6 = float(np.dot(onset[:n6], onset[lag6 : lag6 + n6])) / n6
+            if bpm >= 115.0 and s6 >= 0.85 * s3:
+                return "6/8"
+        return "3/4"
+    return "4/4"
+
+
 def analyze_audio(
     wav_bytes: bytes,
     bpm_override: Optional[float] = None,
@@ -357,12 +387,14 @@ def analyze_audio(
         detected_scale = scale_override
 
     low_conf_warning = key_conf < 0.6
-    bar_duration_sec = 4.0 * (60.0 / bpm)
+    time_sig = estimate_time_signature(samples, sr, bpm)
+    beats_per_bar = 6.0 if time_sig == "6/8" else (3.0 if time_sig == "3/4" else 4.0)
+    bar_duration_sec = beats_per_bar * (60.0 / bpm)
     bars = max(1, int(round(duration_sec / max(bar_duration_sec, 0.1))))
 
     return {
         "bpm": bpm,
-        "time_signature": "4/4",
+        "time_signature": time_sig,
         "detected_key": detected_key,
         "detected_scale": detected_scale,
         "key_confidence": key_conf,

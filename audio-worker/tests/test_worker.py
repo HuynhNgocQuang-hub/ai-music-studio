@@ -515,3 +515,187 @@ def test_expanded_instrument_programs() -> None:
     assert not missing, f"Missing instrument mappings: {missing}"
     for inst_id, prog in INSTRUMENT_PROGRAMS.items():
         assert isinstance(prog, int) and 0 <= prog <= 127, f"Invalid GM program for {inst_id}: {prog}"
+
+
+def test_track_eq_and_send_fx_render() -> None:
+    """3-Band EQ persists in TrackState and Reverb/Delay Send FX render cleanly under -1.0 dBFS ceiling."""
+    sr = 44100
+    notes = [MidiNote(pitch=69, start_beat=0.0, duration=1.0, velocity=115)]
+
+    base_project = ProjectState(
+        project_id="test_eq_fx",
+        analysis={"bpm": 120.0, "time_signature": "4/4", "bars": 2},
+        song_structure={"total_bars": 2},
+        tracks={
+            "lead": TrackState(
+                type="midi",
+                instrument="synth_lead",
+                volume=0.9,
+                pan=0.0,
+                notes=notes,
+            )
+        },
+    )
+    dry_mix, dry_stems, _ = render_project_mix(base_project, mode="ai_mix", apply_mastering=False, sample_rate=sr)
+
+    fx_project = ProjectState(
+        project_id="test_eq_fx",
+        analysis={"bpm": 120.0, "time_signature": "4/4", "bars": 2},
+        song_structure={"total_bars": 2},
+        tracks={
+            "lead": TrackState(
+                type="midi",
+                instrument="synth_lead",
+                volume=0.9,
+                pan=0.0,
+                low_db=8.0,
+                mid_db=-3.0,
+                high_db=7.0,
+                reverb_send=0.8,
+                delay_send=0.6,
+                notes=notes,
+            )
+        },
+    )
+    fx_mix, fx_stems, out_sr = render_project_mix(fx_project, mode="ai_mix", apply_mastering=True, sample_rate=sr)
+    assert out_sr == sr
+    assert fx_mix.shape == dry_mix.shape
+    assert np.isfinite(fx_mix).all()
+    assert not np.allclose(fx_stems["lead"], dry_stems["lead"]), "EQ should alter rendered stem spectrum"
+    # Second bar (t >= 1.0s) has dry note silent -> FX send bus must contribute tail energy
+    assert float(np.sum(np.abs(fx_mix[int(1.2 * sr) :]))) > 1.0
+    assert peak_dbfs(fx_mix) <= -1.0 + 1e-4
+
+
+def test_formant_preserving_autotune_and_6_8_vocal_carve(client: TestClient) -> None:
+    """Formant preservation keeps spectral envelope closer to original when shifting +4 semitones; 6/8 & 320k work."""
+    from app.services.autotune import _pitch_shift_frame_ola, apply_autotune
+
+    sr = 44100
+    dur = 1.6
+    n = int(dur * sr)
+    t = np.arange(n, dtype=np.float32) / sr
+    # Synthetic vocal-like glottal pulse train with formant peak around 650 Hz (F1) and 1700 Hz (F2)
+    f0 = 200.0
+    voice = np.zeros(n, dtype=np.float32)
+    for k in range(1, 14):
+        fk = k * f0
+        gain = 0.6 * np.exp(-((fk - 650.0) / 180.0) ** 2) + 0.45 * np.exp(-((fk - 1700.0) / 260.0) ** 2) + 0.06
+        voice += float(gain) * np.sin(2.0 * np.pi * fk * t)
+    voice = (voice / max(1e-5, float(np.max(np.abs(voice)))) * 0.4).astype(np.float32)
+
+    ratio_up = float(2.0 ** (-4.0 / 12.0))  # upward pitch shift +4 semitones (ratio < 1 in source step)
+    ratios = np.full(1 + n // 512, ratio_up, dtype=np.float32)
+    naive = _pitch_shift_frame_ola(voice, ratios, hop_length=512, win_length=2048, sr=sr, preserve_formant=False)
+    preserved = _pitch_shift_frame_ola(voice, ratios, hop_length=512, win_length=2048, sr=sr, preserve_formant=True)
+
+    assert len(preserved) == n
+    assert np.isfinite(preserved).all()
+
+    def high_low_ratio(sig: np.ndarray) -> float:
+        spec = np.abs(np.fft.rfft(sig * np.hanning(len(sig))))
+        freqs = np.fft.rfftfreq(len(sig), 1.0 / sr)
+        low_e = float(np.sum(spec[(freqs >= 450) & (freqs <= 900)] ** 2))
+        high_e = float(np.sum(spec[(freqs >= 1400) & (freqs <= 2600)] ** 2))
+        return high_e / max(low_e, 1e-9)
+
+    orig_ratio = high_low_ratio(voice)
+    err_preserved = abs(high_low_ratio(preserved) - orig_ratio)
+    err_naive = abs(high_low_ratio(naive) - orig_ratio)
+    assert err_preserved < err_naive, f"Expected formant preservation to track original envelope ({err_preserved:.3f} vs {err_naive:.3f})"
+
+    tuned_bytes, _, out_sr = apply_autotune(encode_wav_bytes(voice, sr), apply_preset("modern", "C", "major"))
+    assert out_sr == sr
+    tuned_samples, _ = decode_wav_bytes(tuned_bytes)
+    assert len(tuned_samples) == n
+
+    # 6/8 render length & MP3 320k/192k export test
+    vocal_b64 = base64.b64encode(encode_wav_bytes(voice, sr)).decode("ascii")
+    proj_68 = {
+        "project_id": "proj_68_worker",
+        "audio_assets": {"dry_denoised_ref": "mem://dry/68.wav"},
+        "analysis": {"bpm": 120.0, "time_signature": "6/8", "bars": 1},
+        "song_structure": {"total_bars": 1},
+        "mastering": {"auto_mix_enabled": True, "limiter_ceiling_db": -1.0, "target_lufs": -14.0},
+        "tracks": {
+            "vocal": {"type": "audio", "volume": 0.9, "pan": 0.0, "clips": [{"id": "v1", "source": "dry_denoised_ref", "start_bar": 1.0}]},
+            "harmony": {"type": "midi", "instrument": "grand_piano", "volume": 0.8, "pan": 0.0, "notes": [{"pitch": 60, "start_beat": 0.0, "duration": 3.0, "velocity": 100}]},
+        },
+    }
+    assets_68 = {"mem://dry/68.wav": vocal_b64}
+    r_68 = client.post("/internal/audio/render", json={"project": proj_68, "audio_assets_base64": assets_68, "mode": "ai_mix", "apply_mastering": True})
+    assert r_68.status_code == 200
+    arr_68, sr_68 = sf.read(io.BytesIO(r_68.content), dtype="float32")
+    assert len(arr_68) == int(round(6.0 * (60.0 / 120.0) * sr_68))
+    assert peak_dbfs(arr_68) <= -1.0
+
+    for br in ("320k", "192k"):
+        mp3_resp = client.post(
+            "/internal/audio/export",
+            json={"project": proj_68, "audio_assets_base64": assets_68, "format": "mp3", "bitrate": br, "apply_mastering": True},
+        )
+        assert mp3_resp.status_code in (200, 503)
+        if mp3_resp.status_code == 200:
+            assert len(mp3_resp.content) > 512
+
+
+def test_worker_dos_clamps_and_render_bounds(client: TestClient) -> None:
+    """Verify render_project_mix rejects extreme total_bars with 400, clamps bpm >= 40, and rejects zero-byte uploads."""
+    bad_up = client.post(
+        "/internal/audio/denoise",
+        files={"file": ("empty.wav", b"", "audio/wav")},
+    )
+    assert bad_up.status_code == 400
+
+    excessive_proj = {
+        "project_id": "proj_dos_excessive",
+        "analysis": {"bpm": 120.0, "time_signature": "4/4", "bars": 2},
+        "song_structure": {"total_bars": 99999},
+        "mastering": {"auto_mix_enabled": True, "limiter_ceiling_db": -1.0},
+        "tracks": {
+            "lead": {
+                "type": "midi",
+                "instrument": "grand_piano",
+                "volume": 0.8,
+                "notes": [{"pitch": 60, "start_beat": 0.0, "duration": 1.0, "velocity": 80}],
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="256 bars"):
+        render_project_mix(ProjectState.model_validate(excessive_proj))
+
+    bad_render = client.post("/internal/audio/render", json={"project": excessive_proj, "mode": "ai_mix"})
+    assert bad_render.status_code == 400
+
+    bad_bpm_render = client.post(
+        "/internal/audio/render",
+        json={
+            "project": {
+                **excessive_proj,
+                "analysis": {"bpm": 5.0, "time_signature": "4/4", "bars": 2},
+                "song_structure": {"total_bars": 2},
+            },
+            "mode": "ai_mix",
+        },
+    )
+    assert bad_bpm_render.status_code == 422
+
+    base_valid = ProjectState.model_validate({
+        **excessive_proj,
+        "project_id": "proj_dos_bpm_clamp",
+        "analysis": {"bpm": 120.0, "time_signature": "4/4", "bars": 2},
+        "song_structure": {"total_bars": 2},
+    })
+    unvalidated_low_bpm = base_valid.model_copy(
+        update={"analysis": base_valid.analysis.model_copy(update={"bpm": 5.0})}
+    )
+    mix, stems, sr = render_project_mix(
+        unvalidated_low_bpm,
+        mode="ai_mix",
+        apply_mastering=True,
+        sample_rate=44100,
+    )
+    assert sr == 44100
+    assert len(mix) == int(round(2 * 4 * (60.0 / 40.0) * 44100))
+    assert "lead" in stems and len(stems["lead"]) == len(mix)
+    assert peak_dbfs(mix) <= -1.0 + 1e-4

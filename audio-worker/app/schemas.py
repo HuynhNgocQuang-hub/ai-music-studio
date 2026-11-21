@@ -84,6 +84,11 @@ class TrackState(_WorkerBaseModel):
     solo: bool = False
     volume: float = Field(default=0.9, ge=0.0, le=1.2)
     pan: float = Field(default=0.0, ge=-1.0, le=1.0)
+    low_db: float = Field(default=0.0, ge=-12.0, le=12.0)
+    mid_db: float = Field(default=0.0, ge=-12.0, le=12.0)
+    high_db: float = Field(default=0.0, ge=-12.0, le=12.0)
+    reverb_send: float = Field(default=0.0, ge=0.0, le=1.0)
+    delay_send: float = Field(default=0.0, ge=0.0, le=1.0)
     instrument: Optional[str] = None
     clips: list[AudioClip] = Field(default_factory=list)
     notes: list[MidiNote] = Field(default_factory=list)
@@ -158,11 +163,19 @@ class ExportRequest(_WorkerBaseModel):
     mode: PreviewMode = "ai_mix"
     apply_mastering: bool = True
     sample_rate: int = Field(default=44100, ge=8000, le=96000)
+    bitrate: Literal["192k", "320k"] = "320k"
 
     @field_validator("mode", mode="before")
     @classmethod
     def normalize_mode(cls, value: Any) -> Any:
         return _normalize_mode_value(value)
+
+    @field_validator("bitrate", mode="before")
+    @classmethod
+    def normalize_bitrate(cls, value: Any) -> str:
+        if isinstance(value, str) and value.strip().startswith("192"):
+            return "192k"
+        return "320k"
 
 
 class DenoiseWorkerResponse(_WorkerBaseModel):
