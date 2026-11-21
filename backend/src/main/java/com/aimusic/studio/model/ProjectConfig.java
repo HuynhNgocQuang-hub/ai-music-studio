@@ -40,6 +40,9 @@ public class ProjectConfig {
     @JsonProperty("language")
     private String language;
 
+    @JsonProperty("add_count_in_tail")
+    private Boolean addCountInTail;
+
     public ProjectConfig() {}
 
     public String getTitle() { return title; }
@@ -83,4 +86,7 @@ public class ProjectConfig {
 
     public String getLanguage() { return language; }
     public void setLanguage(String language) { this.language = language; }
+
+    public Boolean getAddCountInTail() { return addCountInTail; }
+    public void setAddCountInTail(Boolean addCountInTail) { this.addCountInTail = addCountInTail; }
 }

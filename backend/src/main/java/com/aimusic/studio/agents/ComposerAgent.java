@@ -124,6 +124,15 @@ public class ComposerAgent {
 
             sections.add(new SongSection("Outro", cursor, outroBars, 0.35, false));
             totalBars = cursor + outroBars - 1;
+        } else if (Boolean.TRUE.equals(cfg.getAddCountInTail())) {
+            resolvedMotifPos = "main";
+            sections.add(new SongSection("Count-in", 1, 1, 0.25, false));
+            sections.add(new SongSection("Main", 2, inputBars, 0.72, true));
+            sections.add(new SongSection("Tail", 2 + inputBars, 1, 0.25, false));
+            totalBars = inputBars + 2;
+            for (MidiNote mn : melodyNotes) {
+                mn.setStartBeat(Math.round((mn.getStartBeat() + beatsPerBar) * 1000.0) / 1000.0);
+            }
         } else {
             totalBars = inputBars;
             resolvedMotifPos = "main";

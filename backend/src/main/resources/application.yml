@@ -6,12 +6,12 @@ spring:
     name: ai-music-studio-backend
   servlet:
     multipart:
-      max-file-size: 100MB
-      max-request-size: 100MB
+      max-file-size: 55MB
+      max-request-size: 55MB
   data:
     redis:
       url: ${REDIS_URL:redis://localhost:6379/0}
-      timeout: 500ms
+      timeout: 3000ms
       connect-timeout: 500ms
 
 app:

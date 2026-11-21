@@ -2,8 +2,10 @@ package com.aimusic.studio;
 
 import com.aimusic.studio.audio.JavaAudioFallbackService;
 import com.aimusic.studio.model.ProjectState;
+import com.aimusic.studio.model.TrackState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -53,6 +55,9 @@ class ApiMockMvcTests {
                         .header("X-Gemini-Api-Key", "AIzaTestHeaderKey12345")
                         .header("X-LLM-Provider", "gemini"))
                 .andExpect(status().isOk())
+                .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                .andExpect(header().string("X-Frame-Options", "DENY"))
+                .andExpect(header().string("Referrer-Policy", "no-referrer"))
                 .andExpect(jsonPath("$.status").value("ok"))
                 .andExpect(jsonPath("$.redis.backend", anyOf(is("memory"), is("redis"))))
                 .andExpect(jsonPath("$.llm_providers.gemini_configured").value(true))
@@ -155,12 +160,8 @@ class ApiMockMvcTests {
                 .andReturn();
         String jobId = objectMapper.readTree(jobRes.getResponse().getContentAsString()).get("job_id").asText();
 
-        // Wait briefly for virtual thread job completion then fetch SSE stream
-        Thread.sleep(300);
-        MvcResult sseRes = mockMvc.perform(get("/api/jobs/" + jobId + "/events"))
-                .andExpect(status().isOk())
-                .andReturn();
-        String sseBody = sseRes.getResponse().getContentAsString();
+        // Wait for async job SSE stream to emit completed event
+        String sseBody = awaitJobCompletedSse(jobId);
         assertTrue(sseBody.contains("event:agent_step") || sseBody.contains("event: agent_step"));
         assertTrue(sseBody.contains("event:completed") || sseBody.contains("event: completed"));
 
@@ -302,6 +303,21 @@ class ApiMockMvcTests {
                 .andExpect(jsonPath("$.total").value(7));
     }
 
+    private String awaitJobCompletedSse(String jobId) throws Exception {
+        String sseBody = "";
+        for (int attempt = 0; attempt < 50; attempt++) {
+            MvcResult sseRes = mockMvc.perform(get("/api/jobs/" + jobId + "/events"))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            sseBody = sseRes.getResponse().getContentAsString();
+            if (sseBody.contains("event:completed") || sseBody.contains("event: completed")) {
+                return sseBody;
+            }
+            Thread.sleep(100);
+        }
+        return sseBody;
+    }
+
     private byte[] makeSilencePaddedVocalWav(double leadSilSec, double toneSec, double trailSilSec, int sr) {
         int nLead = (int) (leadSilSec * sr);
         int nTone = (int) (toneSec * sr);
@@ -333,8 +349,7 @@ class ApiMockMvcTests {
                 .andExpect(status().isOk())
                 .andReturn();
         String jobId = objectMapper.readTree(genRes.getResponse().getContentAsString()).get("job_id").asText();
-        Thread.sleep(350);
-        mockMvc.perform(get("/api/jobs/" + jobId + "/events")).andExpect(status().isOk());
+        awaitJobCompletedSse(jobId);
 
         mockMvc.perform(get("/api/projects/" + pid))
                 .andExpect(status().isOk())
@@ -592,5 +607,97 @@ class ApiMockMvcTests {
                 .andExpect(jsonPath("$.analysis.bpm").value(138.0))
                 .andExpect(jsonPath("$.analysis.detected_key").value("F#"))
                 .andExpect(jsonPath("$.analysis.detected_scale").value("minor"));
+    }
+
+    @Test
+    void phase4ProjectCrudEqSendFxAndLlmTestEndpoint() throws Exception {
+        String pid = "crud_fx_mockmvc_1";
+        ProjectState state = ProjectState.createDefault(pid, "CRUD + FX Test");
+        state.getAnalysis().setBpm(120.0);
+        state.getSongStructure().setTotalBars(2);
+        state.getSongStructure().setSections(List.of(
+                new com.aimusic.studio.model.SongSection("Chorus", 1, 2, 0.88, true)
+        ));
+        state.getLyrics().getLines().add(
+                new com.aimusic.studio.model.LyricLine("Chorus", 1, "Manual lyric line")
+        );
+        TrackState lead = state.getTracks().get("lead");
+        lead.setLowDb(6.0);
+        lead.setMidDb(-3.0);
+        lead.setHighDb(4.0);
+        lead.setReverbSend(0.75);
+        lead.setDelaySend(0.5);
+        lead.setNotes(List.of(new com.aimusic.studio.model.MidiNote(69, 0.0, 1.0, 110, 1.0)));
+
+        // Create / Update via sync
+        mockMvc.perform(put("/api/projects/" + pid + "/sync")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(state)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tracks.lead.low_db").value(6.0))
+                .andExpect(jsonPath("$.tracks.lead.reverb_send").value(0.75))
+                .andExpect(jsonPath("$.lyrics.lines[0].text").value("Manual lyric line"));
+
+        // Read & Verify Export WAV succeeds with EQ + Send FX
+        mockMvc.perform(get("/api/projects/" + pid))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tracks.lead.delay_send").value(0.5))
+                .andExpect(jsonPath("$.song_structure.sections[0].energy").value(0.88));
+
+        byte[] wav = mockMvc.perform(post("/api/projects/" + pid + "/export/audio")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"format\":\"wav\",\"mode\":\"ai_mix\",\"apply_mastering\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("audio/wav"))
+                .andReturn().getResponse().getContentAsByteArray();
+        assertTrue(wav.length > 44);
+
+        // Health LLM test probe returns structured response even in mock mode
+        mockMvc.perform(post("/api/health/llm-test")
+                        .header("X-LLM-Provider", "mock")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.provider").value("mock"))
+                .andExpect(jsonPath("$.is_mock").value(true));
+
+        // 6/8 time signature + expanded coach chat actions
+        state.getAnalysis().setTimeSignature("6/8");
+        mockMvc.perform(put("/api/projects/" + pid + "/sync")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(state)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.analysis.time_signature").value("6/8"));
+
+        mockMvc.perform(post("/api/coach/chat")
+                        .header("X-LLM-Provider", "mock")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"message\":\"Mix bị nhỏ và giọng hơi phô, chỉnh nhanh hơn chút\",\"history\":[]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.suggested_actions.length()").value(org.hamcrest.Matchers.greaterThanOrEqualTo(2)));
+
+        byte[] midi68 = mockMvc.perform(post("/api/projects/" + pid + "/export/midi"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray();
+        assertTrue(midi68.length > 16);
+
+        // Security validations: reject non-mem asset refs and invalid overdub file extensions
+        mockMvc.perform(get("/api/audio/asset").param("ref", "project:secret"))
+                .andExpect(status().isBadRequest());
+
+        MockMultipartFile badOverdub = new MockMultipartFile(
+                "file", "bad.txt", "text/plain", "not audio".getBytes());
+        mockMvc.perform(multipart("/api/studio/overdub-fit-check")
+                        .file(badOverdub)
+                        .param("project_id", pid))
+                .andExpect(status().isBadRequest());
+
+        // Delete & Confirm 404 afterwards
+        mockMvc.perform(delete("/api/projects/" + pid))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("deleted"));
+
+        mockMvc.perform(get("/api/projects/" + pid))
+                .andExpect(status().isNotFound());
     }
 }

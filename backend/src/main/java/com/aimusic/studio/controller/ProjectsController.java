@@ -129,8 +129,9 @@ public class ProjectsController {
 
         // Try Docker audio-worker first when running (handles MP3/FluidSynth seamlessly)
         Map<String, byte[]> audioAssets = collectAudioAssets(project);
+        String bitrate = req.getBitrate();
         Optional<byte[]> workerExport = audioWorkerClient.exportAudio(
-                project, audioAssets, format, req.getMode(), req.isApplyMastering(), sr);
+                project, audioAssets, format, req.getMode(), req.isApplyMastering(), sr, bitrate);
         if (workerExport.isPresent()) {
             return buildExportResponse(projectId, format, workerExport.get());
         }
@@ -139,7 +140,7 @@ public class ProjectsController {
                 project, store, req.getMode(), req.isApplyMastering(), sr);
 
         byte[] data = switch (format) {
-            case "mp3" -> audioFallback.exportMp3ViaFfmpeg(rendered.stereo(), rendered.sampleRate());
+            case "mp3" -> audioFallback.exportMp3ViaFfmpeg(rendered.stereo(), rendered.sampleRate(), bitrate);
             case "stems" -> audioFallback.exportStemsZip(rendered.stems(), rendered.sampleRate());
             default -> audioFallback.encodeWavStereo(rendered.stereo(), rendered.sampleRate());
         };
@@ -152,9 +153,10 @@ public class ProjectsController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + projectId + "' not found."));
         byte[] midi = audioFallback.exportMidi(project);
+        String safeName = sanitizeFilename(projectId);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_TYPE, "audio/midi")
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + projectId + ".mid\"")
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + safeName + ".mid\"")
                 .body(midi);
     }
 
@@ -164,32 +166,51 @@ public class ProjectsController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + projectId + "' not found."));
         byte[] bundle = audioFallback.exportAimusicBundle(project, store);
+        String safeName = sanitizeFilename(projectId);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_OCTET_STREAM_VALUE)
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + projectId + ".aimusic\"")
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + safeName + ".aimusic\"")
                 .body(bundle);
     }
 
     @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ProjectState importAimusic(@RequestParam("file") MultipartFile file) throws IOException {
-        return audioFallback.importAimusicBundle(file.getBytes(), store);
+    public ProjectState importAimusic(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "overwrite", defaultValue = "true") boolean overwrite
+    ) throws IOException {
+        if (file == null || file.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Uploaded .aimusic file is empty.");
+        }
+        long maxBundleBytes = Math.max(properties.getMaxUploadBytes(), 50L * 1024 * 1024);
+        if (file.getSize() > maxBundleBytes) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+                    "Uploaded .aimusic archive exceeds maximum allowed size.");
+        }
+        return audioFallback.importAimusicBundle(file.getBytes(), store, overwrite);
     }
 
     private ResponseEntity<byte[]> buildExportResponse(String projectId, String format, byte[] data) {
+        String safeName = sanitizeFilename(projectId);
         return switch (format) {
             case "mp3" -> ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_TYPE, "audio/mpeg")
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + projectId + ".mp3\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + safeName + ".mp3\"")
                     .body(data);
             case "stems" -> ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_TYPE, "application/zip")
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + projectId + "_stems.zip\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + safeName + "_stems.zip\"")
                     .body(data);
             default -> ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_TYPE, "audio/wav")
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + projectId + ".wav\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + safeName + ".wav\"")
                     .body(data);
         };
+    }
+
+    private static String sanitizeFilename(String rawId) {
+        if (rawId == null || rawId.isBlank()) return "project";
+        String cleaned = rawId.replaceAll("[^A-Za-z0-9_-]", "_");
+        return cleaned.isBlank() ? "project" : cleaned;
     }
 
     public Map<String, byte[]> collectAudioAssets(ProjectState project) {

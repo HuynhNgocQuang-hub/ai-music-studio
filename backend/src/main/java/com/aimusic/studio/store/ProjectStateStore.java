@@ -204,6 +204,8 @@ public class ProjectStateStore {
                     } else {
                         redisTemplate.opsForValue().set(key, payload);
                     }
+                    // Keep short hot-failover copy so transient mid-request Redis timeouts never 404
+                    memSet(key, payload, exp > 0 ? Math.min(exp, 30L) : 30L);
                     markRedisUp();
                     return project;
                 } catch (Exception ex) {
@@ -408,6 +410,8 @@ public class ProjectStateStore {
                 } else {
                     redisTemplate.opsForValue().set(key, data);
                 }
+                // Short hot-failover mirror prevents mid-pipeline 404 on transient Redis timeouts
+                memSet(key, data, exp > 0 ? Math.min(exp, 30L) : 30L);
                 markRedisUp();
                 return ref;
             } catch (Exception ex) {

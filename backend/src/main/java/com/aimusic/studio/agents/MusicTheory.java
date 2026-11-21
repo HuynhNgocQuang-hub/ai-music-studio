@@ -58,8 +58,11 @@ public final class MusicTheory {
     );
 
     private static final Pattern COPYRIGHT_PATTERN = Pattern.compile(
-            "\\b(like|style of|sound like|copy|imitate)\\s+(taylor swift|son tung|sơn tùng|den vau|đen vâu|bts|blackpink|ed sheeran|adele|the weeknd|drake)\\b",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+            "(?iu)(?:"
+                    + "\\b(?:sound\\s+like|sounds\\s+like|style\\s+of|copy|imitate|cover\\s+of|type\\s+beat\\s+(?:of|for))\\s+(?!pop\\b|ballad\\b|lo-?fi\\b|r&b\\b|hip-?hop\\b|edm\\b|acoustic\\b|rock\\b|jazz\\b)[\\p{L}\\p{N}._-]+(?:\\s+(?!track\\b|song\\b|beat\\b|vibe\\b)[\\p{L}\\p{N}._-]+){0,2}"
+                    + "|\\b(?:giống|nhái|bắt chước|theo phong cách(?:\\s+của)?|như bài(?:\\s+hát)?|type\\s+beat)\\s+[\\p{L}\\p{N}._-]+(?:\\s+[\\p{L}\\p{N}._-]+){0,2}"
+                    + "|\\b(?:like\\s+)?(?:taylor swift|son tung|sơn tùng|den vau|đen vâu|my tam|mỹ tâm|hoang thuy linh|hoàng thùy linh|bts|blackpink|ed sheeran|adele|the weeknd|drake|billie eilish|justin bieber)\\b"
+                    + ")"
     );
 
     private static final Pattern CHORD_PATTERN = Pattern.compile("^([A-Ga-g][#b]?)(.*)$");

@@ -2,8 +2,10 @@ package com.aimusic.studio.controller;
 
 import com.aimusic.studio.agents.CoachLyricistAgent;
 import com.aimusic.studio.agents.LlmContextHolder;
+import com.aimusic.studio.audio.AudioValidationException;
 import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
+import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.AudioAssets;
 import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.ProjectLyrics;
@@ -91,11 +93,32 @@ public class StudioController {
         }
     }
 
+    private static final long MAX_OVERDUB_UPLOAD_BYTES = 50L * 1024L * 1024L;
+
     @PostMapping(value = "/api/studio/overdub-fit-check", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public OverdubFitCheckResponse overdubFitCheck(
             @RequestParam("project_id") String projectId,
             @RequestParam("file") MultipartFile file
     ) throws IOException {
+        if (projectId == null || projectId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
+        }
+        String filename = (file.getOriginalFilename() != null && !file.getOriginalFilename().isBlank())
+                ? file.getOriginalFilename() : "overdub.wav";
+        int dot = filename.lastIndexOf('.');
+        String ext = (dot >= 0 && dot < filename.length() - 1)
+                ? filename.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
+        if (!AppProperties.ALLOWED_AUDIO_EXTENSIONS.contains(ext)) {
+            throw new AudioValidationException(
+                    "Unsupported audio format '." + ext + "'. Allowed: .wav, .mp3, .m4a, .ogg, .flac",
+                    HttpStatus.BAD_REQUEST);
+        }
+        if (file.getSize() <= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Empty overdub audio file.");
+        }
+        if (file.getSize() > MAX_OVERDUB_UPLOAD_BYTES) {
+            throw new AudioValidationException("Overdub audio exceeds maximum 50 MB.", HttpStatus.PAYLOAD_TOO_LARGE);
+        }
         byte[] audioBytes = file.getBytes();
         if (audioBytes.length == 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Empty overdub audio file.");
@@ -106,7 +129,6 @@ public class StudioController {
                 ? state.getAnalysis().getBpm() : 100.0;
         String key = state.getAnalysis() != null ? state.getAnalysis().getDetectedKey() : "C";
         String scale = state.getAnalysis() != null ? state.getAnalysis().getDetectedScale() : "major";
-        String filename = file.getOriginalFilename() != null ? file.getOriginalFilename() : "overdub.wav";
 
         Optional<Map<String, Object>> workerResp = audioWorkerClient.overdubFitCheck(
                 audioBytes, filename, bpm, key, scale);

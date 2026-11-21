@@ -247,6 +247,45 @@ public class LlmAdapter {
         return generateMock(prompt, role, true);
     }
 
+    public Map<String, Object> testConnection(String explicitProvider) {
+        Provider selected = resolveProvider("coach", explicitProvider);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("provider", selected.value());
+        if (selected == Provider.MOCK) {
+            out.put("ok", false);
+            out.put("is_mock", true);
+            out.put("model", "mock-music-v1");
+            out.put("latency_ms", 0);
+            out.put("message", "Chua co API Key hop le hoac dang chon Mock Provider.");
+            return out;
+        }
+        long started = System.nanoTime();
+        try {
+            LlmResponse resp = selected == Provider.GEMINI
+                    ? callGemini("Reply with OK.", "Respond briefly with OK.", false)
+                    : callOpenai("Reply with OK.", "Respond briefly with OK.", false);
+            long latencyMs = Math.max(1L, (System.nanoTime() - started) / 1_000_000L);
+            out.put("ok", true);
+            out.put("is_mock", false);
+            out.put("model", resp.model());
+            out.put("latency_ms", latencyMs);
+            out.put("message", "Ket noi thanh cong (" + resp.provider().value() + " / " + resp.model() + ").");
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            out.put("ok", false);
+            out.put("is_mock", false);
+            out.put("latency_ms", Math.max(0L, (System.nanoTime() - started) / 1_000_000L));
+            out.put("message", "Kiem tra API key bi gian doan.");
+        } catch (Exception ex) {
+            long latencyMs = Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
+            out.put("ok", false);
+            out.put("is_mock", false);
+            out.put("latency_ms", latencyMs);
+            out.put("message", ex.getMessage() != null ? ex.getMessage() : "Loi ket noi LLM API.");
+        }
+        return out;
+    }
+
     private LlmResponse callGemini(String prompt, String systemPrompt, boolean asJson) throws Exception {
         String apiKey = effectiveGeminiKey();
         String model = properties.getGeminiModel() != null && !properties.getGeminiModel().isBlank()
@@ -254,7 +293,7 @@ public class LlmAdapter {
 
         String url = "https://generativelanguage.googleapis.com/v1beta/models/"
                 + URLEncoder.encode(model, StandardCharsets.UTF_8)
-                + ":generateContent?key=" + URLEncoder.encode(apiKey, StandardCharsets.UTF_8);
+                + ":generateContent";
 
         Map<String, Object> genConfig = new LinkedHashMap<>();
         genConfig.put("temperature", asJson ? 0.3 : 0.5);
@@ -271,12 +310,13 @@ public class LlmAdapter {
                 .uri(URI.create(url))
                 .timeout(Duration.ofSeconds(25))
                 .header("Content-Type", "application/json")
+                .header("x-goog-api-key", apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
                 .build();
 
         HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-            throw new IllegalStateException("Gemini HTTP " + resp.statusCode());
+            throw new IllegalStateException("Gemini HTTP " + resp.statusCode() + extractHttpErrorDetail(resp.body()));
         }
 
         JsonNode root = objectMapper.readTree(resp.body());
@@ -313,12 +353,36 @@ public class LlmAdapter {
 
         HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-            throw new IllegalStateException("OpenAI HTTP " + resp.statusCode());
+            throw new IllegalStateException("OpenAI HTTP " + resp.statusCode() + extractHttpErrorDetail(resp.body()));
         }
 
         JsonNode root = objectMapper.readTree(resp.body());
         String text = root.path("choices").path(0).path("message").path("content").asText("");
         return new LlmResponse(Provider.OPENAI, model, text, null, false);
+    }
+
+    private static final Pattern API_KEY_LEAK_PATTERN =
+            Pattern.compile("(?:AIza[0-9A-Za-z_-]{12,}|AQ\\.[0-9A-Za-z_.-]{12,}|sk-[0-9A-Za-z_-]{12,})");
+
+    private String extractHttpErrorDetail(String responseBody) {
+        if (responseBody == null || responseBody.isBlank()) {
+            return "";
+        }
+        try {
+            JsonNode root = objectMapper.readTree(responseBody);
+            String msg = root.path("error").path("message").asText("").trim();
+            String status = root.path("error").path("status").asText("").trim();
+            if (!msg.isEmpty()) {
+                msg = API_KEY_LEAK_PATTERN.matcher(msg.replaceAll("\\s+", " ")).replaceAll("[REDACTED]");
+                if (msg.length() > 180) {
+                    msg = msg.substring(0, 180) + "...";
+                }
+                return status.isEmpty() ? ": " + msg : " (" + status + "): " + msg;
+            }
+        } catch (Exception ignored) {
+            // Keep HTTP status message only when response body is not structured JSON.
+        }
+        return "";
     }
 
     private LlmResponse generateMock(String prompt, String role, boolean asJson) {

@@ -589,4 +589,38 @@ class AgentPipelineTests {
         assertFalse(enabledAccOut.getTracks().get("lead").getNotes().isEmpty());
         assertFalse(enabledAccOut.getLyrics().getLines().isEmpty());
     }
+
+    @Test
+    void srsAuditCountInTail68MeterAndExpandedCopyrightSanitizer() {
+        String mixed = MusicTheory.sanitizeUserPrompt("Phong cách của Mỹ Tâm hoặc sound like Billie Eilish, warm Lo-fi Pop");
+        assertFalse(mixed.toLowerCase().contains("mỹ tâm"));
+        assertFalse(mixed.toLowerCase().contains("billie eilish"));
+        assertTrue(mixed.toLowerCase().contains("lo-fi pop"));
+
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        AgentOrchestrator orch = new AgentOrchestrator(
+                new ComposerAgent(adapter),
+                new ArrangerAgent(adapter),
+                new CoachLyricistAgent(adapter),
+                new QaReviewerAgent(adapter),
+                store,
+                objectMapper,
+                60.0,
+                2
+        );
+
+        ProjectState input = sampleProjectState("preserve", "accompaniment");
+        input.getAnalysis().setTimeSignature("6/8");
+        input.getConfig().setAddCountInTail(true);
+        ProjectState result = orch.runGenerate(input, null, "job_countin_68", null, null, null, 60.0);
+
+        assertEquals(3, result.getSongStructure().getSections().size());
+        assertEquals("Count-in", result.getSongStructure().getSections().get(0).getName());
+        assertEquals("Main", result.getSongStructure().getSections().get(1).getName());
+        assertEquals("Tail", result.getSongStructure().getSections().get(2).getName());
+        assertEquals(6.0, result.getMelodyNotes().get(0).getStartBeat(), 0.01);
+        assertEquals(2.0, result.getTracks().get("vocal").getClips().get(0).getStartBar(), 0.01);
+        assertTrue(result.getQaStatus().isApproved());
+    }
 }

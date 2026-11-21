@@ -31,6 +31,7 @@ import javax.sound.midi.Sequence;
 import javax.sound.midi.ShortMessage;
 import javax.sound.midi.Track;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
@@ -44,6 +45,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -550,5 +552,157 @@ class AudioAndLimiterTests {
         Map<String, Object> fallbackPing = redisStore.ping();
         assertEquals("memory", fallbackPing.get("backend"));
         assertEquals(false, fallbackPing.get("connected"));
+    }
+
+    @Test
+    void phase4TrackEqAndSendFxPersistAndRespectLimiter() throws Exception {
+        ProjectState baseline = ProjectState.createDefault("fx_eq_1", "FX EQ Persistence");
+        baseline.getAnalysis().setBpm(120.0);
+        baseline.getAnalysis().setBars(2);
+        baseline.getSongStructure().setTotalBars(2);
+        TrackState leadBase = baseline.getTracks().get("lead");
+        leadBase.setNotes(List.of(new MidiNote(69, 0.0, 1.0, 110, 1.0)));
+
+        String json = objectMapper.writeValueAsString(baseline);
+        assertTrue(json.contains("\"low_db\""), "Serialized TrackState must contain low_db");
+        assertTrue(json.contains("\"reverb_send\""), "Serialized TrackState must contain reverb_send");
+
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        float[][] flatMix = audioService.renderProjectMix(baseline, store, "ai_mix", true, 44100).stereo();
+
+        // Mutate EQ + Send FX via JSON roundtrip to verify backend TrackState persistence
+        baseline.getTracks().get("lead").setLowDb(9.0);
+        baseline.getTracks().get("lead").setMidDb(-4.0);
+        baseline.getTracks().get("lead").setHighDb(6.0);
+        baseline.getTracks().get("lead").setReverbSend(0.75);
+        baseline.getTracks().get("lead").setDelaySend(0.5);
+        String savedJson = objectMapper.writeValueAsString(baseline);
+        ProjectState reloaded = objectMapper.readValue(savedJson, ProjectState.class);
+
+        TrackState reloadedLead = reloaded.getTracks().get("lead");
+        assertEquals(9.0, reloadedLead.getLowDb(), 1e-6);
+        assertEquals(-4.0, reloadedLead.getMidDb(), 1e-6);
+        assertEquals(6.0, reloadedLead.getHighDb(), 1e-6);
+        assertEquals(0.75, reloadedLead.getReverbSend(), 1e-6);
+        assertEquals(0.5, reloadedLead.getDelaySend(), 1e-6);
+
+        JavaAudioFallbackService.RenderedMix fxMix =
+                audioService.renderProjectMix(reloaded, store, "ai_mix", true, 44100);
+        assertEquals(flatMix.length, fxMix.stereo().length);
+
+        // Tail after note ends (beat 2..8) must contain reverb/delay energy
+        double tailEnergy = 0.0;
+        for (int i = 44100; i < fxMix.stereo().length; i++) {
+            tailEnergy += Math.abs(fxMix.stereo()[i][0]) + Math.abs(fxMix.stereo()[i][1]);
+        }
+        assertTrue(tailEnergy > 0.5, "Reverb/Delay send should produce audible tail after dry note ends");
+
+        // Peak must strictly respect <= -1.0 dBFS Master Limiter ceiling
+        double peak = 0.0;
+        for (float[] frame : fxMix.stereo()) {
+            assertFalse(Float.isNaN(frame[0]) || Float.isNaN(frame[1]), "FX output must never be NaN");
+            peak = Math.max(peak, Math.max(Math.abs(frame[0]), Math.abs(frame[1])));
+        }
+        double peakDbfs = 20.0 * Math.log10(Math.max(peak, 1e-9));
+        assertTrue(peakDbfs <= -1.0 + 1e-3, "Master Limiter exceeded with FX active: " + peakDbfs);
+    }
+
+    @Test
+    void leanAimusicDedupeAndZipSecurityGuards() throws Exception {
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        ProjectState proj = ProjectState.createDefault("proj_lean_1", "Lean Secure");
+        byte[] rawWav = makeMelodyWav(2.0, 44100, false);
+        store.saveAudioBytes("mem://raw/proj_lean_1.wav", rawWav);
+        store.saveAudioBytes("mem://processed/proj_lean_1_dry.wav", rawWav);
+        store.saveAudioBytes("mem://processed/proj_lean_1_tuned.wav", rawWav);
+        proj.getAudioAssets().setRawInputRef("mem://raw/proj_lean_1.wav");
+        proj.getAudioAssets().setDryDenoisedRef("mem://processed/proj_lean_1_dry.wav");
+        proj.getAudioAssets().setTunedVocalRef("mem://processed/proj_lean_1_tuned.wav");
+        proj.getAutotuneSettings().setEnabled(true);
+        proj.getAutotuneSettings().setMixPercent(80.0);
+
+        byte[] leanBundle = audioService.exportAimusicBundle(proj, store);
+        Set<String> names = new HashSet<>();
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(leanBundle))) {
+            ZipEntry e;
+            while ((e = zis.getNextEntry()) != null) names.add(e.getName());
+        }
+        assertTrue(names.contains("audio/raw_input.wav"));
+        assertFalse(names.contains("audio/dry_denoised.wav"), "Identical dry WAV should be deduped from bundle");
+        assertFalse(names.contains("audio/vocal_autotuned.wav"), "Regenerable tuned WAV should be omitted when base vocal exists");
+
+        store.deleteProject(proj.getProjectId());
+        store.deleteAudioBytes("mem://raw/proj_lean_1.wav");
+        store.deleteAudioBytes("mem://processed/proj_lean_1_dry.wav");
+        store.deleteAudioBytes("mem://processed/proj_lean_1_tuned.wav");
+
+        ProjectState imported = audioService.importAimusicBundle(leanBundle, store);
+        assertTrue(store.getAudioBytes(imported.getAudioAssets().getDryDenoisedRef()).isPresent(),
+                "Dry ref should be restored from raw_input via dry_same_as_raw manifest flag");
+        assertTrue(store.getAudioBytes(imported.getAudioAssets().getTunedVocalRef()).isPresent(),
+                "Tuned vocal should be re-synthesized cleanly on import");
+
+        // Reject Zip traversal entry path
+        ByteArrayOutputStream evilOut = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(evilOut)) {
+            zos.putNextEntry(new ZipEntry("../evil.txt"));
+            zos.write("bad".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        assertThrows(AudioValidationException.class, () ->
+                audioService.importAimusicBundle(evilOut.toByteArray(), store));
+
+        // Ignore/block unsafe non-mem clip_refs key writes
+        ByteArrayOutputStream hijackOut = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(hijackOut)) {
+            zos.putNextEntry(new ZipEntry("project.json"));
+            zos.write(objectMapper.writeValueAsBytes(ProjectState.createDefault("proj_safe_1", "Safe")));
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("clip_refs.json"));
+            zos.write("{\"hijack:key\":\"audio/clips/clip_1.wav\"}".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("audio/clips/clip_1.wav"));
+            zos.write("payload".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        audioService.importAimusicBundle(hijackOut.toByteArray(), store);
+        assertTrue(store.getAudioBytes("hijack:key").isEmpty(),
+                "Unsafe non-mem clip_refs keys must never be persisted to store");
+
+        // Collision-safe import: when same project_id already exists on store, create isolated copy
+        ProjectState original = ProjectState.createDefault("proj_collide_1", "Original Stay");
+        String origClipRef = "mem://clips/proj_collide_1/clip_1.wav";
+        store.saveAudioBytes(origClipRef, rawWav);
+        TrackState texTrack = TrackState.audioTrack(0.75, 0.0);
+        texTrack.setClips(List.of(new AudioClip("c1", origClipRef, 1.0, 0.0)));
+        original.getTracks().put("texture", texTrack);
+        store.saveProject(original);
+        byte[] collisionBundle = audioService.exportAimusicBundle(original, store);
+
+        ProjectState importedCopy = audioService.importAimusicBundle(collisionBundle, store, false);
+        assertNotEquals("proj_collide_1", importedCopy.getProjectId());
+        assertTrue(importedCopy.getProjectId().startsWith("proj_collide_1_imp_"));
+        assertTrue(importedCopy.getTitle().endsWith("(Imported)"));
+        assertEquals("Original Stay", store.getProject("proj_collide_1").orElseThrow().getTitle());
+        String newClipRef = importedCopy.getTracks().get("texture").getClips().get(0).getSource();
+        assertNotEquals(origClipRef, newClipRef);
+        assertTrue(store.getAudioBytes(newClipRef).isPresent());
+
+        // DoS OOM guard: pathological total_bars=99999 fails fast with 400 before buffer allocation,
+        // while low bpm=5.0 clamps cleanly to 40.0 BPM
+        ProjectState huge = ProjectState.createDefault("proj_dos_1", "DoS Reject");
+        huge.getSongStructure().setTotalBars(99999);
+        huge.getAnalysis().setBpm(120.0);
+        AudioValidationException dosEx = assertThrows(AudioValidationException.class,
+                () -> audioService.renderProjectMix(huge, store, "ai_mix", true, 44100));
+        assertEquals(HttpStatus.BAD_REQUEST, dosEx.getStatus());
+
+        ProjectState clamped = ProjectState.createDefault("proj_dos_bpm", "BPM Clamp");
+        clamped.getSongStructure().setTotalBars(2);
+        clamped.getAnalysis().setBars(2);
+        clamped.getAnalysis().setBpm(5.0);
+        JavaAudioFallbackService.RenderedMix boundedMix =
+                audioService.renderProjectMix(clamped, store, "ai_mix", true, 44100);
+        assertEquals(2 * 4 * 1.5 * 44100, boundedMix.stereo().length, 4410);
     }
 }

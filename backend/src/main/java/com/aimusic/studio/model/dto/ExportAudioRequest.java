@@ -13,6 +13,9 @@ public class ExportAudioRequest {
     @JsonProperty("mode")
     private String mode = "ai_mix";
 
+    @JsonProperty("bitrate")
+    private String bitrate = "320k";
+
     public String getFormat() { return format; }
     public void setFormat(String format) { this.format = format != null ? format : "wav"; }
 
@@ -21,4 +24,13 @@ public class ExportAudioRequest {
 
     public String getMode() { return mode; }
     public void setMode(String mode) { this.mode = mode != null ? mode : "ai_mix"; }
+
+    public String getBitrate() { return bitrate; }
+    public void setBitrate(String bitrate) {
+        if (bitrate != null && bitrate.trim().startsWith("192")) {
+            this.bitrate = "192k";
+        } else {
+            this.bitrate = "320k";
+        }
+    }
 }

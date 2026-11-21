@@ -141,6 +141,8 @@ public class QaReviewerAgent {
                 && (targetTrack == null || targetTrack.isBlank())) {
             List<MidiNote> raw = analysis.getRawMelodyMidi().stream().map(MusicTheory::normalizeMidiNote).toList();
             List<MidiNote> comp = projectState.getMelodyNotes().stream().map(MusicTheory::normalizeMidiNote).toList();
+            double expectedShiftBeats = ("accompaniment".equalsIgnoreCase(cfg.getOutputMode())
+                    && Boolean.TRUE.equals(cfg.getAddCountInTail())) ? beatsPerBar : 0.0;
             if (raw.size() != comp.size()) {
                 issues.add("Preserve mode altered melody note count.");
                 fixTarget = "composer";
@@ -148,7 +150,7 @@ public class QaReviewerAgent {
             } else {
                 for (int i = 0; i < raw.size(); i++) {
                     if (raw.get(i).getPitch() != comp.get(i).getPitch()
-                            || Math.abs(raw.get(i).getStartBeat() - comp.get(i).getStartBeat()) > 0.5) {
+                            || Math.abs((raw.get(i).getStartBeat() + expectedShiftBeats) - comp.get(i).getStartBeat()) > 0.5) {
                         issues.add("Preserve mode deviated from original melody pitch or >0.5 beat timing.");
                         fixTarget = "composer";
                         score -= 0.3;

@@ -156,7 +156,11 @@ public class AgentOrchestrator {
     private final int maxQaIterations;
 
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2, r -> {
+        Thread t = new Thread(r, "orchestrator-timer");
+        t.setDaemon(true);
+        return t;
+    });
     private final ConcurrentHashMap<String, JobRuntime> jobs = new ConcurrentHashMap<>();
 
     @Autowired
@@ -284,11 +288,20 @@ public class AgentOrchestrator {
             } finally {
                 job.setWorkerThread(null);
                 LlmContextHolder.clear();
+                Thread.interrupted();
                 syncJobToStore(job);
+                scheduleJobEviction(jobId, job);
             }
         });
 
         return job;
+    }
+
+    private void scheduleJobEviction(String jobId, JobRuntime job) {
+        if (jobs.size() > 256) {
+            jobs.entrySet().removeIf(e -> !"running".equals(e.getValue().getStatus()) && e.getValue() != job);
+        }
+        scheduler.schedule(() -> jobs.remove(jobId, job), 15, TimeUnit.MINUTES);
     }
 
     public Optional<JobRuntime> getJob(String jobId) {
@@ -867,6 +880,7 @@ public class AgentOrchestrator {
         if (src.getIncludeLead() != null) target.setIncludeLead(src.getIncludeLead());
         if (src.getIncludeLyrics() != null) target.setIncludeLyrics(src.getIncludeLyrics());
         if (src.getLanguage() != null) target.setLanguage(src.getLanguage());
+        if (src.getAddCountInTail() != null) target.setAddCountInTail(src.getAddCountInTail());
     }
 
     private ProjectState deepCopy(ProjectState state) {

@@ -47,10 +47,18 @@ public class CoachLyricistAgent {
         String lang = (language != null && !language.isBlank()) ? language : "vi";
         String effectiveTopic = (topic != null && !topic.isBlank()) ? topic : cfg.getMood();
 
+        int rawNoteCount = analysis.getRawMelodyMidi() != null ? analysis.getRawMelodyMidi().size() : 0;
+        int totalStructBars = Math.max(1, structure.getTotalBars());
+        double notesPerBar = rawNoteCount > 0
+                ? (double) rawNoteCount / Math.max(1, analysis.getBars() > 0 ? analysis.getBars() : totalStructBars)
+                : 3.5;
+        int targetSyllablesPerLine = Math.max(6, Math.min(16, (int) Math.round(notesPerBar * 2.2)));
+
         String prompt = String.format(Locale.ROOT,
-                "Write song lyrics in language='%s' about topic='%s' for %s (%.1f BPM, %s %s) matching sections: %s. Return JSON: {\"lines\": [{\"section\": str, \"bar\": int, \"text\": str}]}.",
+                "Write song lyrics in language='%s' about topic='%s' for %s (%.1f BPM, %s %s, ~%d syllables per line to match melody density) matching sections: %s. Return JSON: {\"lines\": [{\"section\": str, \"bar\": int, \"text\": str}]}.",
                 lang, effectiveTopic, cfg.getGenre(), analysis.getBpm(),
                 analysis.getDetectedKey(), analysis.getDetectedScale(),
+                targetSyllablesPerLine,
                 sections.stream().map(SongSection::getName).toList());
 
         LlmAdapter.LlmResponse resp = llm.generateJson(
@@ -135,40 +143,95 @@ public class CoachLyricistAgent {
         String prompt = "Project context: " + contextSummary + "\n"
                 + "Recent history count: " + (history != null ? history.size() : 0) + "\n"
                 + "User question: " + message + "\n"
-                + "Give concise actionable advice. Never mutate state directly.";
+                + "Give concise actionable advice in Vietnamese. Never mutate state directly. "
+                + "Return strict JSON: {\"reply\": str, \"suggested_actions\": [{\"id\": str, \"label\": str, \"action\": \"update_config|rearrange_chords|apply_autotune|auto_mix|auto_trim_vocal\", \"payload\": object}]}.";
 
-        LlmAdapter.LlmResponse resp = llm.generateText(
-                prompt,
-                "You are an encouraging AI Music Coach guiding songwriting and arrangement.",
-                "coach",
-                null
-        );
+        boolean useJsonCoach = llm.resolveProvider("coach", null) != LlmAdapter.Provider.MOCK;
+        LlmAdapter.LlmResponse resp = useJsonCoach
+                ? llm.generateJson(prompt, "You are an encouraging AI Music Coach. Return strict JSON without mutating project state.", "coach", null)
+                : llm.generateText(prompt, "You are an encouraging AI Music Coach guiding songwriting and arrangement.", "coach", null);
 
         List<CoachSuggestedAction> actions = new ArrayList<>();
-        String lowerMsg = message != null ? message.toLowerCase(Locale.ROOT) : "";
-        if (lowerMsg.contains("chorus") || lowerMsg.contains("verse") || lowerMsg.contains("đoạn")) {
-            actions.add(new CoachSuggestedAction(
-                    "set_motif_chorus",
-                    "Đặt mô-típ làm Chorus",
-                    "update_config",
-                    Map.of("motif_position", "chorus", "output_mode", "full_song")
-            ));
-        }
-        if (lowerMsg.contains("buồn") || lowerMsg.contains("sad") || lowerMsg.contains("hợp âm") || lowerMsg.contains("chord")) {
-            actions.add(new CoachSuggestedAction(
-                    "try_minor_rearrange",
-                    "Thử hợp âm thứ (Minor feel)",
-                    "rearrange_chords",
-                    Map.of("suggestion", "Use vi - IV - I - V progression")
-            ));
+        String reply = resp.text();
+        if (!resp.isMock() && resp.data() != null) {
+            if (resp.data().get("reply") instanceof String r && !r.isBlank()) {
+                reply = r.trim();
+            }
+            if (resp.data().get("suggested_actions") instanceof List<?> rawActs) {
+                for (Object item : rawActs) {
+                    if (item instanceof Map<?, ?> m) {
+                        String id = m.get("id") != null ? m.get("id").toString() : "ai_act_" + (actions.size() + 1);
+                        String label = m.get("label") != null ? m.get("label").toString() : "";
+                        String action = m.get("action") != null ? m.get("action").toString() : "update_config";
+                        Map<String, Object> actPayload = m.get("payload") instanceof Map<?, ?> pm
+                                ? convertPayload(pm) : Map.of();
+                        if (!label.isBlank()) {
+                            actions.add(new CoachSuggestedAction(id, label, action, actPayload));
+                        }
+                    }
+                }
+            }
         }
 
-        String reply = resp.text();
+        if (actions.isEmpty()) {
+            String lowerMsg = message != null ? message.toLowerCase(Locale.ROOT) : "";
+            if (lowerMsg.contains("chorus") || lowerMsg.contains("verse") || lowerMsg.contains("đoạn")) {
+                actions.add(new CoachSuggestedAction(
+                        "set_motif_chorus",
+                        "Đặt mô-típ làm Chorus",
+                        "update_config",
+                        Map.of("motif_position", "chorus", "output_mode", "full_song")
+                ));
+            }
+            if (lowerMsg.contains("buồn") || lowerMsg.contains("sad") || lowerMsg.contains("hợp âm") || lowerMsg.contains("chord")) {
+                actions.add(new CoachSuggestedAction(
+                        "try_minor_rearrange",
+                        "Thử hợp âm thứ (Minor feel)",
+                        "rearrange_chords",
+                        Map.of("suggestion", "Use vi - IV - I - V progression")
+                ));
+            }
+            if (lowerMsg.contains("auto-tune") || lowerMsg.contains("phô") || lowerMsg.contains("cao độ") || lowerMsg.contains("tune")) {
+                actions.add(new CoachSuggestedAction(
+                        "apply_balanced_tune",
+                        "Bật Auto-Tune mức Vừa",
+                        "apply_autotune",
+                        Map.of("preset", "balanced")
+                ));
+            }
+            if (lowerMsg.contains("mix") || lowerMsg.contains("vỡ") || lowerMsg.contains("cân bằng") || lowerMsg.contains("nhỏ") || lowerMsg.contains("to")) {
+                actions.add(new CoachSuggestedAction(
+                        "run_auto_mix",
+                        "Chạy AI Auto-Mix (-1.0 dBFS)",
+                        "auto_mix",
+                        Map.of()
+                ));
+            }
+            if (lowerMsg.contains("nhanh") || lowerMsg.contains("faster")) {
+                actions.add(new CoachSuggestedAction(
+                        "boost_bpm_8",
+                        "Tăng +8 BPM",
+                        "update_config",
+                        Map.of("bpm", Math.min(220.0, analysis.getBpm() + 8.0))
+                ));
+            }
+        }
+
         if (resp.isMock()) {
             reply = String.format(Locale.ROOT,
                     "Dựa trên dự án hiện tại (%s %s, %.0f BPM): bạn nên giữ mô-típ chính ở Chorus để tạo cao trào rõ rệt, và dùng hợp âm mở rộng nhẹ ở Verse.",
                     analysis.getDetectedKey(), analysis.getDetectedScale(), analysis.getBpm());
         }
         return new CoachChatResponse(reply, actions, resp.provider().value());
+    }
+
+    private Map<String, Object> convertPayload(Map<?, ?> raw) {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : raw.entrySet()) {
+            if (e.getKey() != null) {
+                out.put(String.valueOf(e.getKey()), e.getValue());
+            }
+        }
+        return out;
     }
 }

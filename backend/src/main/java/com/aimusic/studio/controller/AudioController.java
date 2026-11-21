@@ -74,7 +74,6 @@ public class AudioController {
             @RequestParam(value = "title", required = false) String title,
             @RequestParam(value = "mode", defaultValue = "hum") String mode
     ) throws IOException {
-        byte[] rawBytes = file.getBytes();
         String filename = (file.getOriginalFilename() != null && !file.getOriginalFilename().isBlank())
                 ? file.getOriginalFilename() : "upload.wav";
         double maxDur = "vocal".equalsIgnoreCase(mode)
@@ -91,14 +90,18 @@ public class AudioController {
                     "Unsupported audio format '." + ext + "'. Allowed: .wav, .mp3, .m4a, .ogg, .flac",
                     HttpStatus.BAD_REQUEST);
         }
-        if (rawBytes.length == 0) {
+        if (file.getSize() <= 0) {
             throw new AudioValidationException("Uploaded audio file is empty.", HttpStatus.BAD_REQUEST);
         }
-        if (rawBytes.length > properties.getMaxUploadBytes()) {
+        if (file.getSize() > properties.getMaxUploadBytes()) {
             throw new AudioValidationException(
                     String.format(Locale.ROOT, "File size (%.1f MB) exceeds maximum %d MB.",
-                            rawBytes.length / (1024.0 * 1024.0), properties.getMaxUploadMb()),
+                            file.getSize() / (1024.0 * 1024.0), properties.getMaxUploadMb()),
                     HttpStatus.PAYLOAD_TOO_LARGE);
+        }
+        byte[] rawBytes = file.getBytes();
+        if (rawBytes.length == 0) {
+            throw new AudioValidationException("Uploaded audio file is empty.", HttpStatus.BAD_REQUEST);
         }
 
         byte[] bytesToValidate = rawBytes;
@@ -164,7 +167,6 @@ public class AudioController {
         String normTrackId = (trackId == null || trackId.isBlank())
                 ? "texture" : trackId.trim().toLowerCase(Locale.ROOT);
 
-        byte[] rawBytes = file.getBytes();
         String filename = (file.getOriginalFilename() != null && !file.getOriginalFilename().isBlank())
                 ? file.getOriginalFilename() : "clip.wav";
         String ext = "";
@@ -177,14 +179,18 @@ public class AudioController {
                     "Unsupported audio format '." + ext + "'. Allowed: .wav, .mp3, .m4a, .ogg, .flac",
                     HttpStatus.BAD_REQUEST);
         }
-        if (rawBytes.length == 0) {
+        if (file.getSize() <= 0) {
             throw new AudioValidationException("Uploaded clip file is empty.", HttpStatus.BAD_REQUEST);
         }
-        if (rawBytes.length > properties.getMaxUploadBytes()) {
+        if (file.getSize() > properties.getMaxUploadBytes()) {
             throw new AudioValidationException(
                     String.format(Locale.ROOT, "File size (%.1f MB) exceeds maximum %d MB.",
-                            rawBytes.length / (1024.0 * 1024.0), properties.getMaxUploadMb()),
+                            file.getSize() / (1024.0 * 1024.0), properties.getMaxUploadMb()),
                     HttpStatus.PAYLOAD_TOO_LARGE);
+        }
+        byte[] rawBytes = file.getBytes();
+        if (rawBytes.length == 0) {
+            throw new AudioValidationException("Uploaded clip file is empty.", HttpStatus.BAD_REQUEST);
         }
 
         byte[] bytesToValidate = rawBytes;
@@ -496,6 +502,11 @@ public class AudioController {
 
     @GetMapping("/asset")
     public ResponseEntity<byte[]> getAudioAsset(@RequestParam("ref") String ref) {
+        if (ref == null || ref.isBlank() || ref.length() > 256
+                || !ref.startsWith("mem://") || ref.contains("..")
+                || !ref.matches("^mem://[A-Za-z0-9_./-]+$")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid audio asset reference.");
+        }
         byte[] data = store.getAudioBytes(ref)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Audio asset '" + ref + "' not found."));

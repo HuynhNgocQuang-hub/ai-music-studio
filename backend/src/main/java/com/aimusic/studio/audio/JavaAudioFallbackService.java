@@ -11,6 +11,7 @@ import com.aimusic.studio.model.dto.OneClickFix;
 import com.aimusic.studio.model.dto.OverdubFitCheckResponse;
 import com.aimusic.studio.model.dto.PitchIssue;
 import com.aimusic.studio.store.ProjectStateStore;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -41,6 +42,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -459,10 +461,53 @@ public class JavaAudioFallbackService {
         }
 
         boolean lowConfWarning = keyConf < 0.6;
-        double barDurSec = 4.0 * (60.0 / bpm);
+        String timeSig = estimateTimeSignature(samples, sr, bpm);
+        int beatsPerBar = MusicTheory.beatsPerBarFromTs(timeSig);
+        double barDurSec = beatsPerBar * (60.0 / bpm);
         int bars = Math.max(1, (int) Math.round(durationSec / Math.max(barDurSec, 0.1)));
 
-        return new AnalyzeResult(bpm, "4/4", detectedKey, detectedScale, keyConf, lowConfWarning, bars, durationSec, notes);
+        return new AnalyzeResult(bpm, timeSig, detectedKey, detectedScale, keyConf, lowConfWarning, bars, durationSec, notes);
+    }
+
+    private String estimateTimeSignature(float[] samples, int sr, double bpm) {
+        int hop = Math.max(1, (int) (0.01 * sr));
+        int numFrames = (samples.length + hop - 1) / hop;
+        double fps = (double) sr / hop;
+        double beatSec = 60.0 / Math.max(40.0, bpm);
+        int lag3 = (int) Math.round(3.0 * beatSec * fps);
+        int lag4 = (int) Math.round(4.0 * beatSec * fps);
+        if (lag4 <= 0 || numFrames < lag4 * 3) {
+            return "4/4";
+        }
+        double[] onset = new double[numFrames];
+        double prevRms = 0.0;
+        for (int f = 0; f < numFrames; f++) {
+            int s = f * hop;
+            int e = Math.min(samples.length, s + hop);
+            double sum = 0.0;
+            for (int i = s; i < e; i++) sum += samples[i] * samples[i];
+            double rms = Math.sqrt(sum / Math.max(1, e - s));
+            onset[f] = f > 0 ? Math.max(0.0, rms - prevRms) : 0.0;
+            prevRms = rms;
+        }
+        double s3 = lagCorr(onset, lag3);
+        double s4 = lagCorr(onset, lag4);
+        if (s3 > 1.38 * Math.max(s4, 1e-6)) {
+            int lag6 = lag3 * 2;
+            double s6 = (lag6 < numFrames - 10) ? lagCorr(onset, lag6) : 0.0;
+            return (bpm >= 115.0 && s6 >= 0.85 * s3) ? "6/8" : "3/4";
+        }
+        return "4/4";
+    }
+
+    private double lagCorr(double[] arr, int lag) {
+        if (lag <= 0 || lag >= arr.length) return 0.0;
+        double sum = 0.0;
+        int n = arr.length - lag;
+        for (int i = 0; i < n; i++) {
+            sum += arr[i] * arr[i + lag];
+        }
+        return sum / Math.max(1, n);
     }
 
     private double clampBpm(double raw) {
@@ -1021,17 +1066,27 @@ public class JavaAudioFallbackService {
         Map<String, TrackState> tracks = effectiveProject.getTracks();
 
         double bpm = effectiveProject.getAnalysis() != null && effectiveProject.getAnalysis().getBpm() > 0
-                ? effectiveProject.getAnalysis().getBpm() : 120.0;
+                ? Math.max(40.0, Math.min(220.0, effectiveProject.getAnalysis().getBpm())) : 120.0;
         int structBars = effectiveProject.getSongStructure() != null ? effectiveProject.getSongStructure().getTotalBars() : 4;
         int analysisBars = effectiveProject.getAnalysis() != null ? effectiveProject.getAnalysis().getBars() : 4;
+        if (structBars > 256 || analysisBars > 256) {
+            throw new AudioValidationException(
+                    "Project duration exceeds maximum supported 256 bars.", HttpStatus.BAD_REQUEST);
+        }
         int totalBars = Math.max(1, Math.max(structBars, analysisBars));
         String timeSig = effectiveProject.getAnalysis() != null ? effectiveProject.getAnalysis().getTimeSignature() : "4/4";
         int beatsPerBar = MusicTheory.beatsPerBarFromTs(timeSig);
-        int totalSamples = Math.max(1, (int) Math.round(totalBars * beatsPerBar * (60.0 / bpm) * sampleRate));
+        long rawSamples = Math.round(totalBars * beatsPerBar * (60.0 / bpm) * sampleRate);
+        int maxSamples = Math.max(sampleRate, sampleRate * 360);
+        int totalSamples = (int) Math.max(1L, Math.min(maxSamples, rawSamples));
 
         boolean anySolo = tracks != null && tracks.values().stream().anyMatch(TrackState::isSolo);
         Map<String, float[][]> stems = new LinkedHashMap<>();
         float[][] mix = new float[totalSamples][2];
+        float[][] reverbSendBus = null;
+        float[][] delaySendBus = null;
+        boolean hasReverbSend = false;
+        boolean hasDelaySend = false;
 
         if (tracks != null) {
             for (Map.Entry<String, TrackState> entry : tracks.entrySet()) {
@@ -1041,16 +1096,51 @@ public class JavaAudioFallbackService {
                         ? renderAudioTrack(name, track, effectiveProject, store, totalSamples, sampleRate, normMode, bpm, beatsPerBar)
                         : synthesizeMidiTrack(name, track.getNotes(), bpm, totalSamples, sampleRate);
 
+                float[] eqMono = applyTrackEq(mono, track, sampleRate);
                 boolean active = !track.isMute() && (!anySolo || track.isSolo());
-                float[][] stereo = panStereo(mono, track.getPan(), active ? track.getVolume() : 0.0);
+                float[][] stereo = panStereo(eqMono, track.getPan(), active ? track.getVolume() : 0.0);
                 stems.put(name, stereo);
                 if (active) {
+                    double revSend = track.getReverbSend();
+                    double dlySend = track.getDelaySend();
+                    float revScale = (float) (revSend * 0.55);
+                    float dlyScale = (float) (dlySend * 0.50);
+                    if (revSend > 0.001) {
+                        hasReverbSend = true;
+                        if (reverbSendBus == null) {
+                            reverbSendBus = new float[totalSamples][2];
+                        }
+                    }
+                    if (dlySend > 0.001) {
+                        hasDelaySend = true;
+                        if (delaySendBus == null) {
+                            delaySendBus = new float[totalSamples][2];
+                        }
+                    }
+
                     for (int i = 0; i < totalSamples; i++) {
-                        mix[i][0] += stereo[i][0];
-                        mix[i][1] += stereo[i][1];
+                        float l = stereo[i][0];
+                        float r = stereo[i][1];
+                        mix[i][0] += l;
+                        mix[i][1] += r;
+                        if (revSend > 0.001) {
+                            reverbSendBus[i][0] += l * revScale;
+                            reverbSendBus[i][1] += r * revScale;
+                        }
+                        if (dlySend > 0.001) {
+                            delaySendBus[i][0] += l * dlyScale;
+                            delaySendBus[i][1] += r * dlyScale;
+                        }
                     }
                 }
             }
+        }
+
+        if (hasReverbSend && reverbSendBus != null) {
+            addStereoInPlace(mix, renderStereoReverb(reverbSendBus, sampleRate));
+        }
+        if (hasDelaySend && delaySendBus != null) {
+            addStereoInPlace(mix, renderStereoDelay(delaySendBus, bpm, sampleRate));
         }
 
         if (applyMastering) {
@@ -1265,6 +1355,163 @@ public class JavaAudioFallbackService {
         return stereo;
     }
 
+    private float[] applyTrackEq(float[] mono, TrackState track, int sr) {
+        double lowDb = track.getLowDb();
+        double midDb = track.getMidDb();
+        double highDb = track.getHighDb();
+        if (Math.abs(lowDb) < 0.05 && Math.abs(midDb) < 0.05 && Math.abs(highDb) < 0.05) {
+            return mono;
+        }
+        float[] out = Arrays.copyOf(mono, mono.length);
+        if (Math.abs(lowDb) >= 0.05) {
+            out = applyRbjBiquad(out, "lowshelf", 110.0, sr, lowDb, 0.70710678);
+        }
+        if (Math.abs(midDb) >= 0.05) {
+            out = applyRbjBiquad(out, "peaking", 1000.0, sr, midDb, 0.9);
+        }
+        if (Math.abs(highDb) >= 0.05) {
+            out = applyRbjBiquad(out, "highshelf", 6500.0, sr, highDb, 0.70710678);
+        }
+        return out;
+    }
+
+    private float[] applyRbjBiquad(float[] samples, String kind, double f0, int sr, double dbGain, double q) {
+        if (samples.length == 0 || f0 <= 0.0 || f0 >= 0.49 * sr || Math.abs(dbGain) < 0.05) {
+            return samples;
+        }
+        double aLin = Math.pow(10.0, dbGain / 40.0);
+        double w0 = 2.0 * Math.PI * f0 / sr;
+        double cosW = Math.cos(w0);
+        double sinW = Math.sin(w0);
+        double b0, b1, b2, a0, a1, a2;
+
+        if ("peaking".equals(kind)) {
+            double alpha = sinW / (2.0 * Math.max(0.1, q));
+            b0 = 1.0 + alpha * aLin;
+            b1 = -2.0 * cosW;
+            b2 = 1.0 - alpha * aLin;
+            a0 = 1.0 + alpha / aLin;
+            a1 = -2.0 * cosW;
+            a2 = 1.0 - alpha / aLin;
+        } else if ("lowshelf".equals(kind)) {
+            double alpha = sinW / Math.sqrt(2.0);
+            double twoSqrtAAlpha = 2.0 * Math.sqrt(aLin) * alpha;
+            b0 = aLin * ((aLin + 1.0) - (aLin - 1.0) * cosW + twoSqrtAAlpha);
+            b1 = 2.0 * aLin * ((aLin - 1.0) - (aLin + 1.0) * cosW);
+            b2 = aLin * ((aLin + 1.0) - (aLin - 1.0) * cosW - twoSqrtAAlpha);
+            a0 = (aLin + 1.0) + (aLin - 1.0) * cosW + twoSqrtAAlpha;
+            a1 = -2.0 * ((aLin - 1.0) + (aLin + 1.0) * cosW);
+            a2 = (aLin + 1.0) + (aLin - 1.0) * cosW - twoSqrtAAlpha;
+        } else {
+            double alpha = sinW / Math.sqrt(2.0);
+            double twoSqrtAAlpha = 2.0 * Math.sqrt(aLin) * alpha;
+            b0 = aLin * ((aLin + 1.0) + (aLin - 1.0) * cosW + twoSqrtAAlpha);
+            b1 = -2.0 * aLin * ((aLin - 1.0) + (aLin + 1.0) * cosW);
+            b2 = aLin * ((aLin + 1.0) + (aLin - 1.0) * cosW - twoSqrtAAlpha);
+            a0 = (aLin + 1.0) - (aLin - 1.0) * cosW + twoSqrtAAlpha;
+            a1 = 2.0 * ((aLin - 1.0) - (aLin + 1.0) * cosW);
+            a2 = (aLin + 1.0) - (aLin - 1.0) * cosW - twoSqrtAAlpha;
+        }
+
+        double invA0 = 1.0 / (Math.abs(a0) > 1e-12 ? a0 : 1e-12);
+        double nb0 = b0 * invA0;
+        double nb1 = b1 * invA0;
+        double nb2 = b2 * invA0;
+        double na1 = a1 * invA0;
+        double na2 = a2 * invA0;
+
+        float[] out = new float[samples.length];
+        double z1 = 0.0;
+        double z2 = 0.0;
+        for (int i = 0; i < samples.length; i++) {
+            double x = samples[i];
+            double y = nb0 * x + z1;
+            z1 = nb1 * x - na1 * y + z2;
+            z2 = nb2 * x - na2 * y;
+            out[i] = (float) y;
+        }
+        return out;
+    }
+
+    private void addStereoInPlace(float[][] dst, float[][] src) {
+        int n = Math.min(dst.length, src.length);
+        for (int i = 0; i < n; i++) {
+            dst[i][0] += src[i][0];
+            dst[i][1] += src[i][1];
+        }
+    }
+
+    private float[][] renderStereoReverb(float[][] sendStereo, int sr) {
+        int n = sendStereo.length;
+        float[][] out = new float[n][2];
+        if (n == 0) return out;
+
+        int preDelay = Math.max(0, (int) Math.round(0.018 * sr));
+        int[] baseCombs = {1116, 1188, 1277, 1356};
+        double scale = sr / 44100.0;
+        double feedback = 0.78;
+        double damp = 0.42;
+
+        for (int ch = 0; ch < 2; ch++) {
+            int offsetStereo = ch == 1 ? 23 : 0;
+            double[] sum = new double[n];
+            for (int baseLen : baseCombs) {
+                int delayLen = Math.max(32, (int) Math.round((baseLen + offsetStereo) * scale));
+                double[] buf = new double[delayLen];
+                int idx = 0;
+                double filterStore = 0.0;
+                for (int i = 0; i < n; i++) {
+                    double input = i >= preDelay ? sendStereo[i - preDelay][ch] : 0.0;
+                    double delayed = buf[idx];
+                    filterStore = delayed * (1.0 - damp) + filterStore * damp;
+                    buf[idx] = input + filterStore * feedback;
+                    sum[i] += delayed;
+                    idx = (idx + 1) % delayLen;
+                }
+            }
+            for (int i = 0; i < n; i++) {
+                out[i][ch] = (float) (sum[i] * 0.16);
+            }
+        }
+        return out;
+    }
+
+    private float[][] renderStereoDelay(float[][] sendStereo, double bpm, int sr) {
+        int n = sendStereo.length;
+        float[][] out = new float[n][2];
+        if (n == 0) return out;
+
+        double delaySec = Math.max(0.12, Math.min(0.75, 0.75 * (60.0 / Math.max(bpm, 40.0))));
+        int step = Math.max(1, (int) Math.round(delaySec * sr));
+
+        // 1-pole lowpass damping (~3.4 kHz warmth)
+        float[][] filtered = new float[n][2];
+        double lpL = 0.0;
+        double lpR = 0.0;
+        for (int i = 0; i < n; i++) {
+            lpL = 0.38 * sendStereo[i][0] + 0.62 * lpL;
+            lpR = 0.38 * sendStereo[i][1] + 0.62 * lpR;
+            filtered[i][0] = (float) lpL;
+            filtered[i][1] = (float) lpR;
+        }
+
+        float gain = 0.44f;
+        for (int tap = 1; tap <= 5; tap++) {
+            int offset = tap * step;
+            if (offset >= n) break;
+            boolean cross = (tap % 2) == 1;
+            float gL = cross ? gain * 0.85f : gain;
+            float gR = cross ? gain : gain * 0.85f;
+            for (int i = offset; i < n; i++) {
+                int sIdx = i - offset;
+                out[i][0] += filtered[sIdx][cross ? 1 : 0] * gL;
+                out[i][1] += filtered[sIdx][cross ? 0 : 1] * gR;
+            }
+            gain *= 0.48f;
+        }
+        return out;
+    }
+
     // --- Exporters (Stems ZIP, MP3, MIDI, .aimusic) ---
 
     public byte[] exportStemsZip(Map<String, float[][]> stems, int sampleRate) {
@@ -1286,20 +1533,40 @@ public class JavaAudioFallbackService {
     }
 
     public byte[] exportMp3ViaFfmpeg(float[][] stereo, int sampleRate) {
+        return exportMp3ViaFfmpeg(stereo, sampleRate, "320k");
+    }
+
+    public byte[] exportMp3ViaFfmpeg(float[][] stereo, int sampleRate, String bitrate) {
+        String normBitrate = (bitrate != null && bitrate.trim().startsWith("192")) ? "192k" : "320k";
         byte[] wav = encodeWavStereo(stereo, sampleRate);
+        Process p = null;
+        Thread timeoutWatcher = null;
         try {
-            Process p = new ProcessBuilder("ffmpeg", "-y", "-f", "wav", "-i", "pipe:0",
-                    "-codec:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", "pipe:1")
+            p = new ProcessBuilder("ffmpeg", "-y", "-f", "wav", "-i", "pipe:0",
+                    "-codec:a", "libmp3lame", "-b:a", normBitrate, "-f", "mp3", "pipe:1")
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();
+            final Process proc = p;
+            timeoutWatcher = Thread.ofVirtual().start(() -> {
+                try {
+                    if (!proc.waitFor(20, TimeUnit.SECONDS)) {
+                        proc.destroyForcibly();
+                    }
+                } catch (InterruptedException ignored) {
+                }
+            });
             p.getOutputStream().write(wav);
             p.getOutputStream().close();
             byte[] mp3 = p.getInputStream().readAllBytes();
-            int code = p.waitFor();
-            if (code == 0 && mp3.length > 0) {
+            boolean finished = p.waitFor(5, TimeUnit.SECONDS);
+            int code = finished ? p.exitValue() : -1;
+            if (finished && code == 0 && mp3.length > 0) {
                 return mp3;
             }
         } catch (Exception ignored) {
+        } finally {
+            if (timeoutWatcher != null) timeoutWatcher.interrupt();
+            if (p != null && p.isAlive()) p.destroyForcibly();
         }
         throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                 "MP3 export requires audio-worker or ffmpeg to be available.");
@@ -1450,6 +1717,10 @@ public class JavaAudioFallbackService {
         return new byte[]{sf, (byte) (minor ? 1 : 0)};
     }
 
+    private static final int MAX_AIMUSIC_ENTRIES = 64;
+    private static final int MAX_AIMUSIC_ENTRY_BYTES = 60 * 1024 * 1024;
+    private static final long MAX_AIMUSIC_TOTAL_BYTES = 120L * 1024L * 1024L;
+
     public byte[] exportAimusicBundle(ProjectState project, ProjectStateStore store) {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -1457,6 +1728,17 @@ public class JavaAudioFallbackService {
             manifest.put("schema_version", "1.0");
             manifest.put("app", "ai-music-studio");
             manifest.put("created_at", Instant.now().toString());
+
+            var assets = project.getAudioAssets();
+            byte[] rawBytes = assets != null && assets.getRawInputRef() != null
+                    ? store.getAudioBytes(assets.getRawInputRef()).orElse(null) : null;
+            byte[] dryBytes = assets != null && assets.getDryDenoisedRef() != null
+                    ? store.getAudioBytes(assets.getDryDenoisedRef()).orElse(null) : null;
+            boolean drySameAsRaw = rawBytes != null && dryBytes != null && Arrays.equals(rawBytes, dryBytes);
+            if (drySameAsRaw) {
+                manifest.put("dry_same_as_raw", "true");
+            }
+            boolean hasBaseVocal = rawBytes != null || dryBytes != null;
 
             try (ZipOutputStream zos = new ZipOutputStream(baos)) {
                 zos.putNextEntry(new ZipEntry("manifest.json"));
@@ -1467,10 +1749,14 @@ public class JavaAudioFallbackService {
                 zos.write(objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(project));
                 zos.closeEntry();
 
-                var assets = project.getAudioAssets();
-                if (assets != null) {
-                    writeBundleAsset(zos, store, "audio/raw_input.wav", assets.getRawInputRef());
-                    writeBundleAsset(zos, store, "audio/dry_denoised.wav", assets.getDryDenoisedRef());
+                if (rawBytes != null) {
+                    writeBytesEntry(zos, "audio/raw_input.wav", rawBytes);
+                }
+                if (dryBytes != null && !drySameAsRaw) {
+                    writeBytesEntry(zos, "audio/dry_denoised.wav", dryBytes);
+                }
+                // Omit regenerable vocal_autotuned.wav when dry/raw vocal + autotune_settings exist
+                if (!hasBaseVocal && assets != null && assets.getTunedVocalRef() != null) {
                     writeBundleAsset(zos, store, "audio/vocal_autotuned.wav", assets.getTunedVocalRef());
                 }
 
@@ -1492,9 +1778,7 @@ public class JavaAudioFallbackService {
                                 Optional<byte[]> clipBytes = store.getAudioBytes(src);
                                 if (clipBytes.isPresent()) {
                                     String arcPath = "audio/clips/clip_" + (++idx) + ".wav";
-                                    zos.putNextEntry(new ZipEntry(arcPath));
-                                    zos.write(clipBytes.get());
-                                    zos.closeEntry();
+                                    writeBytesEntry(zos, arcPath, clipBytes.get());
                                     customClipPaths.put(src, arcPath);
                                 }
                             }
@@ -1513,26 +1797,52 @@ public class JavaAudioFallbackService {
         }
     }
 
+    private void writeBytesEntry(ZipOutputStream zos, String arcPath, byte[] bytes) throws IOException {
+        zos.putNextEntry(new ZipEntry(arcPath));
+        zos.write(bytes);
+        zos.closeEntry();
+    }
+
     private void writeBundleAsset(ZipOutputStream zos, ProjectStateStore store, String arcPath, String ref) throws IOException {
         if (ref == null || ref.isBlank()) return;
         Optional<byte[]> bytes = store.getAudioBytes(ref);
         if (bytes.isPresent()) {
-            zos.putNextEntry(new ZipEntry(arcPath));
-            zos.write(bytes.get());
-            zos.closeEntry();
+            writeBytesEntry(zos, arcPath, bytes.get());
         }
     }
 
     public ProjectState importAimusicBundle(byte[] bundleBytes, ProjectStateStore store) {
+        return importAimusicBundle(bundleBytes, store, true);
+    }
+
+    public ProjectState importAimusicBundle(byte[] bundleBytes, ProjectStateStore store, boolean overwrite) {
+        if (bundleBytes == null || bundleBytes.length == 0) {
+            throw new AudioValidationException("Invalid .aimusic archive: empty file", HttpStatus.BAD_REQUEST);
+        }
         Map<String, byte[]> entries = new HashMap<>();
+        long totalUnzipped = 0L;
+        int entryCount = 0;
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(bundleBytes))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (!isSafeZipEntryName(name)) {
+                    throw new AudioValidationException("Unsafe archive entry path.", HttpStatus.BAD_REQUEST);
+                }
+                if (++entryCount > MAX_AIMUSIC_ENTRIES) {
+                    throw new AudioValidationException("Archive exceeds maximum allowed file entries.", HttpStatus.BAD_REQUEST);
+                }
                 if (!entry.isDirectory()) {
-                    entries.put(entry.getName(), zis.readAllBytes());
+                    long remainingBudget = MAX_AIMUSIC_TOTAL_BYTES - totalUnzipped;
+                    int maxForEntry = (int) Math.min(MAX_AIMUSIC_ENTRY_BYTES, Math.max(0L, remainingBudget));
+                    byte[] data = readZipEntryBounded(zis, maxForEntry);
+                    totalUnzipped += data.length;
+                    entries.put(name, data);
                 }
                 zis.closeEntry();
             }
+        } catch (AudioValidationException ex) {
+            throw ex;
         } catch (IOException ex) {
             throw new AudioValidationException("Invalid .aimusic archive: " + ex.getMessage(), HttpStatus.BAD_REQUEST);
         }
@@ -1544,31 +1854,97 @@ public class JavaAudioFallbackService {
 
         try {
             ProjectState project = objectMapper.readValue(projectJson, ProjectState.class);
-            String pid = project.getProjectId();
-            if (entries.containsKey("audio/raw_input.wav")) {
+            String origPid = sanitizeProjectId(project.getProjectId());
+            String pid = origPid;
+            if (!overwrite && store.getProject(pid).isPresent()) {
+                String suffix = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 6);
+                pid = origPid + "_imp_" + suffix;
+                String baseTitle = project.getTitle();
+                if (baseTitle != null && !baseTitle.isBlank() && !baseTitle.endsWith("(Imported)")) {
+                    String importedTitle = baseTitle + " (Imported)";
+                    project.setTitle(importedTitle);
+                    if (project.getConfig() != null) {
+                        project.getConfig().setTitle(importedTitle);
+                    }
+                }
+            }
+            project.setProjectId(pid);
+
+            boolean drySameAsRaw = false;
+            if (entries.containsKey("manifest.json")) {
+                try {
+                    Map<String, Object> manifest = objectMapper.readValue(
+                            entries.get("manifest.json"), new TypeReference<Map<String, Object>>() {});
+                    drySameAsRaw = "true".equalsIgnoreCase(String.valueOf(manifest.get("dry_same_as_raw")));
+                } catch (Exception ignored) {
+                }
+            }
+
+            byte[] rawAudio = entries.get("audio/raw_input.wav");
+            if (rawAudio != null) {
                 String ref = "mem://raw/" + pid + ".wav";
-                store.saveAudioBytes(ref, entries.get("audio/raw_input.wav"));
+                store.saveAudioBytes(ref, rawAudio);
                 project.getAudioAssets().setRawInputRef(ref);
             }
-            if (entries.containsKey("audio/dry_denoised.wav")) {
+            byte[] dryAudio = entries.get("audio/dry_denoised.wav");
+            if (dryAudio != null) {
                 String ref = "mem://processed/" + pid + "_dry.wav";
-                store.saveAudioBytes(ref, entries.get("audio/dry_denoised.wav"));
+                store.saveAudioBytes(ref, dryAudio);
+                project.getAudioAssets().setDryDenoisedRef(ref);
+            } else if (drySameAsRaw && rawAudio != null) {
+                String ref = "mem://processed/" + pid + "_dry.wav";
+                store.saveAudioBytes(ref, rawAudio);
                 project.getAudioAssets().setDryDenoisedRef(ref);
             }
+
+            byte[] baseForAutotune = dryAudio != null ? dryAudio : (drySameAsRaw ? rawAudio : null);
             if (entries.containsKey("audio/vocal_autotuned.wav")) {
                 String ref = "mem://processed/" + pid + "_tuned.wav";
                 store.saveAudioBytes(ref, entries.get("audio/vocal_autotuned.wav"));
                 project.getAudioAssets().setTunedVocalRef(ref);
+            } else if (baseForAutotune != null && project.getAutotuneSettings() != null
+                    && project.getAutotuneSettings().isEnabled()
+                    && project.getAutotuneSettings().getMixPercent() > 0.0) {
+                try {
+                    byte[] resynth = applyAutotune(baseForAutotune, project.getAutotuneSettings());
+                    String ref = "mem://processed/" + pid + "_tuned.wav";
+                    store.saveAudioBytes(ref, resynth);
+                    project.getAudioAssets().setTunedVocalRef(ref);
+                } catch (Exception ignored) {
+                }
             }
+
             if (entries.containsKey("clip_refs.json")) {
                 Map<String, String> customClipPaths = objectMapper.readValue(
                         entries.get("clip_refs.json"),
-                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {}
+                        new TypeReference<Map<String, String>>() {}
                 );
+                Map<String, String> remappedRefs = new HashMap<>();
                 for (Map.Entry<String, String> e : customClipPaths.entrySet()) {
-                    byte[] clipData = entries.get(e.getValue());
+                    String clipRef = e.getKey();
+                    String arcPath = e.getValue();
+                    if (!isSafeClipRef(clipRef) || arcPath == null || !arcPath.startsWith("audio/clips/")) {
+                        continue;
+                    }
+                    byte[] clipData = entries.get(arcPath);
                     if (clipData != null) {
-                        store.saveAudioBytes(e.getKey(), clipData);
+                        String targetRef = (!pid.equals(origPid) && clipRef.contains("/" + origPid + "/"))
+                                ? clipRef.replace("/" + origPid + "/", "/" + pid + "/")
+                                : (!pid.equals(origPid) ? "mem://clips/" + pid + "/" + Integer.toUnsignedString(clipRef.hashCode()) + ".wav" : clipRef);
+                        store.saveAudioBytes(targetRef, clipData);
+                        if (!targetRef.equals(clipRef)) {
+                            remappedRefs.put(clipRef, targetRef);
+                        }
+                    }
+                }
+                if (!remappedRefs.isEmpty() && project.getTracks() != null) {
+                    for (TrackState t : project.getTracks().values()) {
+                        if (t == null || t.getClips() == null) continue;
+                        for (AudioClip clip : t.getClips()) {
+                            if (clip != null && remappedRefs.containsKey(clip.getSource())) {
+                                clip.setSource(remappedRefs.get(clip.getSource()));
+                            }
+                        }
                     }
                 }
             }
@@ -1576,6 +1952,43 @@ public class JavaAudioFallbackService {
         } catch (IOException ex) {
             throw new AudioValidationException("Invalid project.json in .aimusic archive: " + ex.getMessage(), HttpStatus.BAD_REQUEST);
         }
+    }
+
+    private static boolean isSafeZipEntryName(String name) {
+        if (name == null || name.isBlank() || name.indexOf('\0') >= 0) return false;
+        if (name.startsWith("/") || name.startsWith("\\") || name.contains("..")) return false;
+        return name.length() <= 256;
+    }
+
+    private static boolean isSafeClipRef(String ref) {
+        return ref != null && !ref.isBlank() && ref.length() <= 256
+                && ref.startsWith("mem://") && !ref.contains("..")
+                && ref.matches("^mem://[a-z]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$");
+    }
+
+    private static String sanitizeProjectId(String rawId) {
+        if (rawId == null || rawId.isBlank()) {
+            return "proj_imported_" + System.currentTimeMillis();
+        }
+        String cleaned = rawId.replaceAll("[^A-Za-z0-9_-]", "_");
+        return cleaned.isBlank() ? "proj_imported_" + System.currentTimeMillis() : cleaned;
+    }
+
+    private static byte[] readZipEntryBounded(ZipInputStream zis, int maxBytes) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int total = 0;
+        int read;
+        while ((read = zis.read(buf)) != -1) {
+            total += read;
+            if (total > maxBytes) {
+                throw new AudioValidationException(
+                        "Decompressed .aimusic archive exceeds safe memory limit.",
+                        HttpStatus.PAYLOAD_TOO_LARGE);
+            }
+            out.write(buf, 0, read);
+        }
+        return out.toByteArray();
     }
 
     // --- Overdub Fit Check ---

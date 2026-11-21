@@ -136,10 +136,22 @@ public class AudioWorkerClient {
         body.put("mode", (mode != null && !mode.isBlank()) ? mode : "ai_mix");
         body.put("apply_mastering", applyMastering);
         body.put("sample_rate", sampleRate);
-        return postJsonForBytes("/internal/audio/render", body, Duration.ofSeconds(30));
+        return postJsonForBytes("/internal/audio/render", body, Duration.ofSeconds(60));
     }
 
     public Optional<byte[]> exportAudio(ProjectState project, Map<String, byte[]> audioAssets, String format, String mode, boolean applyMastering, int sampleRate) {
+        return exportAudio(project, audioAssets, format, mode, applyMastering, sampleRate, "320k");
+    }
+
+    public Optional<byte[]> exportAudio(
+            ProjectState project,
+            Map<String, byte[]> audioAssets,
+            String format,
+            String mode,
+            boolean applyMastering,
+            int sampleRate,
+            String bitrate
+    ) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("project", project);
         body.put("audio_assets_base64", encodeAssetsBase64(audioAssets));
@@ -147,7 +159,8 @@ public class AudioWorkerClient {
         body.put("mode", mode);
         body.put("apply_mastering", applyMastering);
         body.put("sample_rate", sampleRate);
-        return postJsonForBytes("/internal/audio/export", body, Duration.ofSeconds(30));
+        body.put("bitrate", (bitrate != null && bitrate.trim().startsWith("192")) ? "192k" : "320k");
+        return postJsonForBytes("/internal/audio/export", body, Duration.ofSeconds(60));
     }
 
     private Map<String, String> encodeAssetsBase64(Map<String, byte[]> audioAssets) {
@@ -206,7 +219,7 @@ public class AudioWorkerClient {
             byte[] payload = buildMultipartBody(boundary, fileField, filename, fileBytes, formFields);
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(base + path))
-                    .timeout(Duration.ofSeconds(20))
+                    .timeout(Duration.ofSeconds(45))
                     .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
                     .build();
@@ -235,7 +248,8 @@ public class AudioWorkerClient {
             Map<String, String> formFields
     ) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        String safeName = (filename != null && !filename.isBlank()) ? filename : "audio.wav";
+        String safeName = (filename != null && !filename.isBlank())
+                ? filename.replaceAll("[\"\\\\\\r\\n]", "_") : "audio.wav";
         for (Map.Entry<String, String> entry : formFields.entrySet()) {
             out.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
             out.write(("Content-Disposition: form-data; name=\"" + entry.getKey() + "\"\r\n\r\n").getBytes(StandardCharsets.UTF_8));

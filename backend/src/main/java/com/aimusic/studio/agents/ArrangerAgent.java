@@ -100,35 +100,61 @@ public class ArrangerAgent {
             tracksToBuild.removeAll(lockedSet);
         }
 
-        llm.generateJson(
-                String.format("Arrange MIDI tracks %s for genre='%s', bars=%d, key=%s %s, qa_feedback='%s'.",
-                        tracksToBuild, genre, totalBars, key, scale, qaFeedback != null ? qaFeedback : ""),
+        LlmAdapter.LlmResponse guidanceResp = llm.generateJson(
+                String.format(
+                        "Arrange MIDI tracks %s for genre='%s', bars=%d, time_signature='%s', key=%s %s, qa_feedback='%s'. "
+                                + "Return JSON keys drum_groove (standard|driving|sparse|halftime), "
+                                + "bass_pattern (standard|octave|walking|syncopated), harmony_style (auto|sustained|stabs|arpeggio).",
+                        tracksToBuild, genre, totalBars, analysis.getTimeSignature(), key, scale,
+                        qaFeedback != null ? qaFeedback : ""
+                ),
                 "You are a MIDI arranger. Return concise JSON arrangement guidance.",
                 "arranger",
                 null
         );
+        Map<String, Object> guidance = guidanceResp != null && guidanceResp.data() != null
+                ? guidanceResp.data() : Map.of();
+        String qaHint = qaFeedback != null ? qaFeedback.toLowerCase(Locale.ROOT) : "";
+        String drumGroove = extractArrangementToken(guidance, "drum_groove", qaHint,
+                List.of("halftime", "sparse", "driving"), "standard");
+        String bassPattern = extractArrangementToken(guidance, "bass_pattern", qaHint,
+                List.of("walking", "octave", "syncopated"), "standard");
+        String harmonyStyle = extractArrangementToken(guidance, "harmony_style", qaHint,
+                List.of("arpeggio", "sustained", "stabs"), "auto");
 
         Map<String, TrackState> resultTracks = new LinkedHashMap<>();
         for (Map.Entry<String, TrackState> entry : existingTracks.entrySet()) {
             resultTracks.put(entry.getKey(), copyTrack(entry.getValue()));
         }
 
+        String vocalRef = resolveVocalRef(projectState);
+        double defaultVocalStartBar = ("accompaniment".equals(outputMode) && Boolean.TRUE.equals(cfg.getAddCountInTail()))
+                ? 2.0 : 1.0;
         if (!resultTracks.containsKey("vocal")) {
             TrackState vocal = TrackState.audioTrack(0.9, 0.0);
-            String ref = null;
-            if (projectState.getAudioAssets() != null) {
-                boolean autotuneEnabled = projectState.getAutotuneSettings() == null
-                        || projectState.getAutotuneSettings().isEnabled();
-                ref = (autotuneEnabled && projectState.getAudioAssets().getTunedVocalRef() != null)
-                        ? projectState.getAudioAssets().getTunedVocalRef()
-                        : projectState.getAudioAssets().getDryDenoisedRef();
-            }
-            if (ref != null) {
-                AudioClip clip = new AudioClip("clip_vocal_1", ref, 1.0, 0.0);
+            if (vocalRef != null) {
+                AudioClip clip = new AudioClip("clip_vocal_1", vocalRef, defaultVocalStartBar, 0.0);
                 clip.setFadeInMs(15.0);
                 vocal.getClips().add(clip);
             }
             resultTracks.put("vocal", vocal);
+        } else if ((targetTrack == null || targetTrack.isBlank()) && "accompaniment".equals(outputMode)) {
+            TrackState existingVocal = resultTracks.get("vocal");
+            if (existingVocal != null) {
+                if (existingVocal.getClips() == null) {
+                    existingVocal.setClips(new ArrayList<>());
+                }
+                if (existingVocal.getClips().isEmpty() && vocalRef != null) {
+                    AudioClip clip = new AudioClip("clip_vocal_1", vocalRef, defaultVocalStartBar, 0.0);
+                    clip.setFadeInMs(15.0);
+                    existingVocal.getClips().add(clip);
+                } else if (existingVocal.getClips().size() == 1) {
+                    AudioClip first = existingVocal.getClips().get(0);
+                    if (first != null && "clip_vocal_1".equals(first.getId()) && first.getOffsetMs() == 0.0 && first.getTrimStartSec() == 0.0) {
+                        first.setStartBar(defaultVocalStartBar);
+                    }
+                }
+            }
         }
 
         List<MidiNote> srcMelody = melodyNotes != null ? melodyNotes : analysis.getRawMelodyMidi();
@@ -161,15 +187,15 @@ public class ArrangerAgent {
             double defaultVol;
             switch (trackName) {
                 case "drums" -> {
-                    notes = generateDrums(totalBars, beatsPerBar, sections, genre);
+                    notes = generateDrums(totalBars, beatsPerBar, sections, genre, drumGroove);
                     defaultVol = 0.72;
                 }
                 case "bass" -> {
-                    notes = generateBass(totalBars, beatsPerBar, chordByBar, sections, genre);
+                    notes = generateBass(totalBars, beatsPerBar, chordByBar, sections, genre, bassPattern);
                     defaultVol = 0.76;
                 }
                 case "harmony" -> {
-                    notes = generateHarmony(totalBars, beatsPerBar, chordByBar, sections, genre);
+                    notes = generateHarmony(totalBars, beatsPerBar, chordByBar, sections, genre, harmonyStyle);
                     defaultVol = 0.65;
                 }
                 default -> {
@@ -185,6 +211,11 @@ public class ArrangerAgent {
             built.setSolo(existingMeta != null && existingMeta.isSolo());
             built.setVolume(existingMeta != null ? existingMeta.getVolume() : defaultVol);
             built.setPan(existingMeta != null ? existingMeta.getPan() : 0.0);
+            built.setLowDb(existingMeta != null ? existingMeta.getLowDb() : 0.0);
+            built.setMidDb(existingMeta != null ? existingMeta.getMidDb() : 0.0);
+            built.setHighDb(existingMeta != null ? existingMeta.getHighDb() : 0.0);
+            built.setReverbSend(existingMeta != null ? existingMeta.getReverbSend() : 0.0);
+            built.setDelaySend(existingMeta != null ? existingMeta.getDelaySend() : 0.0);
             built.setInstrument(instName);
             built.setNotes(notes);
             resultTracks.put(trackName, built);
@@ -211,6 +242,11 @@ public class ArrangerAgent {
         t.setSolo(src.isSolo());
         t.setVolume(src.getVolume());
         t.setPan(src.getPan());
+        t.setLowDb(src.getLowDb());
+        t.setMidDb(src.getMidDb());
+        t.setHighDb(src.getHighDb());
+        t.setReverbSend(src.getReverbSend());
+        t.setDelaySend(src.getDelaySend());
         t.setInstrument(src.getInstrument());
         if (src.getClips() != null) t.setClips(new ArrayList<>(src.getClips()));
         if (src.getNotes() != null) {
@@ -272,41 +308,115 @@ public class ArrangerAgent {
         return voicing;
     }
 
-    private List<MidiNote> generateDrums(int totalBars, int beatsPerBar, List<SongSection> sections, String genre) {
+    private String resolveVocalRef(ProjectState projectState) {
+        if (projectState.getAudioAssets() == null) {
+            return null;
+        }
+        boolean autotuneEnabled = projectState.getAutotuneSettings() == null
+                || projectState.getAutotuneSettings().isEnabled();
+        String tuned = projectState.getAudioAssets().getTunedVocalRef();
+        String dry = projectState.getAudioAssets().getDryDenoisedRef();
+        if (autotuneEnabled && tuned != null && !tuned.isBlank()) {
+            return tuned;
+        }
+        return (dry != null && !dry.isBlank()) ? dry : tuned;
+    }
+
+    private String extractArrangementToken(Map<String, Object> guidance, String key, String qaHint,
+                                           List<String> knownValues, String defaultValue) {
+        Object raw = guidance != null ? guidance.get(key) : null;
+        if (raw != null) {
+            String token = raw.toString().trim().toLowerCase(Locale.ROOT);
+            for (String allowed : knownValues) {
+                if (token.contains(allowed)) {
+                    return allowed;
+                }
+            }
+        }
+        if (qaHint != null && !qaHint.isBlank()) {
+            for (String allowed : knownValues) {
+                if (qaHint.contains(allowed)) {
+                    return allowed;
+                }
+            }
+        }
+        return defaultValue;
+    }
+
+    private List<MidiNote> generateDrums(int totalBars, int beatsPerBar, List<SongSection> sections, String genre, String drumGroove) {
         List<MidiNote> notes = new ArrayList<>();
         String lowered = genre.toLowerCase(Locale.ROOT);
         boolean isBallad = lowered.contains("ballad") || lowered.contains("acoustic");
         boolean isHiphop = lowered.contains("hip-hop") || lowered.contains("r&b");
+        boolean isDriving = "driving".equals(drumGroove);
+        boolean isSparse = "sparse".equals(drumGroove);
+        boolean isHalftime = "halftime".equals(drumGroove);
 
         for (int barIdx = 0; barIdx < totalBars; barIdx++) {
             int barNum = barIdx + 1;
             SongSection sec = sectionForBar(sections, barNum);
+            String secName = sec != null && sec.getName() != null ? sec.getName().toLowerCase(Locale.ROOT) : "";
+            double barStart = (double) barIdx * beatsPerBar;
+            if (secName.contains("count-in")) {
+                for (int b = 0; b < beatsPerBar; b++) {
+                    notes.add(new MidiNote(42, barStart + b, 0.15, b == 0 ? 92 : 68, 1.0));
+                }
+                continue;
+            }
+            if (secName.equals("tail")) {
+                notes.add(new MidiNote(49, barStart, 0.5, 62, 1.0));
+                continue;
+            }
             boolean isBridge = isBridgeSection(sec);
             double energy = sec != null ? sec.getEnergy() : 0.7;
-            double barStart = (double) barIdx * beatsPerBar;
             if (energy < 0.32 && barIdx == 0) continue;
-            double velScale = Math.max(0.55, Math.min(1.0, energy + 0.15));
+            double grooveVelFactor = isDriving ? 1.08 : (isSparse ? 0.85 : 1.0);
+            double velScale = Math.max(0.50, Math.min(1.08, (energy + 0.15) * grooveVelFactor));
 
-            if (isBridge) {
-                boolean isFirstBridgeBar = barNum == sec.getStartBar();
-                boolean isLastBridgeBar = barNum == sec.getStartBar() + sec.getBars() - 1;
-                if (isFirstBridgeBar) {
+            if (isBridge || isHalftime) {
+                boolean isFirstBridgeBar = sec != null && barNum == sec.getStartBar();
+                boolean isLastBridgeBar = sec != null && barNum == sec.getStartBar() + sec.getBars() - 1;
+                if (isBridge && isFirstBridgeBar) {
                     notes.add(new MidiNote(49, barStart, 0.5, (int) (96 * velScale), 1.0));
                 }
-                // Half-time atmospheric bridge groove with ride cymbal & turnaround fill
+                // Half-time groove with ride cymbal & turnaround fill
                 notes.add(new MidiNote(36, barStart, 0.25, (int) (96 * velScale), 1.0));
-                if (beatsPerBar >= 4) {
+                if (beatsPerBar == 6) {
+                    notes.add(new MidiNote(38, barStart + 3.0, 0.25, (int) (90 * velScale), 1.0));
+                } else if (beatsPerBar >= 4) {
                     notes.add(new MidiNote(36, barStart + 2.5, 0.25, (int) (88 * velScale), 1.0));
                     notes.add(new MidiNote(38, barStart + 2.0, 0.25, (int) (92 * velScale), 1.0));
                 } else if (beatsPerBar >= 2) {
                     notes.add(new MidiNote(38, barStart + 1.0, 0.25, (int) (86 * velScale), 1.0));
                 }
-                for (int beat = 0; beat < beatsPerBar; beat++) {
-                    notes.add(new MidiNote(51, barStart + beat, 0.3, (int) (74 * velScale), 1.0));
+                if (!isSparse) {
+                    for (int beat = 0; beat < beatsPerBar; beat++) {
+                        notes.add(new MidiNote(51, barStart + beat, 0.3, (int) (74 * velScale), 1.0));
+                    }
                 }
-                if (isLastBridgeBar && beatsPerBar >= 4) {
-                    notes.add(new MidiNote(38, barStart + 3.0, 0.25, (int) (95 * velScale), 1.0));
-                    notes.add(new MidiNote(38, barStart + 3.5, 0.25, (int) (104 * velScale), 1.0));
+                if (isBridge && isLastBridgeBar && beatsPerBar >= 4) {
+                    double fillPos = beatsPerBar == 6 ? 4.5 : 3.0;
+                    notes.add(new MidiNote(38, barStart + fillPos, 0.25, (int) (95 * velScale), 1.0));
+                    notes.add(new MidiNote(38, barStart + fillPos + 0.5, 0.25, (int) (104 * velScale), 1.0));
+                }
+                continue;
+            }
+
+            if (isDriving && sec != null && barNum == sec.getStartBar()) {
+                notes.add(new MidiNote(49, barStart, 0.5, Math.min(118, (int) (98 * velScale)), 1.0));
+            }
+
+            if (beatsPerBar == 6) {
+                notes.add(new MidiNote(36, barStart, 0.25, Math.min(120, (int) (104 * velScale)), 1.0));
+                if (!isSparse) {
+                    notes.add(new MidiNote(36, barStart + 2.5, 0.25, Math.min(115, (int) (88 * velScale)), 1.0));
+                }
+                notes.add(new MidiNote(38, barStart + 3.0, 0.25, Math.min(118, (int) ((isBallad ? 80 : 96) * velScale)), 1.0));
+                if (energy >= (isDriving ? 0.35 : 0.45)) {
+                    for (int beat = 0; beat < 6; beat++) {
+                        if (isSparse && beat % 3 != 0) continue;
+                        notes.add(new MidiNote(42, barStart + beat, 0.2, Math.min(110, (int) ((beat % 3 == 0 ? 82 : 62) * velScale)), 1.0));
+                    }
                 }
                 continue;
             }
@@ -314,22 +424,22 @@ public class ArrangerAgent {
             for (int beat = 0; beat < beatsPerBar; beat++) {
                 double t = barStart + beat;
                 if (beat == 0) {
-                    notes.add(new MidiNote(36, t, 0.25, (int) (105 * velScale), 1.0));
-                } else if (beat == 2 && !isHiphop) {
-                    notes.add(new MidiNote(36, t, 0.25, (int) (95 * velScale), 1.0));
-                } else if (beat == 2) {
-                    notes.add(new MidiNote(36, t + 0.5, 0.25, (int) (98 * velScale), 1.0));
+                    notes.add(new MidiNote(36, t, 0.25, Math.min(120, (int) (105 * velScale)), 1.0));
+                } else if (beat == 2 && !isHiphop && !isSparse) {
+                    notes.add(new MidiNote(36, t, 0.25, Math.min(118, (int) (95 * velScale)), 1.0));
+                } else if (beat == 2 && isHiphop) {
+                    notes.add(new MidiNote(36, t + 0.5, 0.25, Math.min(118, (int) (98 * velScale)), 1.0));
                 }
 
                 if (beat == 1 || beat == 3 || (beatsPerBar == 3 && beat == 2)) {
-                    int snareVel = (int) ((isBallad ? 78 : 96) * velScale);
+                    int snareVel = Math.min(118, (int) ((isBallad ? 78 : 96) * velScale));
                     notes.add(new MidiNote(38, t, 0.25, snareVel, 1.0));
                 }
 
-                if (energy >= 0.45) {
-                    notes.add(new MidiNote(42, t, 0.2, (int) (72 * velScale), 1.0));
-                    if (!isBallad) {
-                        notes.add(new MidiNote(42, t + 0.5, 0.2, (int) (62 * velScale), 1.0));
+                if (energy >= (isDriving ? 0.35 : 0.45)) {
+                    notes.add(new MidiNote(42, t, 0.2, Math.min(110, (int) (72 * velScale)), 1.0));
+                    if ((!isBallad && !isSparse) || isDriving) {
+                        notes.add(new MidiNote(42, t + 0.5, 0.2, Math.min(105, (int) (62 * velScale)), 1.0));
                     }
                 }
             }
@@ -338,13 +448,15 @@ public class ArrangerAgent {
     }
 
     private List<MidiNote> generateBass(int totalBars, int beatsPerBar, Map<Integer, String> chordByBar,
-                                        List<SongSection> sections, String genre) {
+                                        List<SongSection> sections, String genre, String bassPattern) {
         List<MidiNote> notes = new ArrayList<>();
         boolean isEdm = genre.toLowerCase(Locale.ROOT).contains("edm");
 
         for (int barIdx = 0; barIdx < totalBars; barIdx++) {
             int barNum = barIdx + 1;
             SongSection sec = sectionForBar(sections, barNum);
+            String secName = sec != null && sec.getName() != null ? sec.getName().toLowerCase(Locale.ROOT) : "";
+            if (secName.contains("count-in")) continue;
             boolean isBridge = isBridgeSection(sec);
             double energy = sec != null ? sec.getEnergy() : 0.7;
             String symbol = chordByBar.getOrDefault(barNum, "C");
@@ -359,11 +471,39 @@ public class ArrangerAgent {
             double barStart = (double) barIdx * beatsPerBar;
             int vel = (int) Math.max(65, Math.min(110, 75 + energy * 30));
 
+            if (secName.equals("tail")) {
+                notes.add(new MidiNote(rootPitch, barStart, Math.min(2.0, beatsPerBar), Math.max(55, vel - 16), 1.0));
+                continue;
+            }
             if (isBridge && beatsPerBar >= 4) {
                 // Sustained melodic pedal + chord-tone walk in Bridge
                 notes.add(new MidiNote(rootPitch, barStart, 2.0, vel - 4, 1.0));
                 notes.add(new MidiNote(thirdPitch, barStart + 2.0, 1.0, vel - 2, 1.0));
-                notes.add(new MidiNote(fifthPitch, barStart + 3.0, 1.0, Math.min(112, vel + 4), 1.0));
+                notes.add(new MidiNote(fifthPitch, barStart + 3.0, Math.max(1.0, beatsPerBar - 3.0), Math.min(112, vel + 4), 1.0));
+            } else if ("octave".equals(bassPattern)) {
+                int steps = beatsPerBar * 2;
+                for (int step = 0; step < steps; step++) {
+                    int pitch = (step % 2 == 0) ? rootPitch : Math.min(60, rootPitch + 12);
+                    notes.add(new MidiNote(pitch, barStart + step * 0.5, 0.42, step % 2 == 0 ? vel : vel - 6, 1.0));
+                }
+            } else if ("walking".equals(bassPattern)) {
+                int[] walk = {rootPitch, thirdPitch, fifthPitch, Math.min(60, rootPitch + 12)};
+                for (int beat = 0; beat < beatsPerBar; beat++) {
+                    notes.add(new MidiNote(walk[beat % walk.length], barStart + beat, 0.9, vel - 2, 1.0));
+                }
+            } else if ("syncopated".equals(bassPattern)) {
+                notes.add(new MidiNote(rootPitch, barStart, 1.25, vel, 1.0));
+                if (beatsPerBar >= 4) {
+                    notes.add(new MidiNote(fifthPitch, barStart + 1.5, 0.75, vel - 4, 1.0));
+                    notes.add(new MidiNote(rootPitch, barStart + 2.5, 0.75, vel - 2, 1.0));
+                    notes.add(new MidiNote(thirdPitch, barStart + 3.5, Math.max(0.5, beatsPerBar - 3.5), vel - 6, 1.0));
+                } else {
+                    notes.add(new MidiNote(fifthPitch, barStart + 1.5, Math.max(0.5, beatsPerBar - 1.5), vel - 4, 1.0));
+                }
+            } else if (beatsPerBar == 6 && energy >= 0.4) {
+                notes.add(new MidiNote(rootPitch, barStart, 2.5, vel, 1.0));
+                notes.add(new MidiNote(rootPitch, barStart + 3.0, 1.5, vel - 4, 1.0));
+                notes.add(new MidiNote(fifthPitch, barStart + 5.0, 1.0, vel - 8, 1.0));
             } else if (isEdm && energy >= 0.6) {
                 for (int step = 0; step < beatsPerBar * 2; step++) {
                     notes.add(new MidiNote(rootPitch, barStart + step * 0.5, 0.4, vel, 1.0));
@@ -381,7 +521,7 @@ public class ArrangerAgent {
     }
 
     private List<MidiNote> generateHarmony(int totalBars, int beatsPerBar, Map<Integer, String> chordByBar,
-                                           List<SongSection> sections, String genre) {
+                                           List<SongSection> sections, String genre, String harmonyStyle) {
         List<MidiNote> notes = new ArrayList<>();
         boolean isBallad = genre.toLowerCase(Locale.ROOT).contains("ballad")
                 || genre.toLowerCase(Locale.ROOT).contains("acoustic");
@@ -389,6 +529,8 @@ public class ArrangerAgent {
         for (int barIdx = 0; barIdx < totalBars; barIdx++) {
             int barNum = barIdx + 1;
             SongSection sec = sectionForBar(sections, barNum);
+            String secName = sec != null && sec.getName() != null ? sec.getName().toLowerCase(Locale.ROOT) : "";
+            if (secName.contains("count-in")) continue;
             boolean isBridge = isBridgeSection(sec);
             double energy = sec != null ? sec.getEnergy() : 0.7;
             String symbol = chordByBar.getOrDefault(barNum, "C");
@@ -397,8 +539,14 @@ public class ArrangerAgent {
             double barStart = (double) barIdx * beatsPerBar;
             int vel = (int) Math.max(55, Math.min(95, 58 + energy * 32));
 
-            if (isBridge) {
-                // Contrasting arpeggiated texture + low pad root in Bridge
+            if (secName.equals("tail")) {
+                for (int pitch : voicing) {
+                    notes.add(new MidiNote(pitch, barStart, Math.min(2.0, beatsPerBar), Math.max(48, vel - 14), 1.0));
+                }
+                continue;
+            }
+            if (isBridge || "arpeggio".equals(harmonyStyle)) {
+                // Contrasting arpeggiated texture + low pad root
                 if (!voicing.isEmpty()) {
                     notes.add(new MidiNote(voicing.get(0), barStart, beatsPerBar, Math.max(52, vel - 8), 1.0));
                     for (int beat = 0; beat < beatsPerBar; beat++) {
@@ -406,15 +554,25 @@ public class ArrangerAgent {
                         notes.add(new MidiNote(Math.min(84, arpPitch), barStart + beat, 0.85, vel, 1.0));
                     }
                 }
-            } else if (isBallad || energy < 0.5) {
+            } else if ("sustained".equals(harmonyStyle) || (!"stabs".equals(harmonyStyle) && (isBallad || energy < 0.5))) {
                 for (int pitch : voicing) {
                     notes.add(new MidiNote(pitch, barStart, beatsPerBar, vel, 1.0));
                 }
+            } else if ("stabs".equals(harmonyStyle)) {
+                double[] stabBeats = beatsPerBar == 6 ? new double[]{0.0, 3.0}
+                        : (beatsPerBar >= 4 ? new double[]{0.0, 1.5, 3.0} : new double[]{0.0, 2.0});
+                for (double sb : stabBeats) {
+                    if (sb >= beatsPerBar) continue;
+                    for (int pitch : voicing) {
+                        notes.add(new MidiNote(pitch, barStart + sb, Math.min(0.45, beatsPerBar - sb), Math.min(100, vel + 6), 1.0));
+                    }
+                }
             } else {
-                int[] hitBeats = (energy >= 0.8 && beatsPerBar >= 4)
+                int[] hitBeats = beatsPerBar == 6 ? new int[]{0, 3}
+                        : ((energy >= 0.8 && beatsPerBar >= 4)
                         ? new int[]{0, 1, 2, 3}
-                        : (beatsPerBar >= 4 ? new int[]{0, 2} : new int[]{0});
-                double dur = hitBeats.length <= 2 ? 1.75 : 0.85;
+                        : (beatsPerBar >= 4 ? new int[]{0, 2} : new int[]{0}));
+                double dur = hitBeats.length <= 2 ? (beatsPerBar == 6 ? 2.5 : 1.75) : 0.85;
                 for (int beat : hitBeats) {
                     for (int pitch : voicing) {
                         notes.add(new MidiNote(pitch, barStart + beat, Math.min(dur, beatsPerBar - beat), vel, 1.0));

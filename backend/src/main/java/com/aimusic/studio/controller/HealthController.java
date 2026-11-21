@@ -85,6 +85,17 @@ public class HealthController {
         }
     }
 
+    @PostMapping("/api/health/llm-test")
+    public Map<String, Object> testLlmConnection(HttpServletRequest request) {
+        LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
+        LlmContextHolder.set(overrides);
+        try {
+            return llmAdapter.testConnection(overrides != null ? overrides.defaultProvider() : null);
+        } finally {
+            LlmContextHolder.clear();
+        }
+    }
+
     @PostMapping("/api/settings/cache/clear")
     public Map<String, Object> clearTempCache() {
         Map<String, Object> res = new LinkedHashMap<>(store.clearCache());

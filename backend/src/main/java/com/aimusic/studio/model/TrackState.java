@@ -25,6 +25,21 @@ public class TrackState {
     @JsonProperty("pan")
     private double pan = 0.0;
 
+    @JsonProperty("low_db")
+    private double lowDb = 0.0;
+
+    @JsonProperty("mid_db")
+    private double midDb = 0.0;
+
+    @JsonProperty("high_db")
+    private double highDb = 0.0;
+
+    @JsonProperty("reverb_send")
+    private double reverbSend = 0.0;
+
+    @JsonProperty("delay_send")
+    private double delaySend = 0.0;
+
     @JsonProperty("instrument")
     private String instrument;
 
@@ -53,6 +68,11 @@ public class TrackState {
         return t;
     }
 
+    private static double clampFinite(double value, double min, double max, double fallback) {
+        if (!Double.isFinite(value)) return fallback;
+        return Math.max(min, Math.min(max, value));
+    }
+
     public String getType() { return type; }
     public void setType(String type) { this.type = type != null ? type : "midi"; }
 
@@ -66,10 +86,25 @@ public class TrackState {
     public void setSolo(boolean solo) { this.solo = solo; }
 
     public double getVolume() { return volume; }
-    public void setVolume(double volume) { this.volume = Math.max(0.0, Math.min(1.2, volume)); }
+    public void setVolume(double volume) { this.volume = clampFinite(volume, 0.0, 1.2, 0.9); }
 
     public double getPan() { return pan; }
-    public void setPan(double pan) { this.pan = Math.max(-1.0, Math.min(1.0, pan)); }
+    public void setPan(double pan) { this.pan = clampFinite(pan, -1.0, 1.0, 0.0); }
+
+    public double getLowDb() { return lowDb; }
+    public void setLowDb(double lowDb) { this.lowDb = clampFinite(lowDb, -12.0, 12.0, 0.0); }
+
+    public double getMidDb() { return midDb; }
+    public void setMidDb(double midDb) { this.midDb = clampFinite(midDb, -12.0, 12.0, 0.0); }
+
+    public double getHighDb() { return highDb; }
+    public void setHighDb(double highDb) { this.highDb = clampFinite(highDb, -12.0, 12.0, 0.0); }
+
+    public double getReverbSend() { return reverbSend; }
+    public void setReverbSend(double reverbSend) { this.reverbSend = clampFinite(reverbSend, 0.0, 1.0, 0.0); }
+
+    public double getDelaySend() { return delaySend; }
+    public void setDelaySend(double delaySend) { this.delaySend = clampFinite(delaySend, 0.0, 1.0, 0.0); }
 
     public String getInstrument() { return instrument; }
     public void setInstrument(String instrument) { this.instrument = instrument; }
