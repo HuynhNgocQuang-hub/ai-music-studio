@@ -4,7 +4,7 @@ services:
     container_name: ai-music-redis
     command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -18,7 +18,7 @@ services:
       dockerfile: Dockerfile
     container_name: ai-music-audio-worker
     ports:
-      - "8001:8001"
+      - "127.0.0.1:${AUDIO_WORKER_HOST_PORT:-8001}:8001"
     environment:
       SAMPLE_RATE: ${SAMPLE_RATE:-44100}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
@@ -38,11 +38,11 @@ services:
       dockerfile: Dockerfile
     container_name: ai-music-backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8000}:8000"
     environment:
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-docker}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      AUDIO_WORKER_URL: ${AUDIO_WORKER_URL:-http://audio-worker:8001}
+      REDIS_URL: ${DOCKER_REDIS_URL:-redis://redis:6379/0}
+      AUDIO_WORKER_URL: ${DOCKER_AUDIO_WORKER_URL:-http://audio-worker:8001}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-gemini}

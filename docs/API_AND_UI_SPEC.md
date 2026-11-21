@@ -1,8 +1,8 @@
 # Tài liệu Thiết kế Giao diện, Điều hướng & API Contract
 ## Dự án: AI Music Studio (Hybrid Multi-Agent)
 
-- **Phiên bản:** 1.1 (Option B: React Vite + Java 21 Spring Boot + Python Audio-Worker)
-- **Liên kết:** [SRS.md](./SRS.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md)
+- **Phiên bản:** 1.6 (Pro DAW Workstation + SRS Full Compliance + Phase 5 Production Optimization & Security Hardening)
+- **Liên kết:** [SRS.md](./SRS.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 - **Mục tiêu:** Đặc tả kiến trúc điều hướng (Menu, Chuyển trang, Phân trang), bố cục tối ưu cho từng màn hình, hợp đồng API giữa Frontend (`React + Vite`) – Core Backend (`Java 21 + Spring Boot 3.x`) – Audio DSP Microservice (`audio-worker`) – Redis, và cấu trúc file dự án `.aimusic`.
 
 ---
@@ -21,16 +21,16 @@ Dựa trên cấu hình thực tế (**Node.js v24**, **Java 21 + Maven 3.9+**, 
 
 ## 2. Kiến trúc Điều hướng, Menu & Bố cục Màn hình (UI/UX Navigation)
 
-### 2.1. Thanh Menu Chính & Khung Ứng dụng (App Shell)
-Giao diện dùng `react-router-dom` (`BrowserRouter`, `Routes`, `Route`) với **Sidebar Menu bên trái** (có thể thu gọn thành icon khi mở Studio để tăng diện tích làm nhạc) + **Thanh Trạng thái Auto-Save** ở góc trên:
+### 2.1. Thanh Activity Rail & Khung Ứng dụng (App Shell)
+Giao diện dùng `react-router-dom` (`BrowserRouter`, `Routes`, `Route`) với **Pro DAW Activity Rail** gọn bên trái (ẩn bớt header phụ khi vào `/studio/:id` để nhường trọn 100% chiều cao cho Timeline + Production Dock), kèm nút tạo nhanh **Blank DAW** (`+`) và banner khôi phục bản nháp `IndexedDB`:
 
 | Menu Item | Route | Chức năng chính |
 | :--- | :--- | :--- |
-| **Trang chủ** | `/` | Điểm khởi đầu nhanh & tổng quan dự án. |
-| **1. Tạo nhạc mới** | `/create` | Luồng từng bước (Wizard 4 bước) tối ưu cho người mới bắt đầu nhanh. |
-| **2. Phòng thu (Studio)** | `/studio/:id` | Không gian DAW-lite đầy đủ (Timeline cắt ghép, Mixer, Piano Roll, Auto-Tune Pro, Overdub, AI Coach). |
-| **3. Thư viện & Bản nháp** | `/library` | Quản lý dự án đang làm, bản tự lưu khi quên Save (`IndexedDB`), mở file `.aimusic` — có **tìm kiếm & phân trang**. |
-| **4. Cài đặt & API** | `/settings` | Cấu hình Gemini/OpenAI API Key, chọn model cho từng Agent, kiểm tra sức khỏe Spring Boot / Audio Worker / Redis. |
+| **Trang chủ (Project Hub)** | `/` | Khởi tạo 1-click từ Starter DAW Templates (`Pop`, `Lo-fi`, `Trap 808`, `House`, `Ballad`, `Blank Studio`) & Recent Sessions (mở/xóa). |
+| **1. AI Hum-to-Music** | `/create` | Luồng từng bước (Wizard 4 bước) ghi âm/upload vocal để AI phối khí & tạo bài hoàn chỉnh. |
+| **2. Phòng thu DAW** | `/studio/:id` | Không gian Pro DAW đầy đủ (Arrangement, Step Sequencer, Piano Roll, Console Mixer EQ/FX Bus, Auto-Tune DSP, Lyrics CRUD, AI Coach). |
+| **3. Kho Session (`.aimusic`)** | `/library` | Quản lý Local Draft (`IndexedDB`) & Server Saved Sessions (tạo mới, nhân bản, xóa máy chủ, tìm kiếm, phân trang `12/24/48`, import `.aimusic`). |
+| **4. Audio Engine & API** | `/settings` | Cấu hình Gemini (`AQ...`/`AIza...`) / OpenAI API Key, phân vai Agent, nút **Test API Key**, kiểm tra trạng thái Spring Boot / Redis / FluidSynth & dọn cache. |
 
 > **Chuyển trang thông minh (Seamless Handoff):** Từ trang `/create` sau khi AI tạo xong bản nghe thử (Bước 4), người dùng bấm **"Mở trong Studio"** $\rightarrow$ điều hướng sang `/studio/:id` bằng `useNavigate()` mà giữ nguyên toàn bộ State trong `ProjectProvider`.
 
@@ -41,50 +41,49 @@ Giao diện dùng `react-router-dom` (`BrowserRouter`, `Routes`, `Route`) với 
 #### Trang A: `/create` (`CreatePage.tsx`) — Quy trình Tạo nhạc Tối ưu (4-Step Wizard)
 Chia thành **4 bước có thanh Stepper** cho phép quay lại bước trước bất kỳ lúc nào:
 * **Bước 1 — Nhập & Làm sạch (`Input & Dry Check`):**
-  * Tab chuyển giữa **Ghi âm Mic** (mã hóa thành `.wav` PCM chuẩn trước khi upload, kèm Count-in Metronome, Waveform) và **Upload File** (`.wav/.mp3/.m4a/.ogg/.flac`, tối thiểu `3s`, tối đa `50 MB`).
+  * Tab chuyển giữa **Ghi âm Mic** (mã hóa thành `.wav` PCM chuẩn trước khi upload, kèm Count-in Metronome, Oscilloscope Waveform trực tiếp theo thời gian thực & thanh tiến trình upload `%`) và **Upload File** (`.wav/.mp3/.m4a/.ogg/.flac`, tối thiểu `3s`, tối đa `50 MB`).
   * Nút bật/tắt **AI Denoise** + trình phát đối chiếu **Giọng mộc gốc** vs **Giọng mộc đã lọc ồn**.
   * Công cụ cắt ngắn đầu/cuối nhanh hoặc **AI Auto-Trim**.
 * **Bước 2 — Phân tích & Auto-Tune nhanh (`Analyze & Tune`):**
-  * Hiển thị thẻ kết quả: `BPM` (có Tap Tempo & nghe Metronome), `Key / Scale` (cho chỉnh tay nếu cần), số ô nhịp.
+  * Hiển thị thẻ kết quả: `BPM` (có Tap Tempo & nghe Metronome), `Key / Scale` (cho chỉnh tay nếu cần), **`Time Signature (4/4 | 3/4 | 6/8)`**, số ô nhịp.
   * Thanh **Auto-Tune Quick Bar**: `Off` | `Nhẹ (Natural)` | `Vừa (Balanced)` | `Mạnh (Modern)` + nút nghe thử A/B ngay.
 * **Bước 3 — Cấu hình AI & Phối khí (`Style & Generate`):**
   * Chọn **Chế độ giai điệu**: `Preserve Original` | `AI Enhance`.
-  * Chọn **Đầu ra**: `Accompaniment Only` | `Full Song` (nếu chọn Full Song $\rightarrow$ chọn vị trí mô-típ: *Mặc định Chorus* / *Verse* / *AI đề xuất*, và bật/tắt *Lead Karaoke Guide + Gợi ý lời*).
+  * Chọn **Đầu ra**: `Accompaniment Only` (hỗ trợ tùy chọn **thêm ô nhịp Count-in đầu & Tail cuối `add_count_in_tail`**) | `Full Song` (nếu chọn Full Song $\rightarrow$ chọn vị trí mô-típ: *Mặc định Chorus* / *Verse* / *AI đề xuất*, và bật/tắt *Lead Karaoke Guide + Gợi ý lời*).
   * Chọn **Genre**, **Mood**, nhập **Prompt** ngắn (tối đa 500 ký tự).
   * Khi bấm **Tạo nhạc**: Hiển thị tiến trình từng Agent đang chạy (`Analyzer -> Composer -> Arranger -> QA`) qua SSE kèm đồng hồ đếm ngược timeout `60s` và nút **Hủy (Cancel)**.
 * **Bước 4 — Nghe thử nhanh (`Quick Preview`):**
-  * Nút chuyển tức thì để nghe so sánh 4 lớp: **Giọng mộc + Beat** | **Auto-Tune + Beat** | **Bản Preserve** | **Bản Enhance**.
-  * 2 hành động chính: **Tải nhanh (`MP3 / WAV`)** hoặc **Mở vào Hybrid Studio (`/studio/:id`)**.
+  * Nút chuyển tức thì để nghe so sánh 4 lớp: **Giọng mộc + Beat** | **Auto-Tune + Beat** | **Bản Preserve** | **Bản Enhance** (kèm nút **"Đặt làm chế độ chính & Tạo lại MIDI"** để đổi mode trực tiếp).
+  * 2 hành động chính: **Tải nhanh (`MP3 320kbps / WAV`)** hoặc **Mở vào Hybrid Studio (`/studio/:id`)**.
 
-#### Trang B: `/studio/:id` (`StudioPage.tsx`) — Hybrid AI Music Studio
-Bố cục chia **4 vùng chuẩn DAW**:
+#### Trang B: `/studio/:id` (`StudioPage.tsx` + `QuickStudioView.tsx` + `ConsoleMixerPanel.tsx`) — Pro DAW Workstation & Quick/Pro Switcher
+Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspense` (hỗ trợ chuyển tức thì **`[Quick | Pro DAW]`** mà không làm mất state, **tự động Rehydrate audio từ `IndexedDB`** khi Redis TTL hết hạn, nút **Regenerate toàn bài** kèm Cancel, và thanh Activity Rail gọn bên trái):
 1. **Top Transport Bar (Cố định trên cùng):**
-   * `Play / Pause / Stop / Loop`, đồng hồ `Bar:Beat` & `mm:ss`, chỉnh `BPM` & `Key`, `Undo / Redo`.
-   * Công cụ Timeline: `Con trỏ (Select)` | `Dao cắt (Split)` | `Snap Grid (1/4, 1/8, 1/16)`.
-   * Chỉ báo **Auto-Save**, nút **Auto-Mix/Master**, nút **Save `.aimusic`**, nút **Export**.
-2. **Vùng Trung tâm (Multi-Track Timeline & Chord Track):**
-   * Hàng trên cùng: **Section Bar** (`Intro`, `Verse`, `Chorus`...) + **Chord Timeline** (bấm vào ô nhịp để sửa hợp âm).
-   * Danh sách Track bên trái + Vùng **Clips** bên phải (cả **Audio Clips** và **MIDI Clips**).
-   * Mỗi track có `Mute (M)`, `Solo (S)`, `Lock`, `Regenerate Track` (hoặc `Record Overdub` trên track Vocal để hát đè lên beat).
-3. **Vùng Dưới (Tabbed Dock):**
-   * **Tab 1 — `Mixer`:** Fader Volume (0–120%), Pan (L/R), Peak Meter từng track và Master Limiter (`<= -1.0 dBFS`).
-   * **Tab 2 — `Piano Roll`:** Lưới chỉnh nốt MIDI cho track đang chọn.
-   * **Tab 3 — `Auto-Tune Pro`:** Root, Scale, Retune Speed (`0–200ms`), Humanize, Mix %, Auto-Follow Project Key.
-   * **Tab 4 — `Lyrics & Karaoke`:** Khung soạn lời chạy chữ theo nền beat + nút AI gợi ý lời theo đoạn.
+   * `Play / Pause / Stop / Rec Mic (kèm bù trễ Latency ms) / Loop / Metronome Click`, LCD `Bar:Beat` & `mm:ss`, chỉnh `BPM`, `Key`, `Scale`, **`Time Signature (4/4 | 3/4 | 6/8)`**, Master Peak meter, `Undo / Redo`.
+   * Công cụ Timeline: `Select (V)` | `Split (C)` | `Snap Grid (1/4, 1/8, 1/16)`.
+   * Chuyển A/B (`Dry / Tune / Mix`), nút **Auto-Save**, nút **Export** (bao gồm **`.aimusic`**, `WAV`, **`MP3 320kbps Studio`**, **`MP3 192kbps Nhẹ`**, `Stems`, `MIDI`) và **AI Coach**.
+2. **Left DAW Browser (`Patterns | Inspector | Presets`) & Vùng Arrangement Trung tâm:**
+   * **Section Bar** (`+ Section`, chỉnh tên / `Start` / `Bars` / `Energy%`, xóa) + **Chord Timeline** (bấm ô để sửa hoặc bấm `×`/nhập rỗng để xóa hợp âm; nút *Cập nhật đệm*).
+   * Toolbar Arrangement: Loop `B1–B9`, Zoom, **`Track Gọn / Track Cao`**, **`+ Track`** (tạo/khôi phục `Texture` hoặc MIDI track), **`Auto-Trim`**, **`+ Sample`**.
+   * Track Controls: `M`, `S`, `Lock`, **`Trash2`** (xóa `Texture` hoặc làm trống clip/nốt), `Rec Mic`, `Sample`, `AI Gen`, kéo thả clip (`Move / Split / Trim / Duplicate / Delete`).
+3. **Vùng Dưới (`Production Dock` có thể kéo giãn & phóng to toàn màn hình):**
+   * **Tab 1 — `Step Sequencer`:** Lưới trống 16 bước (`4/4`) / 12 bước (`3/4` & `6/8`), Groove Presets, `Lặp cả bài`, `Xóa Bar`, `Xóa hết`.
+   * **Tab 2 — `Piano Roll`:** C1–C7, Scale Highlight, kéo di chuyển/đổi độ dài, Velocity Lane kéo mượt, Quantize, `±Oct`, `Copy`/`Delete` nốt trên Floating HUD.
+   * **Tab 3 — `Console Mixer`:** Đổi nhạc cụ trực tiếp, **3-Band EQ (`low_db`, `mid_db`, `high_db`)** lưu bền vững vào backend, **FX SEND (`reverb_send`, `delay_send`)** riêng cho `Vocal` & `Lead`, Pan, Vertical Fader `0–120%`, 12-LED Meter, **`FX BUS`** return strip (`Hall Reverb` + `1/8D Ping-Pong Delay` + `BYPASS`), và **MASTER Bus** (`Auto-Mix` với Vocal Frequency Carve 2.2 kHz `-2.5 dB` + Limiter `<= -1.0 dBFS`).
+   * **Tab 4 — `Auto-Tune DSP`:** Root, Scale, Retune Speed (`0–200ms`), Humanize, Mix %, Auto-Follow Project Key (tự re-tune debounced khi đổi Project Key/Scale).
+   * **Tab 5 — `Lyrics & Karaoke`:** Đầy đủ CRUD (`+ Thêm dòng`, sửa `section` / `bar` / nội dung, nhảy nhanh `▶ b{bar}`, `Xóa dòng`) + AI Gợi ý lời & Karaoke Sync live.
 4. **Panel Phải (`AI Music Coach & Fit Check`):**
    * Hiển thị phân tích tự động mỗi khi thu đè (`Overdub`) lên beat (lệch nhịp `±ms`, chênh tông, mức Gain) kèm nút **1-Click Apply**.
-   * Khung chat hỏi đáp với **AI Coach** để xin gợi ý sửa lời, đổi hợp âm hoặc đặt mô-típ.
+   * Khung chat hỏi đáp với **AI Coach** kèm Quick Actions áp dụng ngay vào DAW State.
 
-#### Trang C: `/library` (`LibraryPage.tsx`) — Thư viện Dự án & Phân trang (`Pagination`)
-* **Thanh Bộ lọc & Tìm kiếm:** Tìm theo tên dự án, lọc theo **Genre**, **Key**, hoặc nguồn (**Bản nháp Auto-Save** | **Đã lưu**).
-* **Phân trang (Pagination):**
-  * Hiển thị **12 dự án / trang** (chọn nhanh `12 / 24 / 48` mục/trang), có nút `Trước / Sau`, số trang.
-  * Khung **"Khôi phục phiên làm việc gần nhất"** nếu phát hiện bản nháp `IndexedDB` chưa lưu ra file.
-* **Nút Import `.aimusic`:** Mở lại file dự án nhẹ đã xuất trước đó, kèm cảnh báo dung lượng `IndexedDB`.
+#### Trang C: `/library` (`LibraryPage.tsx`) & Trang Chủ `/` (`HomePage.tsx`)
+* **Trang chủ (`/`):** Starter DAW Templates 1-click (`Pop`, `Lo-fi`, `Trap 808`, `House`, `Piano Ballad`, `Blank Studio`) + danh sách Recent Sessions (mở vào DAW hoặc xóa nhanh).
+* **Thanh Bộ lọc & Tìm kiếm (`/library`):** Tìm theo tên dự án, lọc theo **Genre** hoặc nguồn (`Tất cả | Nháp cục bộ | Đã lưu máy chủ`), nút **`+ Tạo Session mới`**, Import `.aimusic`.
+* **Quản lý Session & Phân trang:** Hiển thị `12 / 24 / 48` mục/trang; mỗi Saved Session trên máy chủ đều có **Mở DAW**, **Nhân bản (`Copy`)**, và **Xóa (`DELETE /api/projects/{id}`)**.
 
-#### Trang D: `/settings` (`SettingsPage.tsx`) — Cài đặt & Quản trị Hệ thống Cá nhân
-* **Cấu hình Dual LLM:** Nhập/kiểm tra `Gemini API Key` và `OpenAI API Key`, chọn Provider mặc định và phân vai cho từng Agent (`Composer`, `Arranger`, `Lyricist`, `Coach`, `QA`) — gửi qua các header `X-Gemini-Api-Key`, `X-OpenAI-Api-Key`, `X-LLM-Provider`.
-* **Trạng thái Hạ tầng (`/api/health`):** Đèn báo kết nối `Spring Boot Backend`, `Audio Worker (Python DSP)`, `Redis (backend mode)`, `FFmpeg / FluidSynth / SoundFont` và `LLM Providers`.
+#### Trang D: `/settings` (`SettingsPage.tsx`) — Cài đặt & Hệ thống
+* **Cấu hình Dual LLM:** Nhập `Gemini API Key` (hỗ trợ cả `AQ...` lẫn `AIza...`) và `OpenAI API Key`, chọn Provider mặc định, phân vai cho 5 Agent, kèm nút **Test API Key** (`POST /api/health/llm-test`).
+* **Trạng thái Hạ tầng (`/api/health`):** 4 thẻ kiểm tra trực tiếp `Backend Spring Boot`, `Redis State`, `FluidSynth / DSP`, và `LLM AI Provider`, kèm nút Dọn Cache IndexedDB & Backend.
 
 ---
 
@@ -94,7 +93,10 @@ Bố cục chia **4 vùng chuẩn DAW**:
 | Method & Endpoint | Mục đích | Payload / Output chính |
 | :--- | :--- | :--- |
 | `GET /api/health` | Kiểm tra sức khỏe Backend, Redis, Audio Worker, Engines, LLM | `{ status, redis: { backend, connected }, audio_worker, engines, llm_providers }` |
+| `POST /api/health/llm-test` | Kiểm tra kết nối API Key Gemini/OpenAI theo header hiện tại | `{ ok, is_mock, provider, model, latency_ms, message }` |
+| `POST /api/settings/cache/clear` | Dọn cache tạm trong Backend State Store | `{ status: "cleared", cleared_assets }` |
 | `POST /api/audio/upload` | Tải hoặc gửi bản thu Mic WAV lên Backend | Form-data audio $\rightarrow$ `project_id`, `raw_input_ref`, `filename`, `duration_sec`, `warnings` |
+| `POST /api/audio/clip-upload` | Tải clip overdub / sample phụ lên track `vocal` hoặc `texture` | Form-data audio + `project_id`, `track_id`, `start_bar` $\rightarrow$ `project_state`, `clip`, `audio_ref` |
 | `POST /api/audio/denoise` | Chạy AI Denoise & Auto-Trim | `{ project_id, enable_denoise, auto_trim }` $\rightarrow$ `dry_denoised_ref`, `warnings` |
 | `POST /api/audio/analyze` | Trích xuất BPM, Key/Scale, Pitch MIDI | `{ project_id, source_ref }` $\rightarrow$ `bpm`, `key`, `scale`, `raw_melody_midi` |
 | `POST /api/audio/autotune` | Render giọng qua Auto-Tune DSP | `{ project_id, autotune_settings }` $\rightarrow$ `tuned_vocal_ref` |
@@ -106,26 +108,30 @@ Bố cục chia **4 vùng chuẩn DAW**:
 | :--- | :--- | :--- |
 | `POST /api/jobs/generate` | Khởi chạy luồng tạo nhạc (`Preserve`/`Enhance`, `Accompaniment`/`Full Song`) | `{ project_id, config }` $\rightarrow$ trả về `job_id` |
 | `POST /api/jobs/regenerate-track` | Tạo lại riêng 1 track trong Studio | `{ project_id, target_track, instrument }` $\rightarrow$ `job_id` |
-| `POST /api/jobs/rearrange` | Cập nhật nhạc đệm theo Chord Timeline mới | `{ project_id, chords, locked_tracks }` $\rightarrow$ `job_id` |
+| `POST /api/jobs/rearrange` | Cập nhật nhạc đệm theo Chord/Section Timeline mới | `{ project_id, chords, sections, total_bars, locked_tracks }` $\rightarrow$ `job_id` |
 | `GET /api/jobs/{jobId}/events` | **SSE Stream** (`SseEmitter`) đẩy tiến trình từng Agent | Event: `agent_step`, `qa_retry`, `progress`, `completed`, `fallback_warning`, `error` |
 | `POST /api/jobs/{jobId}/cancel` | Hủy job đang chạy ngay lập tức | `{ status: "cancelled" }` |
 
-### 3.3. Nhóm Studio, Overdub Fit Check, Lyrics & Coach
+### 3.3. Nhóm Studio, Overdub Fit Check, Auto-Mix, Lyrics & Coach
 | Method & Endpoint | Mục đích | Payload / Output chính |
 | :--- | :--- | :--- |
+| `POST /api/studio/auto-trim-vocal` | AI cắt khoảng lặng & căn nhịp clip Vocal trong Studio | `{ project_id }` $\rightarrow$ `project_state`, `trim_start_sec`, `trim_end_sec`, `trimmed_clips` |
+| `POST /api/studio/auto-mix` | Cân bằng Gain, Pan từng track & bật Master Limiter (`<= -1.0 dBFS`) | `{ project_id }` $\rightarrow$ `project_state`, `mix_notes`, `summary` |
 | `POST /api/studio/overdub-fit-check` | Upload clip thu đè lên beat & chạy AI Fit Check | Trả về `timing_offset_ms`, `pitch_issues[]`, `gain_suggestion`, danh sách **1-Click Fixes** |
 | `POST /api/lyrics/suggest` | Sinh/gợi ý lời bài hát khớp đoạn & tiết tấu | `{ project_id, language, topic, section }` $\rightarrow$ `lines[]` |
 | `POST /api/coach/chat` | Hỏi đáp AI Music Coach (kèm ngữ cảnh State) | `{ project_id, message, history }` $\rightarrow$ `reply`, `suggested_actions[]` |
 
-### 3.4. Nhóm Persistence, Sync & Export
+### 3.4. Nhóm Persistence, CRUD, Sync & Export
 | Method & Endpoint | Mục đích | Payload / Output chính |
 | :--- | :--- | :--- |
 | `GET /api/projects` | Lấy danh sách dự án từ Redis có **phân trang & lọc** | Query: `?page=1&limit=12&search=&genre=` $\rightarrow$ `{ items, total, page, total_pages }` |
 | `GET /api/projects/{id}` | Lấy chi tiết 1 `ProjectState` theo ID | `ProjectState JSON` |
-| `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` từ `IndexedDB` lên Redis | Body: `ProjectState JSON` |
+| `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` (gồm `low_db`, `mid_db`, `high_db`, `reverb_send`, `delay_send` trên từng track) | Body: `ProjectState JSON` |
+| `POST /api/projects/{id}/undo` | Khôi phục snapshot trước đó từ Undo stack (20 bước) | `ProjectState JSON` |
+| `DELETE /api/projects/{id}` | Xóa hẳn Project khỏi Redis/In-Memory Store | `{ status: "deleted", project_id }` |
 | `POST /api/projects/{id}/export/aimusic` | Đóng gói dự án thành file nhẹ `.aimusic` | Trả về binary stream `.aimusic` |
-| `POST /api/projects/import` | Nạp lại file `.aimusic` vào Redis & Studio | Form-data `.aimusic` $\rightarrow$ `ProjectState` |
-| `POST /api/projects/{id}/export/audio` | Render & Auto-Master xuất `wav` / `mp3` / `stems` (`.zip`) | `{ format: "wav" | "mp3" | "stems", apply_mastering: true, mode }` |
+| `POST /api/projects/import` | Nạp file `.aimusic` vào Redis & Studio (mặc định UI `overwrite=false` chống ghi đè, kiểm tra Zip Bomb & path traversal) | Form-data `.aimusic` + `overwrite` $\rightarrow$ `ProjectState` |
+| `POST /api/projects/{id}/export/audio` | Render & Auto-Master (áp dụng EQ + Vocal Carve 2.2 kHz + Send FX Bus + Limiter; chặn `total_bars > 256` -> `400`) xuất `wav` / `mp3` (`192k` \| `320k`) / `stems` (`.zip`) | `{ format: "wav" | "mp3" | "stems", bitrate: "320k" | "192k", apply_mastering: true, mode }` |
 | `POST /api/projects/{id}/export/midi` | Xuất file `.mid` đa track kèm Meta Events | Trả về binary `.mid` |
 
 ### 3.5. Hợp đồng Nội bộ Spring Boot $\leftrightarrow$ `audio-worker` (Cổng `8001`)
@@ -154,5 +160,7 @@ my-song.aimusic (ZIP container)
 └── audio/
     ├── raw_input.wav      # Giọng thu gốc (hoặc .flac/.opus)
     ├── dry_denoised.wav   # Giọng mộc đã lọc ồn
-    └── overdub_take1.wav  # Các clip thu đè (nếu có) — KHÔNG lưu WAV stems MIDI để tiết kiệm dung lượng
+    └── overdub_take1.wav  # Các clip thu đè (nếu có) — KHÔNG lưu WAV stems MIDI để tiết kiệm dung lượng (hỗ trợ cờ dry_same_as_raw chống trùng lặp)
 ```
+
+> **Bảo mật & Giới hạn Vận hành (Phase 5):** Mọi response từ Spring Boot đều đính kèm Security Headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy`); `CorsConfig` giới hạn local origins (`localhost`/`127.0.0.1`); upload được kiểm tra dung lượng trước khi đọc vào RAM (`55 MB` Servlet / `50 MB` overdub / `_read_upload_bounded` HTTP `413` trên worker) và `.aimusic` import từ chối Zip Bomb/path traversal (`..`).

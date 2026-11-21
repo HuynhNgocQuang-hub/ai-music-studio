@@ -22,6 +22,7 @@ import math
 import os
 import re
 import struct
+import uuid
 import wave
 import zipfile
 from pathlib import Path
@@ -726,3 +727,330 @@ def test_phase2_3_frontend_backend_contract_parity():
     assert re.search(r"quantize", pianoroll_src, re.IGNORECASE), (
         "PianoRollEditor.tsx missing Quantize Track action"
     )
+
+
+def test_phase4_crud_eq_send_fx_and_delete(api_client):
+    """Verify full Project CRUD (Sync/Read/List/Delete->404), Lyrics CRUD, 3-Band EQ & Send FX WAV Export."""
+    pid = f"e2e_p4_crud_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "project_id": pid,
+        "version": 1,
+        "title": "Phase 4 CRUD & FX E2E",
+        "config": {
+            "title": "Phase 4 CRUD & FX E2E",
+            "melody_mode": "preserve",
+            "output_mode": "accompaniment",
+            "motif_position": "chorus",
+            "structure_preset": "standard",
+            "genre": "Pop",
+            "mood": "Uplifting",
+            "user_prompt": "Phase 4 EQ and Send FX E2E",
+        },
+        "analysis": {
+            "bpm": 120.0,
+            "time_signature": "4/4",
+            "detected_key": "C",
+            "detected_scale": "major",
+            "bars": 2,
+            "raw_melody_midi": [],
+        },
+        "autotune_settings": {
+            "enabled": False,
+            "preset": "off",
+            "key": "C",
+            "scale": "major",
+            "retune_speed_ms": 50.0,
+            "humanize": 0.6,
+            "mix_percent": 100.0,
+            "auto_follow_project_key": True,
+        },
+        "song_structure": {
+            "total_bars": 2,
+            "sections": [{"name": "Chorus", "start_bar": 1, "bars": 2, "energy": 0.85}],
+            "chords": [{"bar": 1, "beat": 1.0, "symbol": "C", "duration_beats": 4.0}],
+        },
+        "lyrics": {
+            "language": "vi",
+            "lines": [{"section": "Chorus", "bar": 1, "text": "Phase 4 FX"}],
+        },
+        "tracks": {
+            "vocal": {
+                "type": "audio",
+                "locked": False,
+                "mute": False,
+                "solo": False,
+                "volume": 0.9,
+                "pan": 0.0,
+                "low_db": -2.0,
+                "mid_db": 3.0,
+                "high_db": 4.0,
+                "reverb_send": 0.65,
+                "delay_send": 0.4,
+                "clips": [],
+            },
+            "lead": {
+                "type": "midi",
+                "locked": False,
+                "mute": False,
+                "solo": False,
+                "volume": 0.85,
+                "pan": 0.1,
+                "low_db": 6.0,
+                "mid_db": -3.0,
+                "high_db": 5.0,
+                "reverb_send": 0.75,
+                "delay_send": 0.55,
+                "instrument": "synth_lead",
+                "notes": [
+                    {"pitch": 69, "start_beat": 0.0, "duration": 1.0, "velocity": 115, "confidence": 1.0}
+                ],
+            },
+        },
+        "mastering": {"auto_mix_enabled": True, "limiter_ceiling_db": -1.0, "target_lufs": -14.0},
+    }
+
+    sync_res = api_client.put(f"/api/projects/{pid}/sync", json=payload)
+    assert sync_res.status_code == 200, sync_res.text
+
+    get_res = api_client.get(f"/api/projects/{pid}")
+    assert get_res.status_code == 200, get_res.text
+    got = get_res.json()
+    assert got["tracks"]["vocal"]["low_db"] == -2.0
+    assert got["tracks"]["vocal"]["reverb_send"] == 0.65
+    assert got["tracks"]["lead"]["high_db"] == 5.0
+    assert got["tracks"]["lead"]["delay_send"] == 0.55
+    assert got["lyrics"]["lines"][0]["text"] == "Phase 4 FX"
+    assert got["song_structure"]["sections"][0]["energy"] == 0.85
+
+    export_res = api_client.post(
+        f"/api/projects/{pid}/export/audio",
+        json={"format": "wav", "mode": "ai_mix", "apply_mastering": True},
+    )
+    assert export_res.status_code == 200, export_res.text
+    assert export_res.content[:4] == b"RIFF"
+    peak_dbfs = measure_wav_peak_dbfs(export_res.content)
+    assert peak_dbfs <= -1.0 + 1e-4, f"Limiter exceeded on EQ/FX export: {peak_dbfs:.3f}"
+
+    # Verify selectable 320k / 192k MP3 export via running backend + audio-worker
+    mp3_320 = api_client.post(
+        f"/api/projects/{pid}/export/audio",
+        json={"format": "mp3", "mode": "ai_mix", "bitrate": "320k", "apply_mastering": True},
+    )
+    assert mp3_320.status_code == 200, mp3_320.text
+    assert len(mp3_320.content) > 512
+
+    mp3_192 = api_client.post(
+        f"/api/projects/{pid}/export/audio",
+        json={"format": "mp3", "mode": "ai_mix", "bitrate": "192k", "apply_mastering": True},
+    )
+    assert mp3_192.status_code == 200, mp3_192.text
+    assert len(mp3_192.content) > 512
+
+    llm_test = api_client.post("/api/health/llm-test", json={})
+    assert llm_test.status_code == 200, llm_test.text
+    assert "provider" in llm_test.json()
+
+    del_res = api_client.delete(f"/api/projects/{pid}")
+    assert del_res.status_code == 200, del_res.text
+    assert api_client.get(f"/api/projects/{pid}").status_code == 404
+
+
+def test_security_headers_validation_and_dos_guards(api_client):
+    """Verify defensive HTTP headers, traversal/Zip-Bomb/ref blocks, collision-safe import, and render OOM clamps."""
+    # 1. Security response headers
+    health_res = api_client.get("/api/health")
+    assert health_res.status_code == 200
+    assert health_res.headers.get("X-Content-Type-Options") == "nosniff"
+    assert health_res.headers.get("X-Frame-Options") == "DENY"
+    assert health_res.headers.get("Referrer-Policy") == "no-referrer"
+
+    # 2. Asset ref traversal / Redis namespace probe blocked
+    for bad_ref in ("project:secret", "mem://../etc/passwd", "mem://raw/bad ref"):
+        r = api_client.get("/api/audio/asset", params={"ref": bad_ref})
+        assert r.status_code == 400, f"Expected 400 for bad asset ref '{bad_ref}', got {r.status_code}"
+
+    # 3. Overdub fit check rejects non-audio uploads
+    bad_overdub = api_client.post(
+        "/api/studio/overdub-fit-check",
+        data={"project_id": "sec_probe_1"},
+        files={"file": ("payload.txt", b"not audio", "text/plain")},
+    )
+    assert bad_overdub.status_code == 400
+
+    # 4. Zip path traversal in .aimusic import rejected
+    evil_zip = io.BytesIO()
+    with zipfile.ZipFile(evil_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("../evil.txt", b"malicious")
+    evil_res = api_client.post(
+        "/api/projects/import",
+        files={"file": ("evil.aimusic", evil_zip.getvalue(), "application/octet-stream")},
+    )
+    assert evil_res.status_code == 400
+
+    # 5. Collision-safe import with overwrite=false isolates ID & clip refs + Content-Disposition sanitize
+    pid = f"e2e_sec_col_{uuid.uuid4().hex[:8]}"
+    state = {
+        "project_id": pid,
+        "version": 1,
+        "title": "Security Baseline",
+        "config": {"title": "Security Baseline", "genre": "Pop", "mood": "Warm"},
+        "analysis": {"bpm": 120.0, "time_signature": "4/4", "detected_key": "C", "detected_scale": "major", "bars": 2},
+        "song_structure": {
+            "total_bars": 2,
+            "sections": [{"name": "Main", "start_bar": 1, "bars": 2, "energy": 0.8}],
+            "chords": [{"bar": 1, "beat": 1.0, "symbol": "C", "duration_beats": 4.0}],
+        },
+        "tracks": {
+            "lead": {
+                "type": "midi",
+                "instrument": "electric_piano",
+                "volume": 0.8,
+                "notes": [{"pitch": 60, "start_beat": 0.0, "duration": 1.0, "velocity": 90, "confidence": 1.0}],
+            }
+        },
+    }
+    assert api_client.put(f"/api/projects/{pid}/sync", json=state).status_code == 200
+    bundle_res = api_client.post(f"/api/projects/{pid}/export/aimusic")
+    assert bundle_res.status_code == 200
+
+    col_import = api_client.post(
+        "/api/projects/import",
+        data={"overwrite": "false"},
+        files={"file": (f"{pid}.aimusic", bundle_res.content, "application/octet-stream")},
+    )
+    assert col_import.status_code == 200, col_import.text
+    imp_pid = col_import.json()["project_id"]
+    assert imp_pid != pid and imp_pid.startswith(f"{pid}_imp_")
+
+    # 6. Export Content-Disposition check + extreme total_bars OOM DoS rejection (400)
+    ok_exp = api_client.post(
+        f"/api/projects/{pid}/export/audio",
+        json={"format": "wav", "mode": "ai_mix", "apply_mastering": True},
+    )
+    assert ok_exp.status_code == 200, ok_exp.text
+    assert ok_exp.content[:4] == b"RIFF"
+    assert f'"{pid}.wav"' in ok_exp.headers.get("content-disposition", "")
+
+    state["song_structure"]["total_bars"] = 99999
+    state["tracks"]["lead"]["mute"] = False
+    dos_pid = f"e2e_dos_{uuid.uuid4().hex[:8]}"
+    state["project_id"] = dos_pid
+    assert api_client.put(f"/api/projects/{dos_pid}/sync", json=state).status_code == 200
+    exp_res = api_client.post(
+        f"/api/projects/{dos_pid}/export/audio",
+        json={"format": "wav", "mode": "ai_mix", "apply_mastering": True},
+    )
+    assert exp_res.status_code == 400, exp_res.text
+
+    for cleanup_id in (pid, imp_pid, dos_pid):
+        api_client.delete(f"/api/projects/{cleanup_id}")
+
+
+def test_end_to_end_full_lifecycle_workflow(api_client):
+    """Run complete user workflow: Upload -> Denoise -> Analyze -> AutoTune -> Generate SSE -> Overdub -> Export/Import."""
+    wav_bytes = make_sine_wav(duration_sec=3.6, freq_hz=293.66, amplitude=0.5, leading_silence_sec=0.35)
+    up = api_client.post(
+        "/api/audio/upload",
+        data={"title": "Lifecycle Flow Song", "mode": "hum"},
+        files={"file": ("lifecycle.wav", wav_bytes, "audio/wav")},
+    )
+    assert up.status_code == 200, up.text
+    pid = up.json()["project_id"]
+
+    dn = api_client.post(
+        "/api/audio/denoise",
+        json={"project_id": pid, "enable_denoise": True, "auto_trim": True},
+    )
+    assert dn.status_code == 200, dn.text
+
+    an = api_client.post(
+        "/api/audio/analyze",
+        json={"project_id": pid, "key_override": "D", "scale_override": "minor"},
+    )
+    assert an.status_code == 200, an.text
+
+    at = api_client.post(
+        "/api/audio/autotune",
+        json={"project_id": pid, "preset": "balanced"},
+    )
+    assert at.status_code == 200, at.text
+
+    gen = api_client.post(
+        "/api/jobs/generate",
+        json={
+            "project_id": pid,
+            "config": {
+                "melody_mode": "enhance",
+                "output_mode": "full_song",
+                "motif_position": "chorus",
+                "structure_preset": "standard",
+                "genre": "Ballad",
+                "mood": "Warm",
+                "user_prompt": "Warm piano and strings",
+                "enable_lead_karaoke": True,
+            },
+        },
+    )
+    assert gen.status_code == 200, gen.text
+    job_id = gen.json()["job_id"]
+    sse = api_client.get(f"/api/jobs/{job_id}/events", timeout=60.0)
+    assert sse.status_code == 200
+    assert "completed" in sse.text
+
+    # Add overdub + fit check + auto-mix
+    ov_clip = api_client.post(
+        "/api/audio/clip-upload",
+        data={"project_id": pid, "track_id": "vocal", "start_bar": "5.0"},
+        files={"file": ("overdub.wav", make_sine_wav(duration_sec=2.0, freq_hz=440.0), "audio/wav")},
+    )
+    assert ov_clip.status_code == 200, ov_clip.text
+
+    fit = api_client.post(
+        "/api/studio/overdub-fit-check",
+        data={"project_id": pid},
+        files={"file": ("overdub.wav", make_sine_wav(duration_sec=2.0, freq_hz=440.0), "audio/wav")},
+    )
+    assert fit.status_code == 200, fit.text
+    assert "timing_offset_ms" in fit.json()
+
+    mix_res = api_client.post("/api/studio/auto-mix", json={"project_id": pid})
+    assert mix_res.status_code == 200, mix_res.text
+
+    # Export .aimusic, MIDI, MP3 (320k), and Stems ZIP
+    aimusic = api_client.post(f"/api/projects/{pid}/export/aimusic")
+    assert aimusic.status_code == 200 and len(aimusic.content) > 512
+
+    midi = api_client.post(f"/api/projects/{pid}/export/midi")
+    assert midi.status_code == 200 and midi.content[:4] == b"MThd"
+
+    mp3 = api_client.post(
+        f"/api/projects/{pid}/export/audio",
+        json={"format": "mp3", "mode": "ai_mix", "bitrate": "320k", "apply_mastering": True},
+    )
+    assert mp3.status_code == 200 and len(mp3.content) > 512
+
+    stems = api_client.post(
+        f"/api/projects/{pid}/export/audio",
+        json={"format": "stems", "mode": "ai_mix", "apply_mastering": True},
+    )
+    assert stems.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(stems.content)) as zf:
+        assert len([n for n in zf.namelist() if n.endswith(".wav")]) >= 4
+
+    # Delete from backend and restore via .aimusic import -> re-export WAV <= -1.0 dBFS
+    assert api_client.delete(f"/api/projects/{pid}").status_code == 200
+    assert api_client.get(f"/api/projects/{pid}").status_code == 404
+
+    restored = api_client.post(
+        "/api/projects/import",
+        files={"file": (f"{pid}.aimusic", aimusic.content, "application/octet-stream")},
+    )
+    assert restored.status_code == 200, restored.text
+    restored_wav = api_client.post(
+        f"/api/projects/{pid}/export/audio",
+        json={"format": "wav", "mode": "ai_mix", "apply_mastering": True},
+    )
+    assert restored_wav.status_code == 200
+    assert measure_wav_peak_dbfs(restored_wav.content) <= -1.0 + 1e-4
+
+    api_client.delete(f"/api/projects/{pid}")

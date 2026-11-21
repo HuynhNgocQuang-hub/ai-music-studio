@@ -1,7 +1,7 @@
 # Tài liệu Kiến trúc Multi-Agent & Thiết kế Kỹ thuật
 ## Dự án: AI Music Studio (Hum-to-Music + Auto-Tune + DAW-lite)
 
-- **Phiên bản:** 1.3 (Option B: Java 21 Spring Boot + React Vite + Python Audio-Worker + Redis)
+- **Phiên bản:** 1.5 (Pro DAW Workstation + SRS Full Compliance + Cepstral Formant Auto-Tune + Isolated Redis)
 - **Liên kết:** [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md)
 - **Phạm vi:** Ứng dụng **Single-User Local App** (cá nhân, không phân quyền), tối ưu lưu trữ nhẹ ổ đĩa bằng Redis + MIDI JSON.
 - **Mục tiêu tài liệu:** Định nghĩa cách các AI Agent phối hợp với nhau, cấu trúc dữ liệu dùng chung (`Shared State`), cơ chế kết hợp **MIDI + Audio Clips**, kiến trúc tách lớp Java Spring Boot + Python DSP Worker, kiến trúc lưu trữ nhẹ đĩa, và lộ trình triển khai từ MVP đến bản hoàn chỉnh.
@@ -17,7 +17,7 @@ Trong bài toán âm nhạc, một LLM thuần túy không thể tự xử lý s
 ```mermaid
 flowchart LR
     FE["Frontend: React 19 + Vite + Web Audio + IndexedDB (:3000)"] -->|"HTTP /api/* & SSE"| BE["Core Backend: Java 21 + Spring Boot 3.x (:8000)"]
-    BE -->|"Spring Data Redis / In-Memory TTL"| Redis[("Redis 7-alpine (:6379)")]
+    BE -->|"Spring Data Redis / In-Memory TTL"| Redis[("Redis 7-alpine (:16379 / :6379)")]
     BE -->|"HTTP /internal/audio/*"| Worker["Audio Worker: Python FastAPI DSP (:8001, Docker)"]
     BE -->|"HTTPS (Dual LLM Adapter)"| LLM["Google Gemini API / OpenAI API"]
 ```
@@ -62,17 +62,18 @@ flowchart TD
 * **Output cập nhật vào State:** `bpm`, `time_signature`, `detected_key`, `detected_scale`, `raw_melody_midi`, `dry_denoised_ref`.
 
 ### 3.3. `Auto-Tune DSP Agent` (Kỹ sư Chỉnh phô Giọng hát — `audio-worker`)
-* **Input:** `dry_denoised.wav` (hoặc `raw_input.wav`) + `detected_key` + Cấu hình Auto-Tune (`preset`, `retune_speed_ms`, `humanize`, `mix_percent`).
-* **Tools sử dụng:** Pitch-shifting & resampling DSP (`librosa` / `scipy` tại `audio-worker`, kèm `key_to_pitch_class()` chuẩn hóa cả dấu thăng và giáng như `Eb`, `Ab`, `Bb`).
+* **Input:** `dry_denoised.wav` (hoặc `raw_input.wav`) + `detected_key` + Cấu hình Auto-Tune (`preset`, `retune_speed_ms`, `humanize`, `mix_percent`, `auto_follow_project_key`).
+* **Tools sử dụng:** Pitch-shifting OLA giữ thời lượng + **bảo toàn Formant bằng Cepstral Spectral Envelope (`preserve_formant=true`)** tại `audio-worker` (và formant tilt EQ trên `JavaAudioFallbackService`), kèm `key_to_pitch_class()` chuẩn hóa cả dấu thăng và giáng như `Eb`, `Ab`, `Bb`.
 * **Hoạt động:**
   1. Nếu người dùng chọn chế độ **Nghe giọng mộc + Beat** (`off`): Bỏ qua Auto-Tune, đưa thẳng `dry_denoised.wav` vào mix để kiểm tra độ khớp tự nhiên.
-  2. Nếu bật Auto-Tune (`natural`, `balanced`, `modern`): Kéo nốt về `Scale` dựa trên `retune_speed_ms` (`0–200 ms`) và giữ độ rung theo `humanize`, bảo toàn tốc độ phát.
+  2. Nếu bật Auto-Tune (`natural`, `balanced`, `modern`): Kéo nốt về `Scale` dựa trên `retune_speed_ms` (`0–200 ms`), giữ độ rung theo `humanize`, giữ nguyên âm sắc formant giọng hát, và tự re-tune khi đổi Project Key nếu bật `auto_follow_project_key`.
 
 ### 3.4. `Melody & Harmony Agent` (`ComposerAgent.java`)
-* **Input:** `raw_melody_midi`, `bpm`, `key`, `melody_mode` (`preserve` | `enhance`), `output_mode` (`accompaniment` | `full_song`), `motif_position` (`chorus` mặc định | `verse` | `auto`), `genre`, `mood`, `user_prompt`.
+* **Input:** `raw_melody_midi`, `bpm`, `time_signature` (`4/4` | `3/4` | `6/8`), `key`, `melody_mode` (`preserve` | `enhance`), `output_mode` (`accompaniment` | `full_song`), `add_count_in_tail`, `motif_position` (`chorus` mặc định | `verse` | `auto`), `genre`, `mood`, `user_prompt` (qua bộ lọc bản quyền `MusicTheory` cho nghệ sĩ/bài hát).
 * **Nhiệm vụ theo chế độ:**
   * `preserve`: Giữ nguyên `raw_melody_midi`, thiết kế `chords` bám sát các nốt mạnh của giai điệu gốc.
   * `enhance`: Tinh chỉnh cao độ/tiết tấu mượt mà hơn nhưng giữ mô-típ nhận diện cốt lõi.
+  * `accompaniment` + `add_count_in_tail`: Bổ sung `Count-in` 1 bar mở đầu và `Tail` 1 bar kết (dịch `clip_vocal_1` & melody sang bar 2).
   * `full_song`: Mặc định đặt câu ngân nga làm điểm nhấn của **Chorus** (hoặc vị trí do người dùng/AI đề xuất), mở rộng thành cấu trúc `Intro – Verse – Chorus – Bridge – Outro`.
 * **Output:** `sections`, `chords`, `lead` melody notes (MIDI JSON).
 
@@ -95,8 +96,8 @@ flowchart TD
   * Kiểm tra tỷ lệ nốt khớp Key/Scale, dải tần Bass không đè Vocal, độ khớp độ dài các track, và đường cong năng lượng giữa `Verse` và `Chorus`.
   * Nếu lỗi nghiêm trọng $\rightarrow$ yêu cầu `Composer/Arranger` sửa lại (tối đa **2 vòng lặp**; nếu quá 2 vòng vẫn chưa hoàn hảo $\rightarrow$ trả về **Best-effort Fallback** kèm cảnh báo nhẹ).
 * **AI Auto-Mix & Anti-Clipping:**
-  * Tính toán tự động mức Gain từng track, nén/lách tần số nhẹ để giọng mộc/Auto-Tune không bị nhạc nền át.
-  * Áp dụng **Master Limiter** (`pedalboard` / FFmpeg tại `audio-worker`, hoặc `JavaAudioFallbackService`) giữ đỉnh tín hiệu đầu ra $\le -1.0\text{ dBFS}$ (`-14 LUFS`) và cảnh báo nếu người dùng chỉnh tay gây nguy cơ vỡ tiếng.
+  * Tính toán tự động mức Gain từng track và tự động cắt nhẹ vùng **2.2 kHz (`-2.5 dB`, Q `1.1`)** trên `harmony`/`lead` khi có vocal hoạt động để giọng mộc/Auto-Tune không bị nhạc nền át (`FR-STU-12`).
+  * Áp dụng **Master Limiter** (`pedalboard` / FFmpeg tại `audio-worker`, hoặc `JavaAudioFallbackService`) giữ đỉnh tín hiệu đầu ra $\le -1.0\text{ dBFS}$ (`-14 LUFS`) và xuất `MP3` chọn được bitrate **`320kbps`** hoặc **`192kbps`**.
 * **Vocal Overdub & AI Fit Check (Kiểm tra bản thu đè lên Beat):**
   * Khi người dùng thu hát đè trực tiếp lên nền Beat đang phát (có bù trễ mic), Spring Boot gọi `POST /internal/audio/overdub-fit-check` trên `audio-worker` đo độ lệch nhịp (`timing_offset_ms`), độ phô cao độ (`pitch_issues`) và cân bằng âm lượng.
   * Trả về danh sách **Đề xuất chỉnh sửa kèm 1-Click Fix** (VD: dịch vị trí clip `±ms`, bật Auto-Tune sửa nốt cuối câu, hoặc cân Gain).
@@ -176,14 +177,15 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
   "tracks": {
     "vocal": {
       "type": "audio", "locked": false, "mute": false, "solo": false, "volume": 0.9, "pan": 0.0,
+      "low_db": 0.0, "mid_db": 0.0, "high_db": 0.0, "reverb_send": 0.25, "delay_send": 0.15,
       "clips": [
         { "id": "clip_v1", "source": "tuned_vocal_ref", "start_bar": 13, "trim_start_sec": 0.2, "fade_in_ms": 20 }
       ]
     },
-    "drums": { "type": "midi", "locked": false, "instrument": "acoustic_kit", "notes": [] },
-    "bass": { "type": "midi", "locked": false, "instrument": "finger_bass", "notes": [] },
-    "harmony": { "type": "midi", "locked": false, "instrument": "grand_piano", "notes": [] },
-    "lead": { "type": "midi", "locked": false, "instrument": "electric_piano", "notes": [] }
+    "drums": { "type": "midi", "locked": false, "low_db": 0.0, "mid_db": 0.0, "high_db": 0.0, "reverb_send": 0.0, "delay_send": 0.0, "instrument": "acoustic_kit", "notes": [] },
+    "bass": { "type": "midi", "locked": false, "low_db": 0.0, "mid_db": 0.0, "high_db": 0.0, "reverb_send": 0.0, "delay_send": 0.0, "instrument": "finger_bass", "notes": [] },
+    "harmony": { "type": "midi", "locked": false, "low_db": 0.0, "mid_db": 0.0, "high_db": 0.0, "reverb_send": 0.0, "delay_send": 0.0, "instrument": "grand_piano", "notes": [] },
+    "lead": { "type": "midi", "locked": false, "low_db": 0.0, "mid_db": 0.0, "high_db": 0.0, "reverb_send": 0.2, "delay_send": 0.1, "instrument": "electric_piano", "notes": [] }
   },
   "mastering": {
     "auto_mix_enabled": true,
@@ -233,9 +235,8 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
 Để chạy hệ thống mà không cần tải model AI nặng về máy, bạn chỉ cần lấy API Key từ 1 hoặc cả 2 nhà cung cấp sau:
 
 1. **Cách lấy Gemini API Key (Google AI Studio):**
-   * Truy cập **Google AI Studio**: `https://aistudio.google.com/` và đăng nhập bằng tài khoản Google.
-   * Chọn mục **Get API key** $\rightarrow$ bấm **Create API key**.
-   * Sao chép key (dạng `AIza...`).
+   * Truy cập **Google AI Studio**: `https://aistudio.google.com/api-keys` và đăng nhập bằng tài khoản Google.
+   * Bấm **Create API key** $\rightarrow$ sao chép key (hỗ trợ cả key dạng mới `AQ...` và dạng cũ `AIza...`; Backend gửi chuẩn qua header `x-goog-api-key` và trả log lỗi chi tiết nếu Google từ chối key/quota).
 2. **Cách lấy OpenAI API Key (OpenAI Platform):**
    * Truy cập **OpenAI Platform**: `https://platform.openai.com/` và đăng nhập.
    * Vào mục **Dashboard $\rightarrow$ API keys** $\rightarrow$ bấm **Create new secret key** (`sk-...`).
@@ -245,25 +246,33 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
      GEMINI_API_KEY=your_gemini_api_key_here
      OPENAI_API_KEY=your_openai_api_key_here
      DEFAULT_LLM_PROVIDER=gemini
-     REDIS_URL=redis://localhost:6379
-     AUDIO_WORKER_URL=http://localhost:8001
+     REDIS_HOST_PORT=16379
+     REDIS_URL=redis://127.0.0.1:16379/0
+     AUDIO_WORKER_URL=http://127.0.0.1:8001
      ```
-   * Trong giao diện `/settings` của ứng dụng cũng cho phép nhập key (lưu local trên trình duyệt và gửi qua `X-Gemini-Api-Key`, `X-OpenAI-Api-Key`, `X-LLM-Provider` headers) mà không cần restart Backend.
+   * Trong giao diện `/settings` của ứng dụng cũng cho phép nhập key (lưu local trên trình duyệt, gửi qua `X-Gemini-Api-Key`, `X-OpenAI-Api-Key`, `X-LLM-Provider` headers) và bấm **Test API Key** (`POST /api/health/llm-test`) mà không cần restart Backend.
 
 ---
 
 ## 8. Lộ trình Triển khai Đề xuất (Phased Roadmap)
 
-* **Phase 1 — MVP Core Pipeline:**
+* **Phase 1 — MVP Core Pipeline (DONE):**
   * Single-User Local App + Dual LLM Adapter (Gemini / OpenAI / Mock) + Auto-Save `IndexedDB` + Redis State/TTL.
   * Record/Upload $\rightarrow$ `AI Denoise` + `Audio Analyzer` (BPM, Key, Pitch) + nghe **Giọng mộc (Dry Check)**.
   * `Auto-Tune` (Quick Presets) + `Hum-to-Music` (*Preserve* + *Accompaniment Only*).
   * Quick Preview (so sánh Giọng mộc + Beat / Auto-Tune / AI Mix) + Auto-Limiter ($\le -1.0\text{ dBFS}$) + Export WAV/MP3/MIDI/`.aimusic`.
-* **Phase 2 — Full Song, Hybrid Clips, Overdub & Lyric/Coach:**
+* **Phase 2 — Full Song, Hybrid Clips, Overdub & Lyric/Coach (DONE):**
   * *AI Enhance Melody*, *Full Song Structure* (mặc định đặt mô-típ tại Chorus) + `Lyricist & AI Coach Agent`.
   * Hybrid Studio: Multi-Track Mixer (`M/S`, `Lock`, `Volume`, `Pan`), cắt ghép/kéo dịch clip (`Split/Trim/Move`), **Thu đè Overdub + AI Fit Check**, Regenerate từng track, xuất Stems.
   * `Producer / QA Agent` kiểm tra hòa âm tự động (max 2 vòng + Best-effort Fallback).
-* **Phase 3 — Pro DAW-lite & Auto-Tune Chuyên sâu:**
+* **Phase 3 — Pro DAW-lite & Auto-Tune Chuyên sâu (DONE):**
   * Giao diện **Piano Roll** chỉnh nốt MIDI trực tiếp, **Chord Timeline** cho phép sửa hợp âm từng ô nhịp.
   * Bảng điều khiển Auto-Tune Pro (Key/Scale thủ công, Retune Speed, Humanize, Dry/Wet Mix, Auto-Follow).
   * AI Auto-Mix hoàn chỉnh và xuất file `.mid` đa track chuẩn DAW.
+* **Phase 4 — Pro DAW Redesign, Persisted EQ + Send FX Bus & Full CRUD (DONE):**
+  * Giao diện Pro DAW Hardware Dark (Activity Rail + Top Transport `4/4|3/4` + Left Browser + Resizable/Maximizable Production Dock + Step Sequencer).
+  * Route phát trực tiếp từng kênh trong Studio + tổng hợp âm thanh phân biệt theo Preset nhạc cụ + **3-Band EQ (`low_db`, `mid_db`, `high_db`)** + **Send FX Bus (Hall Reverb + Tempo-Synced Delay)** đồng bộ Web Audio, Python Audio Worker và Java Fallback.
+  * Hoàn thiện CRUD cho Session (`DELETE` trên Library/Home), Track (`+ Track`/Xóa), Hợp âm (`×`), Section (`Energy%`), Step Sequencer (`Xóa hết`), Piano Roll (`Copy`), Lyrics (`+ Thêm dòng`, sửa `section`/`bar`, `Xóa dòng`), nút Test API Key trên `/settings` và gom gọn Docker Compose `music`.
+* **Phase 5 — Production Polish, Bundle Optimization, TTL Rehydration & Security Hardening (DONE):**
+  * **Frontend Modular & Resilient:** Route-level `React.lazy` + `Suspense` trong `App.tsx`, tách `QuickStudioView.tsx` & `ConsoleMixerPanel.tsx`, thêm `saveSeqRef` monotonic guard chống race condition khi lưu, inline 2-step delete confirm, và tự động **Rehydrate audio từ IndexedDB** lên Backend khi Redis TTL hết hạn (`rehydratedProjectIdsRef`).
+  * **Security & DoS Hardening:** Loopback Compose ports (`127.0.0.1`), `CorsConfig` thu hẹp về local origins, `SecurityHeadersFilter` (`nosniff`, `DENY`, `no-referrer`, `Permissions-Policy`), redact key lỗi LLM trong `LlmAdapter`, bounded upload (`_read_upload_bounded` `413`, `55MB` multipart), Zip Bomb & collision-safe `.aimusic` import (`overwrite=false`), và `total_bars <= 256` DoS HTTP `400` guard + lazy FX buses.
