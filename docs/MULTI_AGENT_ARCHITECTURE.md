@@ -1,8 +1,8 @@
 # Tài liệu Kiến trúc Multi-Agent & Thiết kế Kỹ thuật
 ## Dự án: AI Music Studio (Hum-to-Music + Auto-Tune + DAW-lite)
 
-- **Phiên bản:** 1.5 (Pro DAW Workstation + SRS Full Compliance + Cepstral Formant Auto-Tune + Isolated Redis)
-- **Liên kết:** [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md)
+- **Phiên bản:** 2.0 (Phase 1–5 Complete + FL Playlist + Multi-Mode Chatbot + Roadmap Phase 6–8)
+- **Liên kết:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 - **Phạm vi:** Ứng dụng **Single-User Local App** (cá nhân, không phân quyền), tối ưu lưu trữ nhẹ ổ đĩa bằng Redis + MIDI JSON.
 - **Mục tiêu tài liệu:** Định nghĩa cách các AI Agent phối hợp với nhau, cấu trúc dữ liệu dùng chung (`Shared State`), cơ chế kết hợp **MIDI + Audio Clips**, kiến trúc tách lớp Java Spring Boot + Python DSP Worker, kiến trúc lưu trữ nhẹ đĩa, và lộ trình triển khai từ MVP đến bản hoàn chỉnh.
 
@@ -273,6 +273,26 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
   * Giao diện Pro DAW Hardware Dark (Activity Rail + Top Transport `4/4|3/4` + Left Browser + Resizable/Maximizable Production Dock + Step Sequencer).
   * Route phát trực tiếp từng kênh trong Studio + tổng hợp âm thanh phân biệt theo Preset nhạc cụ + **3-Band EQ (`low_db`, `mid_db`, `high_db`)** + **Send FX Bus (Hall Reverb + Tempo-Synced Delay)** đồng bộ Web Audio, Python Audio Worker và Java Fallback.
   * Hoàn thiện CRUD cho Session (`DELETE` trên Library/Home), Track (`+ Track`/Xóa), Hợp âm (`×`), Section (`Energy%`), Step Sequencer (`Xóa hết`), Piano Roll (`Copy`), Lyrics (`+ Thêm dòng`, sửa `section`/`bar`, `Xóa dòng`), nút Test API Key trên `/settings` và gom gọn Docker Compose `music`.
-* **Phase 5 — Production Polish, Bundle Optimization, TTL Rehydration & Security Hardening (DONE):**
-  * **Frontend Modular & Resilient:** Route-level `React.lazy` + `Suspense` trong `App.tsx`, tách `QuickStudioView.tsx` & `ConsoleMixerPanel.tsx`, thêm `saveSeqRef` monotonic guard chống race condition khi lưu, inline 2-step delete confirm, và tự động **Rehydrate audio từ IndexedDB** lên Backend khi Redis TTL hết hạn (`rehydratedProjectIdsRef`).
+* **Phase 5 — Production Polish, FL Playlist Clips, AI Chatbot 4 Chế độ & Security Hardening (DONE):**
+  * **Frontend Modular & Resilient:** Route-level `React.lazy` + `Suspense` trong `App.tsx`, tách `QuickStudioView.tsx`, `ConsoleMixerPanel.tsx`, `AiCoachChatDrawer.tsx`, dọn dead code (`MiniSoundBars`, `.eq-bar`, `PreviewLayer`, `TrackMap`), thêm `saveSeqRef` monotonic guard chống race condition khi lưu, inline 2-step delete confirm, và tự động **Rehydrate audio từ IndexedDB** lên Backend khi Redis TTL hết hạn (`rehydratedProjectIdsRef`).
+  * **FL Studio 12 Playlist Clips:** Nâng cấp `WaveformClipCanvas.tsx` (đa giác sóng đối xứng liên tục tối đa `480` mẫu, sửa flex sizing `min-h-0` + `absolute inset-0`) và `TimelineEditor.tsx` (khung tiêu đề màu `17px`, thân trong suốt thấy lưới 4 ô nhịp/beat, làn `Dynamics` Automation Envelope kéo chỉnh `section.energy`, và Pattern MIDI chia theo Section/biến thể `#2`).
+  * **AI Music Chatbot & LLM Upgrade:** Cập nhật Gemini mặc định sang **`gemini-3.8-flash`** (tự fallback HTTP `404` trong `LlmAdapter`), nâng cấp `CoachLyricistAgent` thành **4 chế độ Chatbot** (`producer`, `arrangement`, `lyricist`, `mix`) kèm lịch sử 6 lượt gần nhất + action `suggest_lyrics` / `regenerate_track`.
   * **Security & DoS Hardening:** Loopback Compose ports (`127.0.0.1`), `CorsConfig` thu hẹp về local origins, `SecurityHeadersFilter` (`nosniff`, `DENY`, `no-referrer`, `Permissions-Policy`), redact key lỗi LLM trong `LlmAdapter`, bounded upload (`_read_upload_bounded` `413`, `55MB` multipart), Zip Bomb & collision-safe `.aimusic` import (`overwrite=false`), và `total_bars <= 256` DoS HTTP `400` guard + lazy FX buses.
+
+---
+
+## 9. Định hướng Các Phase Tiếp Theo (Roadmap Phase 6–8)
+
+Sau khi hoàn thiện toàn bộ MVP & Production Local DAW ở Phase 1–5, lộ trình mở rộng tiếp theo gồm 3 giai đoạn:
+
+* **Phase 6 — AI Chatbot Streaming, Stem Separation & Multi-Param Automation:**
+  * **Chatbot Nâng cao:** Hỗ trợ SSE Token Streaming cho `/api/coach/chat`, cho phép Chatbot sinh nhanh đoạn MIDI/hợp âm A/B preview (nghe thử phương án gợi ý trước khi bấm áp dụng), và gợi ý chỉnh từng Section.
+  * **Stem Separation (Tách Beat/Vocal):** Tích hợp tách vocal/accompaniment gọn nhẹ trong `audio-worker` khi người dùng upload file ghép sẵn.
+  * **Automation Lane Đa Tham Số:** Mở rộng làn `Dynamics Envelope` trên Playlist để vẽ & tự động hóa `Volume`, `Pan`, `Filter Cutoff`, và `Reverb Send` phát trực tiếp qua Web Audio (`AudioParam.linearRampToValueAtTime`).
+* **Phase 7 — Visual Pitch Editor, WebMIDI & Custom SoundFont:**
+  * **Visual Pitch Curve Editor (Melodyne-lite):** Cho phép kéo chỉnh cao độ/vibrato từng âm tiết vocal trực tiếp trên Piano Roll kết hợp Formant shift.
+  * **Hardware MIDI & Low-Latency Recording:** Hỗ trợ cắm MIDI Keyboard ngoài (`navigator.requestMIDIAccess`), `AudioWorklet` thu mic độ trễ thấp, và Undo nén delta lên tới 50 bước.
+  * **Custom SoundFont Upload:** Cho phép nạp SoundFont `.sf2` tùy chọn vào `audio-worker`.
+* **Phase 8 — Multi-User Cloud Workspace & Publishing (Web SaaS):**
+  * **Auth & Cloud Storage:** Bổ sung OAuth2/JWT, PostgreSQL cho metadata dự án, và Object Storage (S3/MinIO) lưu `.aimusic` + stems bền vững đa thiết bị.
+  * **Quản trị Quota & Chia sẻ Cộng đồng:** Rate limiting theo người dùng, HTTPS reverse proxy, chia sẻ link demo hoặc xuất bản Master (`-14 LUFS`, WAV/MP3/FLAC kèm ID3 tags).

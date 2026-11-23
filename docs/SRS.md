@@ -1,9 +1,9 @@
 # Tài liệu Đặc tả Yêu cầu Phần mềm (SRS)
 ## Dự án: AI Music Studio — Hệ thống Sáng tác & Phối khí Âm nhạc Multi-Agent
 
-- **Phiên bản:** 1.2 (Complete Baseline + UI/API Linked)
-- **Ngày cập nhật:** 2026-11-17
-- **Tài liệu liên quan:** [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md)
+- **Phiên bản:** 1.3 (SRS Aligned + Multi-Mode AI Chatbot + FL Playlist)
+- **Ngày cập nhật:** 2026-11-23
+- **Tài liệu liên quan:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md)
 - **Phạm vi triển khai:** Ứng dụng **cá nhân (Single-User Local App)** — không cần đăng nhập/phân quyền, tối ưu lưu trữ nhẹ ổ đĩa (dùng Redis/RAM cache kết hợp MIDI JSON và dọn file tạm tự động).
 - **Phạm vi chức năng:** Đặc tả chi tiết các yêu cầu chức năng (FR), thành phần bắt buộc, ràng buộc kỹ thuật, luồng nghiệp vụ cho **Hum-to-Music**, **AI Denoise & Auto-Tune**, **Lyricist & AI Coach**, **Hybrid MIDI + Audio Clips** và **AI Music Studio (DAW-lite)**.
 
@@ -141,7 +141,7 @@ Hỗ trợ viết lời theo giai điệu/nền beat và giải đáp hướng d
 | :--- | :--- | :--- |
 | `FR-LYR-01` | **AI Gợi ý / Viết lời** | Dựa vào chủ đề, tâm trạng, ngôn ngữ (Tiếng Việt / Tiếng Anh) và tiết tấu giai điệu/beat để gợi ý lời bài hát chia theo từng đoạn (`Verse`, `Chorus`...). |
 | `FR-LYR-02` | **Viết lời trên nền Beat** | Cung cấp khung soạn lời (Lyric Pad) chạy song song khi đang phát beat hoặc loop đoạn nhạc để người dùng tự viết/chỉnh lời theo nhịp. |
-| `FR-LYR-03` | **AI Music Coach (Hướng dẫn)** | Khung hỏi đáp AI ngay trong Studio để tư vấn cho người dùng khi cần (VD: *"Đoạn ngân nga này nên đặt làm Chorus hay Verse?"*, *"Viết lại câu Chorus cho vần hơn"*, *"Đổi hợp âm nào cho buồn hơn?"*). |
+| `FR-LYR-03` | **AI Music Chatbot & Coach (Đa chế độ)** | Khung trò chuyện AI ngay trong Studio hỗ trợ **4 chế độ chuyên sâu** (`Producer`, `Hòa âm`, `Viết lời`, `Mix / Tune`) kèm ngữ cảnh 6 lượt gần nhất + trạng thái bài, Quick Prompt 1 chạm và nút **Suggested Actions** (`suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `regenerate_track`, `update_config`). |
 
 * **Phải có gì (`FR-LYRIC`):**
   * Tab/Panel **Lyrics & AI Coach** gắn cạnh Timeline.

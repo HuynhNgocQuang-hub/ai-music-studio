@@ -1,8 +1,8 @@
 # Tài liệu Thiết kế Giao diện, Điều hướng & API Contract
 ## Dự án: AI Music Studio (Hybrid Multi-Agent)
 
-- **Phiên bản:** 1.6 (Pro DAW Workstation + SRS Full Compliance + Phase 5 Production Optimization & Security Hardening)
-- **Liên kết:** [SRS.md](./SRS.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
+- **Phiên bản:** 2.0 (Pro DAW + FL Playlist Clips + Multi-Mode AI Chatbot + Phase 5 Hardened)
+- **Liên kết:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 - **Mục tiêu:** Đặc tả kiến trúc điều hướng (Menu, Chuyển trang, Phân trang), bố cục tối ưu cho từng màn hình, hợp đồng API giữa Frontend (`React + Vite`) – Core Backend (`Java 21 + Spring Boot 3.x`) – Audio DSP Microservice (`audio-worker`) – Redis, và cấu trúc file dự án `.aimusic`.
 
 ---
@@ -56,7 +56,7 @@ Chia thành **4 bước có thanh Stepper** cho phép quay lại bước trướ
   * Nút chuyển tức thì để nghe so sánh 4 lớp: **Giọng mộc + Beat** | **Auto-Tune + Beat** | **Bản Preserve** | **Bản Enhance** (kèm nút **"Đặt làm chế độ chính & Tạo lại MIDI"** để đổi mode trực tiếp).
   * 2 hành động chính: **Tải nhanh (`MP3 320kbps / WAV`)** hoặc **Mở vào Hybrid Studio (`/studio/:id`)**.
 
-#### Trang B: `/studio/:id` (`StudioPage.tsx` + `QuickStudioView.tsx` + `ConsoleMixerPanel.tsx`) — Pro DAW Workstation & Quick/Pro Switcher
+#### Trang B: `/studio/:id` (`StudioPage.tsx` + `QuickStudioView.tsx` + `ConsoleMixerPanel.tsx` + `AiCoachChatDrawer.tsx`) — Pro DAW Workstation & Quick/Pro Switcher
 Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspense` (hỗ trợ chuyển tức thì **`[Quick | Pro DAW]`** mà không làm mất state, **tự động Rehydrate audio từ `IndexedDB`** khi Redis TTL hết hạn, nút **Regenerate toàn bài** kèm Cancel, và thanh Activity Rail gọn bên trái):
 1. **Top Transport Bar (Cố định trên cùng):**
    * `Play / Pause / Stop / Rec Mic (kèm bù trễ Latency ms) / Loop / Metronome Click`, LCD `Bar:Beat` & `mm:ss`, chỉnh `BPM`, `Key`, `Scale`, **`Time Signature (4/4 | 3/4 | 6/8)`**, Master Peak meter, `Undo / Redo`.
@@ -73,9 +73,9 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
    * **Tab 3 — `Console Mixer`:** Đổi nhạc cụ trực tiếp, **3-Band EQ (`low_db`, `mid_db`, `high_db`)** lưu bền vững vào backend, **FX SEND (`reverb_send`, `delay_send`)** riêng cho `Vocal` & `Lead`, Pan, Vertical Fader `0–120%`, 12-LED Meter, **`FX BUS`** return strip (`Hall Reverb` + `1/8D Ping-Pong Delay` + `BYPASS`), và **MASTER Bus** (`Auto-Mix` với Vocal Frequency Carve 2.2 kHz `-2.5 dB` + Limiter `<= -1.0 dBFS`).
    * **Tab 4 — `Auto-Tune DSP`:** Root, Scale, Retune Speed (`0–200ms`), Humanize, Mix %, Auto-Follow Project Key (tự re-tune debounced khi đổi Project Key/Scale).
    * **Tab 5 — `Lyrics & Karaoke`:** Đầy đủ CRUD (`+ Thêm dòng`, sửa `section` / `bar` / nội dung, nhảy nhanh `▶ b{bar}`, `Xóa dòng`) + AI Gợi ý lời & Karaoke Sync live.
-4. **Panel Phải (`AI Music Coach & Fit Check`):**
+4. **Panel Phải (`AiCoachChatDrawer.tsx` — AI Music Chatbot & Fit Check):**
+   * Hỗ trợ **4 chế độ trợ lý AI (`Producer | Hòa âm | Viết lời | Mix / Tune`)** với bộ Quick Prompts theo chế độ, nhớ 6 lượt hội thoại gần nhất, badge hiển thị Provider (`gemini` / `openai` / `mock`), nút Xóa lịch sử chat, và **1-Click Suggested Actions** (`suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `regenerate_track`, `update_config`).
    * Hiển thị phân tích tự động mỗi khi thu đè (`Overdub`) lên beat (lệch nhịp `±ms`, chênh tông, mức Gain) kèm nút **1-Click Apply**.
-   * Khung chat hỏi đáp với **AI Coach** kèm Quick Actions áp dụng ngay vào DAW State.
 
 #### Trang C: `/library` (`LibraryPage.tsx`) & Trang Chủ `/` (`HomePage.tsx`)
 * **Trang chủ (`/`):** Starter DAW Templates 1-click (`Pop`, `Lo-fi`, `Trap 808`, `House`, `Piano Ballad`, `Blank Studio`) + danh sách Recent Sessions (mở vào DAW hoặc xóa nhanh).
@@ -120,7 +120,7 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 | `POST /api/studio/auto-mix` | Cân bằng Gain, Pan từng track & bật Master Limiter (`<= -1.0 dBFS`) | `{ project_id }` $\rightarrow$ `project_state`, `mix_notes`, `summary` |
 | `POST /api/studio/overdub-fit-check` | Upload clip thu đè lên beat & chạy AI Fit Check | Trả về `timing_offset_ms`, `pitch_issues[]`, `gain_suggestion`, danh sách **1-Click Fixes** |
 | `POST /api/lyrics/suggest` | Sinh/gợi ý lời bài hát khớp đoạn & tiết tấu | `{ project_id, language, topic, section }` $\rightarrow$ `lines[]` |
-| `POST /api/coach/chat` | Hỏi đáp AI Music Coach (kèm ngữ cảnh State) | `{ project_id, message, history }` $\rightarrow$ `reply`, `suggested_actions[]` |
+| `POST /api/coach/chat` | Trợ lý AI Music Chatbot đa chế độ (`producer`, `arrangement`, `lyricist`, `mix`) kèm lịch sử & ngữ cảnh State | `{ project_id, mode, message, history }` $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
 
 ### 3.4. Nhóm Persistence, CRUD, Sync & Export
 | Method & Endpoint | Mục đích | Payload / Output chính |
