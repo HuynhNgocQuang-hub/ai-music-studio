@@ -53,67 +53,123 @@ const TRACK_STYLE: Record<
     badge: string;
     noteColor: string;
     waveColor: string;
+    waveStroke: string;
     clipBorder: string;
     clipBg: string;
+    headerBg: string;
+    headerText: string;
   }
 > = {
   vocal: {
     accentBar: 'bg-emerald-400',
-    badge: 'text-emerald-300',
-    noteColor: 'bg-emerald-400',
-    waveColor: 'rgba(52, 211, 153, 0.88)',
-    clipBorder: 'border-emerald-400/55 hover:border-emerald-300',
-    clipBg: 'bg-emerald-500/15',
+    badge: 'text-emerald-200',
+    noteColor: 'bg-emerald-100',
+    waveColor: 'rgba(209, 250, 229, 0.88)',
+    waveStroke: 'rgba(236, 253, 245, 0.98)',
+    clipBorder: 'border-[#57c7a0]/80 hover:border-emerald-300',
+    clipBg: 'bg-[#1a493c]/48',
+    headerBg: 'bg-[#3c9678]/90',
+    headerText: 'text-white',
   },
   overdub: {
     accentBar: 'bg-rose-400',
-    badge: 'text-rose-300',
-    noteColor: 'bg-rose-400',
-    waveColor: 'rgba(251, 113, 133, 0.88)',
-    clipBorder: 'border-rose-400/55 hover:border-rose-300',
-    clipBg: 'bg-rose-500/15',
+    badge: 'text-rose-200',
+    noteColor: 'bg-rose-100',
+    waveColor: 'rgba(255, 228, 230, 0.88)',
+    waveStroke: 'rgba(255, 241, 242, 0.98)',
+    clipBorder: 'border-[#f47292]/80 hover:border-rose-300',
+    clipBg: 'bg-[#562030]/50',
+    headerBg: 'bg-[#aa4562]/90',
+    headerText: 'text-white',
   },
   texture: {
-    accentBar: 'bg-cyan-400',
-    badge: 'text-cyan-300',
-    noteColor: 'bg-cyan-400',
-    waveColor: 'rgba(34, 211, 238, 0.88)',
-    clipBorder: 'border-cyan-400/55 hover:border-cyan-300',
-    clipBg: 'bg-cyan-500/15',
+    accentBar: 'bg-indigo-400',
+    badge: 'text-indigo-200',
+    noteColor: 'bg-indigo-100',
+    waveColor: 'rgba(224, 231, 255, 0.90)',
+    waveStroke: 'rgba(238, 242, 255, 0.98)',
+    clipBorder: 'border-[#7c97e8]/80 hover:border-indigo-300',
+    clipBg: 'bg-[#26375f]/55',
+    headerBg: 'bg-[#4f679e]/90',
+    headerText: 'text-white',
   },
   drums: {
     accentBar: 'bg-amber-400',
-    badge: 'text-amber-300',
-    noteColor: 'bg-amber-400',
-    waveColor: 'rgba(251, 191, 36, 0.88)',
-    clipBorder: 'border-amber-400/45',
-    clipBg: 'bg-amber-500/10',
+    badge: 'text-amber-200',
+    noteColor: 'bg-[#fef3c7]',
+    waveColor: 'rgba(254, 243, 199, 0.88)',
+    waveStroke: 'rgba(255, 251, 235, 0.98)',
+    clipBorder: 'border-[#e4a64a]/75 hover:border-amber-300',
+    clipBg: 'bg-[#493418]/48',
+    headerBg: 'bg-[#9d6f2c]/90',
+    headerText: 'text-white',
   },
   bass: {
     accentBar: 'bg-violet-400',
-    badge: 'text-violet-300',
-    noteColor: 'bg-violet-400',
-    waveColor: 'rgba(167, 139, 250, 0.88)',
-    clipBorder: 'border-violet-400/45',
-    clipBg: 'bg-violet-500/10',
+    badge: 'text-violet-200',
+    noteColor: 'bg-[#f3e8ff]',
+    waveColor: 'rgba(243, 232, 255, 0.88)',
+    waveStroke: 'rgba(250, 245, 255, 0.98)',
+    clipBorder: 'border-[#9e82e8]/80 hover:border-violet-300',
+    clipBg: 'bg-[#36285c]/54',
+    headerBg: 'bg-[#6e56a4]/92',
+    headerText: 'text-white',
   },
   harmony: {
     accentBar: 'bg-sky-400',
-    badge: 'text-sky-300',
-    noteColor: 'bg-sky-400',
-    waveColor: 'rgba(56, 189, 248, 0.88)',
-    clipBorder: 'border-sky-400/45',
-    clipBg: 'bg-sky-500/10',
+    badge: 'text-sky-200',
+    noteColor: 'bg-[#dbeafe]',
+    waveColor: 'rgba(219, 234, 254, 0.88)',
+    waveStroke: 'rgba(239, 246, 255, 0.98)',
+    clipBorder: 'border-[#6da8e8]/80 hover:border-sky-300',
+    clipBg: 'bg-[#21385b]/54',
+    headerBg: 'bg-[#4c76a8]/92',
+    headerText: 'text-white',
   },
   lead: {
-    accentBar: 'bg-emerald-300',
-    badge: 'text-emerald-200',
-    noteColor: 'bg-emerald-300',
-    waveColor: 'rgba(110, 231, 183, 0.88)',
-    clipBorder: 'border-emerald-300/45',
-    clipBg: 'bg-emerald-500/10',
+    accentBar: 'bg-teal-400',
+    badge: 'text-teal-200',
+    noteColor: 'bg-[#ccfbf1]',
+    waveColor: 'rgba(204, 251, 241, 0.88)',
+    waveStroke: 'rgba(240, 253, 250, 0.98)',
+    clipBorder: 'border-[#56cfc0]/75 hover:border-teal-300',
+    clipBg: 'bg-[#194341]/48',
+    headerBg: 'bg-[#388680]/90',
+    headerText: 'text-white',
   },
 };
+
+function ClipTypeGlyph({ kind }: { kind: 'midi' | 'audio' | 'envelope' }) {
+  if (kind === 'audio') {
+    return (
+      <svg className="h-2.5 w-3 shrink-0 opacity-90" viewBox="0 0 14 10" fill="none" aria-hidden="true">
+        <path
+          d="M1 5C2.3 1.5 3.7 1.5 5 5C6.3 8.5 7.7 8.5 9 5C10.3 1.5 11.7 1.5 13 5"
+          stroke="currentColor"
+          strokeWidth="1.35"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+  if (kind === 'envelope') {
+    return (
+      <svg className="h-2.5 w-3 shrink-0 opacity-90" viewBox="0 0 14 10" fill="none" aria-hidden="true">
+        <path d="M2 8L7 3L12 5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="2" cy="8" r="1.2" fill="currentColor" />
+        <circle cx="7" cy="3" r="1.2" fill="currentColor" />
+        <circle cx="12" cy="5" r="1.2" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="h-2.5 w-3 shrink-0 opacity-90" viewBox="0 0 14 10" fill="currentColor" aria-hidden="true">
+      <rect x="1" y="1.5" width="4.5" height="1.8" rx="0.6" />
+      <rect x="5" y="4.2" width="5" height="1.8" rx="0.6" />
+      <rect x="8" y="6.9" width="4.5" height="1.8" rx="0.6" />
+    </svg>
+  );
+}
 
 function renderTrackIcon(trackId: string) {
   switch (trackId) {
@@ -214,7 +270,8 @@ export default function TimelineEditor({
   const engine = useMemo(() => getAudioEngine(), []);
 
   const [pxPerBar, setPxPerBar] = useState<number>(92);
-  const [compactLanes, setCompactLanes] = useState<boolean>(true);
+  const [compactLanes, setCompactLanes] = useState<boolean>(false);
+  const [showEnvelopeLane, setShowEnvelopeLane] = useState<boolean>(true);
   const [selectedClipRef, setSelectedClipRef] = useState<{
     trackId: 'vocal' | 'texture';
     clipId: string;
@@ -833,12 +890,25 @@ export default function TimelineEditor({
             onClick={() => setCompactLanes((c) => !c)}
             title="Chuyển độ cao làn Track (Gọn / Cao)"
             className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition ${
-              compactLanes
+              !compactLanes
                 ? 'border-amber-400/40 bg-amber-500/15 text-amber-200'
                 : 'border-white/10 bg-[#111317] text-slate-300 hover:bg-white/10'
             }`}
           >
             {compactLanes ? 'Track Gọn' : 'Track Cao'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowEnvelopeLane((s) => !s)}
+            title="Bật/tắt đường cong Dynamics Automation Envelope theo từng Section"
+            className={`rounded border px-2 py-0.5 text-[10px] font-semibold transition ${
+              showEnvelopeLane
+                ? 'border-sky-400/50 bg-sky-500/15 text-sky-200'
+                : 'border-white/10 bg-[#111317] text-slate-400 hover:bg-white/10'
+            }`}
+          >
+            Envelope
           </button>
 
           {tool === 'split' && (
@@ -1384,13 +1454,40 @@ export default function TimelineEditor({
           </div>
 
           {/* Track Rows + Vertical Playhead */}
-          <div className="relative divide-y divide-white/[0.06]">
+          <div className="relative divide-y divide-white/[0.08]">
             <div
-              className="pointer-events-none absolute top-0 bottom-0 z-20 w-[2px] bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.9)]"
+              className="pointer-events-none absolute top-0 bottom-0 z-20 w-[2px] bg-emerald-400 shadow-[0_0_8px_rgba(74,222,128,0.85)]"
               style={{ left: `${TRACK_COL_WIDTH + playheadLeftPx}px` }}
             >
-              <span className="absolute -top-1 -left-[5px] h-0 w-0 border-x-[6px] border-t-[7px] border-x-transparent border-t-amber-400" />
+              <span className="absolute -top-1 -left-[5px] h-0 w-0 border-x-[6px] border-t-[7px] border-x-transparent border-t-emerald-400" />
             </div>
+
+            {showEnvelopeLane && project.song_structure.sections.length > 0 && (
+              <AutomationEnvelopeLane
+                sections={project.song_structure.sections}
+                totalBars={totalBars}
+                beatsPerBar={beatsPerBar}
+                pxPerBar={pxPerBar}
+                laneWidthPx={laneWidthPx}
+                compact={compactLanes}
+                onUpdateSectionEnergy={(idx, nextEnergy, commit) => {
+                  if (commit) {
+                    onMutateWithUndo((prev) => ({
+                      ...prev,
+                      song_structure: {
+                        ...prev.song_structure,
+                        sections: prev.song_structure.sections.map((s, i) =>
+                          i === idx ? { ...s, energy: nextEnergy } : s
+                        ),
+                      },
+                    }));
+                    onNotice(
+                      `Cập nhật Dynamics ${project.song_structure.sections[idx]?.name || 'Section'}: ${Math.round(nextEnergy * 100)}%`
+                    );
+                  }
+                }}
+              />
+            )}
 
             {trackIds.map((trackId) => {
               const track = project.tracks[trackId];
@@ -1562,8 +1659,8 @@ export default function TimelineEditor({
 
                   {/* Arrangement Track Lane */}
                   <div
-                    className={`relative bg-[#101217] ${
-                      compactLanes ? 'h-[56px]' : 'h-[74px]'
+                    className={`relative bg-[#171c26] ${
+                      compactLanes ? 'h-[64px]' : 'h-[84px]'
                     } ${tool === 'split' && isAudio ? 'cursor-crosshair' : 'cursor-pointer'}`}
                     style={{ width: `${laneWidthPx}px` }}
                     onDoubleClick={() => {
@@ -1597,11 +1694,18 @@ export default function TimelineEditor({
                     {Array.from({ length: totalBars }, (_, idx) => (
                       <div
                         key={idx}
-                        className={`pointer-events-none absolute top-0 bottom-0 border-l border-white/[0.08] ${
-                          idx % 2 === 1 ? 'bg-white/[0.015]' : ''
+                        className={`pointer-events-none absolute top-0 bottom-0 flex border-l border-white/[0.15] ${
+                          Math.floor(idx / 4) % 2 === 1 ? 'bg-[#131822]/85' : 'bg-[#1c2331]/80'
                         }`}
                         style={{ left: `${idx * pxPerBar}px`, width: `${pxPerBar}px` }}
-                      />
+                      >
+                        {Array.from({ length: beatsPerBar }, (_, bIdx) => (
+                          <div
+                            key={bIdx}
+                            className={`flex-1 ${bIdx > 0 ? 'border-l border-white/[0.045]' : ''}`}
+                          />
+                        ))}
+                      </div>
                     ))}
 
                     {isAudio ? (
@@ -1646,8 +1750,8 @@ export default function TimelineEditor({
                             : TRACK_STYLE.vocal;
 
                           const bucketCount = Math.max(
-                            24,
-                            Math.min(200, Math.round(widthPx / 3))
+                            72,
+                            Math.min(480, Math.round(widthPx * 1.1))
                           );
                           const peaks = engine.getWaveformPeaksForClip(
                             effectiveClip,
@@ -1741,9 +1845,9 @@ export default function TimelineEditor({
                                 }
                               }}
                               style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
-                              className={`group/clip absolute top-1.5 bottom-1.5 flex flex-col overflow-hidden rounded-[4px] border select-none transition-[border-color,box-shadow] ${
+                              className={`group/clip absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-[3px] border shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] select-none transition-[border-color,box-shadow] ${
                                 isSelected
-                                  ? 'border-amber-400 bg-[#1a222b] ring-1 ring-amber-400/70'
+                                  ? 'border-amber-300 ring-1 ring-amber-400/80 ' + cStyle.clipBg
                                   : `${cStyle.clipBorder} ${cStyle.clipBg}`
                               } ${tool === 'select' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
                             >
@@ -1752,30 +1856,35 @@ export default function TimelineEditor({
                                   <div
                                     onPointerDown={(e) => startTrimDrag('trim_left', e)}
                                     title="Kéo để cắt đầu Clip"
-                                    className="absolute top-0 bottom-0 left-0 z-20 flex w-2 cursor-ew-resize items-center justify-center bg-black/25 opacity-0 transition group-hover/clip:opacity-100 hover:bg-amber-400/80"
+                                    className="absolute top-[17px] bottom-0 left-0 z-20 flex w-2 cursor-ew-resize items-center justify-center bg-black/20 opacity-0 transition group-hover/clip:opacity-100 hover:bg-amber-400/80"
                                   >
-                                    <span className="h-4 w-0.5 rounded-full bg-white/80" />
+                                    <span className="h-4 w-0.5 rounded-full bg-white/85" />
                                   </div>
                                   <div
                                     onPointerDown={(e) => startTrimDrag('trim_right', e)}
                                     title="Kéo để cắt cuối Clip"
-                                    className="absolute top-0 right-0 bottom-0 z-20 flex w-2 cursor-ew-resize items-center justify-center bg-black/25 opacity-0 transition group-hover/clip:opacity-100 hover:bg-amber-400/80"
+                                    className="absolute top-[17px] right-0 bottom-0 z-20 flex w-2 cursor-ew-resize items-center justify-center bg-black/20 opacity-0 transition group-hover/clip:opacity-100 hover:bg-amber-400/80"
                                   >
-                                    <span className="h-4 w-0.5 rounded-full bg-white/80" />
+                                    <span className="h-4 w-0.5 rounded-full bg-white/85" />
                                   </div>
                                 </>
                               )}
 
-                              <div className="relative z-10 flex h-5 items-center justify-between gap-1 bg-black/45 px-2 text-[10px] font-semibold text-white">
-                                <span className="truncate">
-                                  {isOverdub
-                                    ? 'Overdub'
-                                    : trackId === 'texture'
-                                    ? 'Sample'
-                                    : 'Vocal'}{' '}
-                                  • b{Number(effectiveClip.start_bar.toFixed(2))}
+                              <div
+                                className={`relative z-10 flex h-[17px] shrink-0 items-center justify-between gap-1 border-b border-white/15 px-1.5 text-[10px] font-bold tracking-tight ${cStyle.headerBg} ${cStyle.headerText}`}
+                              >
+                                <span className="flex min-w-0 items-center gap-1 truncate">
+                                  <ClipTypeGlyph kind="audio" />
+                                  <span className="truncate">
+                                    {isOverdub
+                                      ? 'Overdub'
+                                      : trackId === 'texture'
+                                      ? 'Audio Sample'
+                                      : 'Vocal Take'}{' '}
+                                    • b{Number(effectiveClip.start_bar.toFixed(2))}
+                                  </span>
                                 </span>
-                                <span className="shrink-0 font-mono text-[9px] text-slate-300 tabular-nums">
+                                <span className="shrink-0 font-mono text-[9px] font-medium opacity-85 tabular-nums">
                                   {(effectiveClip.trim_start_sec ?? 0).toFixed(1)}s–
                                   {effectiveClip.trim_end_sec != null
                                     ? `${Number(effectiveClip.trim_end_sec).toFixed(1)}s`
@@ -1783,12 +1892,13 @@ export default function TimelineEditor({
                                 </span>
                               </div>
 
-                              <div className="relative flex-1 px-1 py-0.5">
+                              <div className="relative min-h-0 flex-1 overflow-hidden py-0.5">
                                 <WaveformClipCanvas
                                   peaks={peaks}
                                   seed={`${trackId}:${clip.id}`}
                                   color={cStyle.waveColor}
-                                  playedColor="rgba(251, 191, 36, 0.95)"
+                                  strokeColor={cStyle.waveStroke}
+                                  playedColor="rgba(74, 222, 128, 0.92)"
                                   playProgress={playProgress}
                                   fadeInRatio={fadeInRatio}
                                   fadeOutRatio={fadeOutRatio}
@@ -1832,24 +1942,26 @@ export default function TimelineEditor({
                             }));
                             setSelectedClipRef({ trackId: 'vocal', clipId: created.id });
                           }}
-                          className="absolute top-1.5 right-2 bottom-1.5 left-0 flex flex-col justify-between overflow-hidden rounded-[4px] border border-dashed border-emerald-400/45 bg-emerald-500/10 hover:bg-emerald-500/15"
+                          className="absolute top-1 right-2 bottom-1 left-0 flex flex-col justify-between overflow-hidden rounded-[3px] border border-dashed border-[#57c7a0]/70 bg-[#1a493c]/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] hover:bg-[#1a493c]/55"
                         >
-                          <div className="flex h-5 items-center justify-between bg-black/30 px-2.5 text-[10px] font-semibold text-emerald-200">
-                            <span>Vocal Base Audio (bấm để tách thành Clip chỉnh sửa)</span>
+                          <div className="flex h-[17px] shrink-0 items-center gap-1.5 border-b border-white/10 bg-[#3c9678]/75 px-2 text-[10px] font-bold text-white">
+                            <ClipTypeGlyph kind="audio" />
+                            <span>Vocal Master Audio (bấm để tách thành Clip chỉnh sửa)</span>
                           </div>
-                          <div className="flex-1 px-2 py-0.5">
+                          <div className="relative min-h-0 flex-1 overflow-hidden py-0.5">
                             <WaveformClipCanvas
                               peaks={engine.getWaveformPeaksForSlot(
                                 project.audio_assets.tuned_vocal_ref ? 'autotune' : 'dry',
-                                96
+                                240
                               )}
                               seed={project.project_id}
-                              color="rgba(52, 211, 153, 0.55)"
+                              color="rgba(209, 250, 229, 0.72)"
+                              strokeColor="rgba(236, 253, 245, 0.90)"
                             />
                           </div>
                         </div>
                       ) : (
-                        <div className="flex h-full items-center px-3 text-xs text-slate-500">
+                        <div className="flex h-full items-center px-3 text-xs text-slate-400/80">
                           {trackId === 'vocal'
                             ? 'Bấm Rec Mic ở bên trái để thu đè hoặc Import Vocal Sample'
                             : 'Chưa có Audio Sample'}
@@ -1859,11 +1971,11 @@ export default function TimelineEditor({
                       <MidiLanePreview
                         trackId={trackId}
                         notes={(track as { notes: MidiNote[] }).notes || []}
+                        sections={project.song_structure.sections}
                         totalBars={totalBars}
                         beatsPerBar={beatsPerBar}
-                        laneWidthPx={laneWidthPx}
+                        pxPerBar={pxPerBar}
                         instrument={(track as { instrument?: string | null }).instrument}
-                        compact={compactLanes}
                         onOpenEditor={() =>
                           onSelectMidiTrack(trackId as 'drums' | 'bass' | 'harmony' | 'lead')
                         }
@@ -1880,78 +1992,389 @@ export default function TimelineEditor({
   );
 }
 
+function AutomationEnvelopeLane({
+  sections,
+  totalBars,
+  beatsPerBar,
+  pxPerBar,
+  laneWidthPx,
+  compact,
+  onUpdateSectionEnergy,
+}: {
+  sections: SongSection[];
+  totalBars: number;
+  beatsPerBar: number;
+  pxPerBar: number;
+  laneWidthPx: number;
+  compact: boolean;
+  onUpdateSectionEnergy: (sectionIdx: number, nextEnergy: number, commit: boolean) => void;
+}) {
+  const [draggingNode, setDraggingNode] = useState<{
+    idx: number;
+    laneEl: HTMLElement;
+    energy: number;
+  } | null>(null);
+  const draggingRef = useRef(draggingNode);
+  draggingRef.current = draggingNode;
+  const commitEnergyRef = useRef(onUpdateSectionEnergy);
+  commitEnergyRef.current = onUpdateSectionEnergy;
+
+  useEffect(() => {
+    if (!draggingNode) return;
+    const onMove = (e: PointerEvent) => {
+      const curr = draggingRef.current;
+      if (!curr) return;
+      const rect = curr.laneEl.getBoundingClientRect();
+      const pad = 4;
+      const usableH = Math.max(16, rect.height - pad * 2);
+      const relY = e.clientY - rect.top - pad;
+      const nextEnergy = Number(Math.max(0.1, Math.min(1, 1 - relY / usableH)).toFixed(2));
+      setDraggingNode({ ...curr, energy: nextEnergy });
+    };
+    const onUp = () => {
+      const curr = draggingRef.current;
+      setDraggingNode(null);
+      if (curr) {
+        commitEnergyRef.current(curr.idx, curr.energy, true);
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [Boolean(draggingNode)]);
+
+  const sortedSections = sections
+    .map((sec, origIdx) => ({ sec, origIdx }))
+    .sort((a, b) => a.sec.start_bar - b.sec.start_bar);
+
+  const avgPct = sections.length
+    ? Math.round((sections.reduce((acc, s) => acc + (s.energy ?? 0.75), 0) / sections.length) * 100)
+    : 75;
+
+  return (
+    <div className="flex bg-[#131823]">
+      <div
+        className={`sticky left-0 z-10 relative flex shrink-0 flex-col justify-between border-r border-white/10 bg-[#1a202c] pl-3.5 pr-2 ${
+          compact ? 'py-1.5' : 'py-2'
+        }`}
+        style={{ width: `${TRACK_COL_WIDTH}px` }}
+      >
+        <span className="absolute top-1 bottom-1 left-1 w-1 rounded-sm bg-[#6b8fd4]" />
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5 text-[#9bc0ff]">
+            <ClipTypeGlyph kind="envelope" />
+            <span className="truncate text-[11px] font-bold uppercase tracking-wide text-slate-100">
+              Dynamics
+            </span>
+          </div>
+          <span className="truncate font-mono text-[10px] font-semibold text-sky-300">
+            Avg {avgPct}%
+          </span>
+        </div>
+        <div className="text-[10px] text-slate-400">Automation Envelope (kéo chấm tròn)</div>
+      </div>
+
+      <div
+        className={`relative bg-[#171c26] ${compact ? 'h-[64px]' : 'h-[84px]'}`}
+        style={{ width: `${laneWidthPx}px` }}
+      >
+        {Array.from({ length: totalBars }, (_, idx) => (
+          <div
+            key={idx}
+            className={`pointer-events-none absolute top-0 bottom-0 flex border-l border-white/[0.15] ${
+              Math.floor(idx / 4) % 2 === 1 ? 'bg-[#131822]/85' : 'bg-[#1c2331]/80'
+            }`}
+            style={{ left: `${idx * pxPerBar}px`, width: `${pxPerBar}px` }}
+          >
+            {Array.from({ length: beatsPerBar }, (_, bIdx) => (
+              <div
+                key={bIdx}
+                className={`flex-1 ${bIdx > 0 ? 'border-l border-white/[0.045]' : ''}`}
+              />
+            ))}
+          </div>
+        ))}
+
+        {sortedSections.map(({ sec, origIdx }, orderIdx) => {
+          const leftPx = Math.max(0, (sec.start_bar - 1) * pxPerBar);
+          const widthPx = Math.max(40, sec.bars * pxPerBar - 2);
+          const prevEnergy =
+            orderIdx > 0
+              ? draggingNode?.idx === sortedSections[orderIdx - 1].origIdx
+                ? draggingNode.energy
+                : sortedSections[orderIdx - 1].sec.energy ?? 0.65
+              : 0.22;
+          const targetEnergy =
+            draggingNode?.idx === origIdx ? draggingNode.energy : sec.energy ?? 0.75;
+          const yStart = 88 - prevEnergy * 72;
+          const yEnd = 88 - targetEnergy * 72;
+          const midY = (yStart + yEnd) / 2 + (yEnd < yStart ? 10 : -8);
+          const pathD = `M 0 ${yStart.toFixed(1)} Q 45 ${midY.toFixed(1)}, 100 ${yEnd.toFixed(1)}`;
+          const areaD = `${pathD} L 100 100 L 0 100 Z`;
+          const gradId = `env_grad_${origIdx}`;
+
+          return (
+            <div
+              key={`${sec.name}_${origIdx}`}
+              style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+              className="group/env absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-[3px] border border-[#7498dc]/80 bg-[#23324f]/52 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] select-none"
+            >
+              <div className="flex h-[17px] shrink-0 items-center justify-between gap-1 border-b border-white/15 bg-[#4a6592]/90 px-1.5 text-[10px] font-bold text-white">
+                <span className="flex min-w-0 items-center gap-1 truncate">
+                  <ClipTypeGlyph kind="envelope" />
+                  <span className="truncate">{sec.name} envelope</span>
+                </span>
+                <span className="shrink-0 font-mono text-[9px] text-sky-100 tabular-nums">
+                  {Math.round(targetEnergy * 100)}%
+                </span>
+              </div>
+
+              <div className="relative flex-1 overflow-hidden">
+                <svg
+                  className="h-full w-full"
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                >
+                  <defs>
+                    <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#93c5fd" stopOpacity="0.44" />
+                      <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.08" />
+                    </linearGradient>
+                  </defs>
+                  <path d={areaD} fill={`url(#${gradId})`} />
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke="#e0f2fe"
+                    strokeWidth="2.2"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </svg>
+
+                {/* Start node */}
+                <span
+                  className="pointer-events-none absolute -left-[3px] h-2 w-2 -translate-y-1/2 rounded-full border border-[#1e293b] bg-sky-200"
+                  style={{ top: `${yStart}%` }}
+                />
+
+                {/* Draggable section target energy handle */}
+                <button
+                  type="button"
+                  title={`Kéo lên/xuống để chỉnh Energy của ${sec.name} (${Math.round(targetEnergy * 100)}%)`}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    const container = e.currentTarget.parentElement;
+                    if (!container) return;
+                    setDraggingNode({ idx: origIdx, laneEl: container, energy: targetEnergy });
+                  }}
+                  style={{ top: `${yEnd}%` }}
+                  className="absolute right-1 z-20 h-3 w-3 -translate-y-1/2 cursor-ns-resize rounded-full border-2 border-[#1e293b] bg-[#dbeafe] shadow transition hover:scale-125 hover:bg-amber-300"
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+interface MidiPatternSegment {
+  startBar: number;
+  bars: number;
+  label: string;
+  notes: MidiNote[];
+}
+
+function buildPatternSegments(
+  trackId: string,
+  notes: MidiNote[],
+  sections: SongSection[],
+  totalBars: number,
+  beatsPerBar: number
+): MidiPatternSegment[] {
+  if (notes.length === 0) return [];
+
+  const baseName =
+    trackId === 'drums'
+      ? 'Drums'
+      : trackId === 'bass'
+      ? 'Bass'
+      : trackId === 'harmony'
+      ? 'Harmony'
+      : 'Lead';
+
+  const windows: Array<{ startBar: number; bars: number; sectionName?: string }> = [];
+  if (sections.length > 0) {
+    const sorted = [...sections].sort((a, b) => a.start_bar - b.start_bar);
+    let cursor = 1;
+    for (const s of sorted) {
+      if (s.start_bar > cursor) {
+        windows.push({ startBar: cursor, bars: s.start_bar - cursor });
+      }
+      windows.push({
+        startBar: Math.max(1, s.start_bar),
+        bars: Math.max(1, s.bars),
+        sectionName: s.name,
+      });
+      cursor = Math.max(cursor, s.start_bar + s.bars);
+    }
+    if (cursor <= totalBars) {
+      windows.push({ startBar: cursor, bars: totalBars - cursor + 1 });
+    }
+  } else {
+    const chunkBars = 4;
+    for (let b = 1; b <= totalBars; b += chunkBars) {
+      windows.push({ startBar: b, bars: Math.min(chunkBars, totalBars - b + 1) });
+    }
+  }
+
+  const seenFingerprints = new Map<string, number>();
+  let nextVariantNum = 1;
+  const segments: MidiPatternSegment[] = [];
+
+  for (const w of windows) {
+    const segStartBeat = (w.startBar - 1) * beatsPerBar;
+    const segEndBeat = segStartBeat + w.bars * beatsPerBar;
+    const segNotes = notes.filter(
+      (n) => n.start_beat < segEndBeat - 0.001 && n.start_beat + n.duration > segStartBeat + 0.001
+    );
+    if (segNotes.length === 0) continue;
+
+    // Fingerprint relative pitch + beat positions so identical recurring sections keep same label
+    const fp = segNotes
+      .slice(0, 16)
+      .map((n) => `${n.pitch}@${(n.start_beat - segStartBeat).toFixed(2)}`)
+      .join('|');
+    let variantIdx = seenFingerprints.get(fp);
+    if (!variantIdx) {
+      variantIdx = nextVariantNum++;
+      seenFingerprints.set(fp, variantIdx);
+    }
+
+    const suffix = variantIdx > 1 ? ` #${variantIdx}` : '';
+    const title = w.sectionName ? `${baseName}${suffix} • ${w.sectionName}` : `${baseName}${suffix}`;
+    segments.push({
+      startBar: w.startBar,
+      bars: w.bars,
+      label: title,
+      notes: segNotes,
+    });
+  }
+
+  return segments;
+}
+
 function MidiLanePreview({
   trackId,
   notes,
+  sections,
   totalBars,
   beatsPerBar,
-  laneWidthPx,
+  pxPerBar,
   instrument,
-  compact,
   onOpenEditor,
 }: {
   trackId: string;
   notes: MidiNote[];
+  sections: SongSection[];
   totalBars: number;
   beatsPerBar: number;
-  laneWidthPx: number;
+  pxPerBar: number;
   instrument?: string | null;
-  compact: boolean;
   onOpenEditor: () => void;
 }) {
-  const totalBeats = totalBars * beatsPerBar;
-  const pitches = notes.map((n) => n.pitch);
-  const minP = pitches.length ? Math.min(...pitches) : 48;
-  const maxP = pitches.length ? Math.max(...pitches) : 72;
-  const span = Math.max(12, maxP - minP);
   const style = TRACK_STYLE[trackId] || TRACK_STYLE.harmony;
+  const segments = useMemo(
+    () => buildPatternSegments(trackId, notes, sections, totalBars, beatsPerBar),
+    [trackId, notes, sections, totalBars, beatsPerBar]
+  );
+
+  if (segments.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-between px-3 text-xs text-slate-400/80">
+        <span>Chưa có MIDI Pattern ({instrument || 'synth'}) — Double-click hoặc bấm AI Gen</span>
+      </div>
+    );
+  }
 
   return (
-    <div
-      className={`group/midi relative mx-1 my-1 overflow-hidden rounded-[4px] border ${
-        compact ? 'h-[46px]' : 'h-[62px]'
-      } ${style.clipBorder} ${style.clipBg} transition hover:brightness-110`}
-      style={{ width: `${Math.max(80, laneWidthPx - 12)}px` }}
-    >
-      <div className="relative z-10 inline-flex items-center gap-1.5 rounded-br bg-[#111317]/90 px-2 py-0.5 text-[10px] font-semibold text-slate-200">
-        <span>{notes.length} notes</span>
-        <span className="text-slate-500">•</span>
-        <span className={style.badge}>{instrument || 'synth'}</span>
-      </div>
+    <>
+      {segments.map((seg, segIdx) => {
+        const leftPx = Math.max(0, (seg.startBar - 1) * pxPerBar);
+        const widthPx = Math.max(44, seg.bars * pxPerBar - 2);
+        const segStartBeat = (seg.startBar - 1) * beatsPerBar;
+        const segTotalBeats = Math.max(1, seg.bars * beatsPerBar);
+        const pitches = seg.notes.map((n) => n.pitch);
+        const minP = pitches.length ? Math.min(...pitches) : 48;
+        const maxP = pitches.length ? Math.max(...pitches) : 72;
+        const span = Math.max(10, maxP - minP);
 
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpenEditor();
-        }}
-        title="Mở bộ soạn thảo MIDI cho track này"
-        className="absolute top-1 right-1.5 z-20 rounded border border-white/15 bg-[#111317]/90 px-1.5 py-0.5 text-[9px] font-bold text-amber-300 opacity-0 transition group-hover/midi:opacity-100 hover:border-amber-400 hover:bg-amber-500 hover:text-slate-950"
-      >
-        Edit
-      </button>
-
-      {notes.slice(0, 280).map((n, idx) => {
-        const leftPct = Math.max(0, Math.min(99, (n.start_beat / totalBeats) * 100));
-        const widthPct = Math.max(0.75, Math.min(20, (n.duration / totalBeats) * 100));
-        const topPct = 14 + (1 - (n.pitch - minP) / span) * 74;
         return (
-          <span
-            key={idx}
-            className={`absolute h-[3px] rounded-[1px] ${style.noteColor}`}
-            style={{
-              left: `${leftPct}%`,
-              width: `${widthPct}%`,
-              top: `${topPct}%`,
-              opacity: Math.max(0.5, Math.min(1, (n.velocity || 90) / 127)),
+          <div
+            key={`${seg.startBar}_${segIdx}`}
+            onClick={(e) => {
+              e.stopPropagation();
             }}
-          />
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              onOpenEditor();
+            }}
+            style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+            className={`group/midi absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-[3px] border shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] transition hover:brightness-110 ${style.clipBorder} ${style.clipBg}`}
+          >
+            <div
+              className={`relative z-10 flex h-[17px] shrink-0 items-center justify-between gap-1 border-b border-white/15 px-1.5 text-[10px] font-bold tracking-tight ${style.headerBg} ${style.headerText}`}
+            >
+              <span className="flex min-w-0 items-center gap-1 truncate">
+                <ClipTypeGlyph kind="midi" />
+                <span className="truncate">{seg.label}</span>
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenEditor();
+                }}
+                title="Mở bộ soạn thảo MIDI cho track này"
+                className="shrink-0 rounded bg-black/30 px-1 py-px text-[8px] font-bold uppercase tracking-wider text-amber-200 opacity-0 transition group-hover/midi:opacity-100 hover:bg-amber-400 hover:text-slate-950"
+              >
+                Edit
+              </button>
+            </div>
+
+            <div className="relative flex-1 overflow-hidden">
+              {seg.notes.slice(0, 180).map((n, idx) => {
+                const clippedStart = Math.max(0, n.start_beat - segStartBeat);
+                const clippedDur = Math.max(
+                  0.12,
+                  Math.min(segTotalBeats - clippedStart, n.duration)
+                );
+                const leftPct = Math.max(0, Math.min(99, (clippedStart / segTotalBeats) * 100));
+                const widthPct = Math.max(1.2, Math.min(35, (clippedDur / segTotalBeats) * 100));
+                const topPct = 10 + (1 - (n.pitch - minP) / span) * 76;
+                return (
+                  <span
+                    key={idx}
+                    className={`absolute h-[3.5px] rounded-[1px] shadow-[0_0_2px_rgba(0,0,0,0.45)] ${style.noteColor}`}
+                    style={{
+                      left: `${leftPct}%`,
+                      width: `${widthPct}%`,
+                      top: `${topPct}%`,
+                      opacity: Math.max(0.68, Math.min(1, (n.velocity || 95) / 127)),
+                    }}
+                  />
+                );
+              })}
+            </div>
+          </div>
         );
       })}
-
-      <span className="pointer-events-none absolute right-2 bottom-0.5 z-10 rounded bg-[#111317]/90 px-1.5 py-0.5 text-[9px] font-medium text-amber-300 opacity-0 transition group-hover/midi:opacity-100">
-        Double-click để mở Editor
-      </span>
-    </div>
+    </>
   );
 }

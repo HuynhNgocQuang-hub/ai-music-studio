@@ -64,7 +64,8 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
    * Chuyển A/B (`Dry / Tune / Mix`), nút **Auto-Save**, nút **Export** (bao gồm **`.aimusic`**, `WAV`, **`MP3 320kbps Studio`**, **`MP3 192kbps Nhẹ`**, `Stems`, `MIDI`) và **AI Coach**.
 2. **Left DAW Browser (`Patterns | Inspector | Presets`) & Vùng Arrangement Trung tâm:**
    * **Section Bar** (`+ Section`, chỉnh tên / `Start` / `Bars` / `Energy%`, xóa) + **Chord Timeline** (bấm ô để sửa hoặc bấm `×`/nhập rỗng để xóa hợp âm; nút *Cập nhật đệm*).
-   * Toolbar Arrangement: Loop `B1–B9`, Zoom, **`Track Gọn / Track Cao`**, **`+ Track`** (tạo/khôi phục `Texture` hoặc MIDI track), **`Auto-Trim`**, **`+ Sample`**.
+   * Toolbar Arrangement: Loop `B1–B9`, Zoom, **`Track Gọn / Track Cao`**, **`Envelope`** (bật/tắt làn `Dynamics` Automation), **`+ Track`** (tạo/khôi phục `Texture` hoặc MIDI track), **`Auto-Trim`**, **`+ Sample`**.
+   * Khung Clip Playlist kiểu FL Studio 12 (tiêu đề màu 17px + biểu tượng từng loại clip, thân trong suốt hiện lưới nhịp): **Audio Clip** (waveform polygon đối xứng từ `WaveformClipCanvas`), **Dynamics Automation Envelope** (đường cong `section.energy` kéo chỉnh trực tiếp với chấm tròn neo), và **MIDI Pattern Clips** (tự động chia theo từng Section/biến thể `#2`, preview Piano Roll thu gọn).
    * Track Controls: `M`, `S`, `Lock`, **`Trash2`** (xóa `Texture` hoặc làm trống clip/nốt), `Rec Mic`, `Sample`, `AI Gen`, kéo thả clip (`Move / Split / Trim / Duplicate / Delete`).
 3. **Vùng Dưới (`Production Dock` có thể kéo giãn & phóng to toàn màn hình):**
    * **Tab 1 — `Step Sequencer`:** Lưới trống 16 bước (`4/4`) / 12 bước (`3/4` & `6/8`), Groove Presets, `Lặp cả bài`, `Xóa Bar`, `Xóa hết`.
