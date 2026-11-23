@@ -61,6 +61,8 @@ public class LlmAdapter {
     }
 
     public record LlmResponse(Provider provider, String model, String text, Map<String, Object> data, boolean isMock) {}
+    public record ToolCall(String name, Map<String, Object> arguments) {}
+    public record ToolLlmResponse(Provider provider, String model, String text, List<ToolCall> toolCalls, boolean isMock) {}
 
     private final AppProperties properties;
     private final ObjectMapper objectMapper;
@@ -247,6 +249,53 @@ public class LlmAdapter {
         return generateMock(prompt, role, true);
     }
 
+    public ToolLlmResponse generateWithTools(
+            String prompt,
+            String systemPrompt,
+            List<Map<String, Object>> toolDeclarations,
+            String role,
+            String explicitProvider
+    ) {
+        return generateAudioWithTools(prompt, systemPrompt, null, null, toolDeclarations, role, explicitProvider);
+    }
+
+    public ToolLlmResponse generateAudioWithTools(
+            String prompt,
+            String systemPrompt,
+            byte[] audioBytes,
+            String audioMime,
+            List<Map<String, Object>> toolDeclarations,
+            String role,
+            String explicitProvider
+    ) {
+        Provider selected = resolveProvider(role, explicitProvider);
+        boolean hasAudio = audioBytes != null && audioBytes.length > 0 && audioBytes.length <= 6_000_000;
+        if (hasAudio && selected != Provider.GEMINI) {
+            if (hasKey(Provider.GEMINI) && selected != Provider.MOCK) {
+                selected = Provider.GEMINI;
+            } else {
+                return new ToolLlmResponse(selected, "mock-audio-fallback", "", List.of(), true);
+            }
+        }
+        if (selected == Provider.MOCK) {
+            return new ToolLlmResponse(Provider.MOCK, "mock-music-v1", "", List.of(), true);
+        }
+        try {
+            if (selected == Provider.GEMINI) {
+                return callGeminiWithTools(prompt, systemPrompt, audioBytes, audioMime, toolDeclarations);
+            }
+            if (selected == Provider.OPENAI) {
+                return callOpenaiWithTools(prompt, systemPrompt, toolDeclarations);
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            log.warn("LLM tool call via {} interrupted; falling back to mock.", selected.value());
+        } catch (Exception ex) {
+            log.warn("LLM tool call via {} failed ({}); falling back to mock.", selected.value(), ex.getMessage());
+        }
+        return new ToolLlmResponse(Provider.MOCK, "mock-music-v1", "", List.of(), true);
+    }
+
     public Map<String, Object> testConnection(String explicitProvider) {
         Provider selected = resolveProvider("coach", explicitProvider);
         Map<String, Object> out = new LinkedHashMap<>();
@@ -301,14 +350,11 @@ public class LlmAdapter {
             body.put("systemInstruction", Map.of("parts", List.of(Map.of("text", systemPrompt))));
         }
         body.put("generationConfig", genConfig);
-        String jsonBody = objectMapper.writeValueAsString(body);
 
         String model = configuredModel;
-        HttpResponse<String> resp = sendGeminiRequest(model, apiKey, jsonBody);
+        HttpResponse<String> resp = sendGeminiWithRetry(model, apiKey, body);
         if (resp.statusCode() == 404 && !"gemini-3.8-flash".equalsIgnoreCase(model)) {
-            log.warn("Gemini model '{}' returned HTTP 404; retrying with 'gemini-3.8-flash'.", model);
             model = "gemini-3.8-flash";
-            resp = sendGeminiRequest(model, apiKey, jsonBody);
         }
         if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
             throw new IllegalStateException("Gemini HTTP " + resp.statusCode() + extractHttpErrorDetail(resp.body()));
@@ -317,6 +363,175 @@ public class LlmAdapter {
         JsonNode root = objectMapper.readTree(resp.body());
         String text = root.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
         return new LlmResponse(Provider.GEMINI, model, text, null, false);
+    }
+
+    private ToolLlmResponse callGeminiWithTools(
+            String prompt,
+            String systemPrompt,
+            byte[] audioBytes,
+            String audioMime,
+            List<Map<String, Object>> toolDeclarations
+    ) throws Exception {
+        String apiKey = effectiveGeminiKey();
+        String configuredModel = properties.getGeminiModel() != null && !properties.getGeminiModel().isBlank()
+                ? properties.getGeminiModel().trim() : "gemini-3.8-flash";
+
+        List<Map<String, Object>> parts = new ArrayList<>();
+        if (audioBytes != null && audioBytes.length > 0 && audioBytes.length <= 6_000_000) {
+            String safeMime = (audioMime != null && !audioMime.isBlank()) ? audioMime : "audio/wav";
+            parts.add(Map.of("inlineData", Map.of(
+                    "mimeType", safeMime,
+                    "data", java.util.Base64.getEncoder().encodeToString(audioBytes)
+            )));
+        }
+        parts.add(Map.of("text", prompt));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("contents", List.of(Map.of("role", "user", "parts", parts)));
+        if (systemPrompt != null && !systemPrompt.isBlank()) {
+            body.put("systemInstruction", Map.of("parts", List.of(Map.of("text", systemPrompt))));
+        }
+        if (toolDeclarations != null && !toolDeclarations.isEmpty()) {
+            body.put("tools", List.of(Map.of("functionDeclarations", toolDeclarations)));
+        }
+        body.put("generationConfig", Map.of("temperature", 0.35));
+
+        String model = configuredModel;
+        HttpResponse<String> resp = sendGeminiWithRetry(model, apiKey, body);
+        if (resp.statusCode() == 404 && !"gemini-3.8-flash".equalsIgnoreCase(model)) {
+            model = "gemini-3.8-flash";
+        }
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            throw new IllegalStateException("Gemini HTTP " + resp.statusCode() + extractHttpErrorDetail(resp.body()));
+        }
+
+        JsonNode root = objectMapper.readTree(resp.body());
+        JsonNode respParts = root.path("candidates").path(0).path("content").path("parts");
+        StringBuilder replyText = new StringBuilder();
+        List<ToolCall> calls = new ArrayList<>();
+        if (respParts.isArray()) {
+            for (JsonNode p : respParts) {
+                if (p.hasNonNull("text")) {
+                    replyText.append(p.path("text").asText(""));
+                }
+                if (p.has("functionCall")) {
+                    JsonNode fc = p.path("functionCall");
+                    String fnName = fc.path("name").asText("");
+                    Map<String, Object> args = fc.has("args") && fc.path("args").isObject()
+                            ? objectMapper.convertValue(fc.path("args"), new TypeReference<>() {})
+                            : Map.of();
+                    if (!fnName.isBlank()) {
+                        calls.add(new ToolCall(fnName, args));
+                    }
+                }
+            }
+        }
+        return new ToolLlmResponse(Provider.GEMINI, model, replyText.toString().trim(), calls, false);
+    }
+
+    private ToolLlmResponse callOpenaiWithTools(
+            String prompt,
+            String systemPrompt,
+            List<Map<String, Object>> toolDeclarations
+    ) throws Exception {
+        String apiKey = effectiveOpenaiKey();
+        String model = properties.getOpenaiModel() != null && !properties.getOpenaiModel().isBlank()
+                ? properties.getOpenaiModel() : "gpt-4o-mini";
+
+        List<Map<String, Object>> messages = new ArrayList<>();
+        if (systemPrompt != null && !systemPrompt.isBlank()) {
+            messages.add(Map.of("role", "system", "content", systemPrompt));
+        }
+        messages.add(Map.of("role", "user", "content", prompt));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", model);
+        body.put("messages", messages);
+        body.put("temperature", 0.35);
+        if (toolDeclarations != null && !toolDeclarations.isEmpty()) {
+            List<Map<String, Object>> wrapped = new ArrayList<>();
+            for (Map<String, Object> decl : toolDeclarations) {
+                Map<String, Object> openAiDecl = new LinkedHashMap<>(decl);
+                if (decl.get("parameters") instanceof Map<?, ?> params) {
+                    openAiDecl.put("parameters", lowercaseSchemaTypes(params));
+                }
+                wrapped.add(Map.of("type", "function", "function", openAiDecl));
+            }
+            body.put("tools", wrapped);
+        }
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create("https://api.openai.com/v1/chat/completions"))
+                .timeout(Duration.ofSeconds(25))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+                .build();
+
+        HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            throw new IllegalStateException("OpenAI HTTP " + resp.statusCode() + extractHttpErrorDetail(resp.body()));
+        }
+
+        JsonNode root = objectMapper.readTree(resp.body());
+        JsonNode msg = root.path("choices").path(0).path("message");
+        String replyText = msg.path("content").isTextual() ? msg.path("content").asText("").trim() : "";
+        List<ToolCall> calls = new ArrayList<>();
+        JsonNode tcs = msg.path("tool_calls");
+        if (tcs.isArray()) {
+            for (JsonNode tc : tcs) {
+                JsonNode fn = tc.path("function");
+                String fnName = fn.path("name").asText("");
+                Map<String, Object> args = Map.of();
+                String rawArgs = fn.path("arguments").asText("");
+                if (!rawArgs.isBlank()) {
+                    try {
+                        args = objectMapper.readValue(rawArgs, new TypeReference<>() {});
+                    } catch (Exception ignored) {
+                        args = Map.of();
+                    }
+                }
+                if (!fnName.isBlank()) {
+                    calls.add(new ToolCall(fnName, args));
+                }
+            }
+        }
+        return new ToolLlmResponse(Provider.OPENAI, model, replyText, calls, false);
+    }
+
+    private Object lowercaseSchemaTypes(Object node) {
+        if (node instanceof Map<?, ?> map) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (entry.getKey() == null) continue;
+                String k = String.valueOf(entry.getKey());
+                Object v = entry.getValue();
+                if ("type".equals(k) && v instanceof String s) {
+                    out.put(k, s.toLowerCase(Locale.ROOT));
+                } else {
+                    out.put(k, lowercaseSchemaTypes(v));
+                }
+            }
+            return out;
+        }
+        if (node instanceof List<?> list) {
+            List<Object> out = new ArrayList<>(list.size());
+            for (Object item : list) {
+                out.add(lowercaseSchemaTypes(item));
+            }
+            return out;
+        }
+        return node;
+    }
+
+    private HttpResponse<String> sendGeminiWithRetry(String model, String apiKey, Map<String, Object> body) throws Exception {
+        String jsonBody = objectMapper.writeValueAsString(body);
+        HttpResponse<String> resp = sendGeminiRequest(model, apiKey, jsonBody);
+        if (resp.statusCode() == 404 && !"gemini-3.8-flash".equalsIgnoreCase(model)) {
+            log.warn("Gemini model '{}' returned HTTP 404; retrying with 'gemini-3.8-flash'.", model);
+            resp = sendGeminiRequest("gemini-3.8-flash", apiKey, jsonBody);
+        }
+        return resp;
     }
 
     private HttpResponse<String> sendGeminiRequest(String model, String apiKey, String jsonBody) throws Exception {

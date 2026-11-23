@@ -87,9 +87,9 @@ flowchart TD
    * Chứa bản thu Vocal/Hum và (tùy chọn) các lớp âm thanh tự nhiên/atmosphere sinh từ AI Audio hoặc sample cắt ghép.
    * *Ưu điểm:* Trên Timeline Studio, người dùng thao tác **Split (cắt), Trim (kéo ngắn), Move (dịch thời gian), Fade In/Out, Loop** trên mọi clip (cả Audio Clip lẫn MIDI Clip).
 
-### 3.6. `Lyricist & AI Music Coach Agent` (`CoachLyricistAgent.java`)
-* **Viết lời theo Beat:** Dựa vào `sections`, `bpm`, số nốt giai điệu và chủ đề/ngôn ngữ (`vi`/`en`/`bilingual`) để gợi ý lời bài hát khớp tiết tấu, hoặc hỗ trợ người dùng tự viết lời vào **Lyric Pad** ngay trên nền beat đang phát.
-* **AI Music Coach (Hỏi đáp hướng dẫn):** Đọc toàn bộ ngữ cảnh dự án hiện tại để trả lời câu hỏi của người dùng (VD: *"Nên đặt câu ngân nga ở Chorus hay Verse?"*, *"Sửa đoạn chuyển hợp âm này cho buồn hơn?"*). Không tự ý ghi đè bài nhạc khi chưa có xác nhận của người dùng.
+### 3.6. `Lyricist & Global AI Music Copilot Agent` (`CoachLyricistAgent.java` + `DawPlaybook.java`)
+* **Viết lời theo Beat:** Dựa vào `sections`, `bpm`, số nốt giai điệu và chủ đề/ngôn ngữ (`vi`/`en`/`bilingual`) để gợi ý lời bài hát khớp tiết tấu, hoặc cập nhật từng dòng cụ thể qua tool `update_lyrics_lines` / **Lyric Pad**.
+* **Global Multimodal Copilot (Mini-RAG + 13+ Native Tool Calling):** Tự động truy hồi tri thức theo route/mode/câu hỏi từ **`DawPlaybook.java`** (chuẩn hóa tiếng Việt không dấu), đọc toàn bộ track/EQ/FX/Section/Fit-Check snapshot, nghe audio đính kèm (Gemini `inlineData` `<= 6 MB` hoặc **Java DSP Telemetry** đo RMS/Peak dBFS), và trả về các Tool Action an toàn (`set_track_mix`, `edit_structure_and_dynamics`, `create_template`, `export_project`, ...) có hỗ trợ **1-Click Revert** (`Hoàn tác`). Không bao giờ tự ý ghi đè bài nhạc khi chưa có xác nhận của người dùng.
 
 ### 3.7. `Producer / QA & Auto-Mastering Agent` (`QaReviewerAgent.java` + `audio-worker`)
 * **Kiểm duyệt Hòa âm (Maker–Checker):**
@@ -279,16 +279,20 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
   * **AI Music Chatbot & LLM Upgrade:** Cập nhật Gemini mặc định sang **`gemini-3.8-flash`** (tự fallback HTTP `404` trong `LlmAdapter`), nâng cấp `CoachLyricistAgent` thành **4 chế độ Chatbot** (`producer`, `arrangement`, `lyricist`, `mix`) kèm lịch sử 6 lượt gần nhất + action `suggest_lyrics` / `regenerate_track`.
   * **Security & DoS Hardening:** Loopback Compose ports (`127.0.0.1`), `CorsConfig` thu hẹp về local origins, `SecurityHeadersFilter` (`nosniff`, `DENY`, `no-referrer`, `Permissions-Policy`), redact key lỗi LLM trong `LlmAdapter`, bounded upload (`_read_upload_bounded` `413`, `55MB` multipart), Zip Bomb & collision-safe `.aimusic` import (`overwrite=false`), và `total_bars <= 256` DoS HTTP `400` guard + lazy FX buses.
 
+* **Phase 6A — Global Full-Spectrum AI Copilot, SSE Streaming, Mini-RAG & Multimodal Audio (DONE):**
+  * **Global Copilot 5 Trang:** Nhúng `AiCoachChatDrawer` vào `AppShell.tsx` + `ProjectProvider.tsx`, thêm store **`chat_threads` (`IndexedDB v2`)** lưu hội thoại theo từng project/workspace qua F5 reload.
+  * **13+ Native Tool Actions + Apply All + 1-Click Revert:** Hỗ trợ `LlmAdapter.generateWithTools` (Gemini `functionDeclarations` + OpenAI `tools` lowercase schema), điều khiển từ EQ/FX Mixer (`set_track_mix`), Structure/Time Signature/Dynamics (`edit_structure_and_dynamics`), sửa lời (`update_lyrics_lines`) tới khởi tạo Starter Template (`create_template`) và Export (`export_project`) kèm nút **`Hoàn tác`**.
+  * **SSE Streaming & Multimodal Audio/Voice:** Thêm `POST /api/coach/chat/stream` (`text/event-stream`: `chunk`/`actions`/`done`), `POST /api/coach/chat/audio` (`<= 10 MB`, `413` guard), Web Speech `vi-VN` / ghi âm WAV, toggle **`Gửi kèm Vocal để AI nghe`**, và `DawPlaybook.java` Mini-RAG + Java DSP Telemetry fallback.
+
 ---
 
-## 9. Định hướng Các Phase Tiếp Theo (Roadmap Phase 6–8)
+## 9. Định hướng Các Phase Tiếp Theo (Roadmap Phase 6B–8)
 
-Sau khi hoàn thiện toàn bộ MVP & Production Local DAW ở Phase 1–5, lộ trình mở rộng tiếp theo gồm 3 giai đoạn:
+Sau khi hoàn thiện Phase 1–6A, lộ trình mở rộng tiếp theo tập trung vào Audio DSP & Cloud Multi-User:
 
-* **Phase 6 — AI Chatbot Streaming, Stem Separation & Multi-Param Automation:**
-  * **Chatbot Nâng cao:** Hỗ trợ SSE Token Streaming cho `/api/coach/chat`, cho phép Chatbot sinh nhanh đoạn MIDI/hợp âm A/B preview (nghe thử phương án gợi ý trước khi bấm áp dụng), và gợi ý chỉnh từng Section.
+* **Phase 6B — Stem Separation & Multi-Param Web Audio Automation:**
   * **Stem Separation (Tách Beat/Vocal):** Tích hợp tách vocal/accompaniment gọn nhẹ trong `audio-worker` khi người dùng upload file ghép sẵn.
-  * **Automation Lane Đa Tham Số:** Mở rộng làn `Dynamics Envelope` trên Playlist để vẽ & tự động hóa `Volume`, `Pan`, `Filter Cutoff`, và `Reverb Send` phát trực tiếp qua Web Audio (`AudioParam.linearRampToValueAtTime`).
+  * **Automation Lane Đa Tham Số & A/B Preview:** Mở rộng làn `Dynamics Envelope` trên Playlist để vẽ & tự động hóa `Volume`, `Pan`, `Filter Cutoff`, và `Reverb Send` phát trực tiếp qua Web Audio (`AudioParam.linearRampToValueAtTime`), kèm nghe thử nhanh phương án hợp âm trước khi áp dụng.
 * **Phase 7 — Visual Pitch Editor, WebMIDI & Custom SoundFont:**
   * **Visual Pitch Curve Editor (Melodyne-lite):** Cho phép kéo chỉnh cao độ/vibrato từng âm tiết vocal trực tiếp trên Piano Roll kết hợp Formant shift.
   * **Hardware MIDI & Low-Latency Recording:** Hỗ trợ cắm MIDI Keyboard ngoài (`navigator.requestMIDIAccess`), `AudioWorklet` thu mic độ trễ thấp, và Undo nén delta lên tới 50 bước.

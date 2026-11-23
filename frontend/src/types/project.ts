@@ -357,6 +357,9 @@ export interface CoachChatRequest {
   project_id: string;
   message: string;
   mode?: CoachAssistantMode;
+  route?: string;
+  context?: Record<string, unknown>;
+  project_state?: ProjectState;
   history: CoachMessage[];
 }
 

@@ -20,6 +20,12 @@ public class CoachChatRequest {
     @JsonProperty("mode")
     private String mode = "producer";
 
+    @JsonProperty("route")
+    private String route = "";
+
+    @JsonProperty("context")
+    private Map<String, Object> context;
+
     @JsonProperty("project_state")
     private ProjectState projectState;
 
@@ -36,6 +42,12 @@ public class CoachChatRequest {
 
     public String getMode() { return mode; }
     public void setMode(String mode) { this.mode = (mode != null && !mode.isBlank()) ? mode : "producer"; }
+
+    public String getRoute() { return route; }
+    public void setRoute(String route) { this.route = route != null ? route : ""; }
+
+    public Map<String, Object> getContext() { return context; }
+    public void setContext(Map<String, Object> context) { this.context = context; }
 
     public ProjectState getProjectState() { return projectState; }
     public void setProjectState(ProjectState projectState) { this.projectState = projectState; }

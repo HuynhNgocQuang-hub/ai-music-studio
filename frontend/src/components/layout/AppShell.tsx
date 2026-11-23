@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
+  Bot,
   Disc3,
   FolderKanban,
   FolderOpen,
@@ -11,6 +12,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
+import AiCoachChatDrawer from '@/components/studio/AiCoachChatDrawer';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import { DAW_TEMPLATES, buildProjectFromTemplate } from '@/lib/music/presets';
 
@@ -23,6 +25,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     restorableDraft,
     dismissRestorePrompt,
     acceptRestoreDraft,
+    copilotOpen,
+    setCopilotOpen,
   } = useProjectSession();
 
   const isStudioRoute = pathname.startsWith('/studio');
@@ -111,15 +115,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </nav>
         </div>
 
-        <button
-          type="button"
-          onClick={handleCreateBlankProject}
-          title="Tạo Project DAW mới ngay"
-          aria-label="Tạo Project DAW mới ngay"
-          className="flex h-9 w-9 items-center justify-center rounded-md border border-white/15 bg-[#232730] text-slate-200 transition hover:border-amber-400/60 hover:text-amber-300"
-        >
-          <Plus className="h-4 w-4" />
-        </button>
+        <div className="flex flex-col items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setCopilotOpen((o) => !o)}
+            title="Bật/Tắt AI Music Copilot"
+            aria-label="Bật/Tắt AI Music Copilot"
+            className={`flex h-9 w-9 items-center justify-center rounded-md border transition ${
+              copilotOpen
+                ? 'border-sky-400/60 bg-sky-500/20 text-sky-200'
+                : 'border-white/10 bg-[#1d212a] text-slate-300 hover:border-sky-400/40 hover:text-sky-200'
+            }`}
+          >
+            <Bot className="h-4.5 w-4.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCreateBlankProject}
+            title="Tạo Project DAW mới ngay"
+            aria-label="Tạo Project DAW mới ngay"
+            className="flex h-9 w-9 items-center justify-center rounded-md border border-white/15 bg-[#232730] text-slate-200 transition hover:border-amber-400/60 hover:text-amber-300"
+          >
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
       </aside>
 
       {/* Main DAW / Launcher Container */}
@@ -144,6 +164,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCopilotOpen((o) => !o)}
+                className={`inline-flex items-center gap-1.5 rounded border px-3 py-1 text-xs font-semibold transition ${
+                  copilotOpen
+                    ? 'border-sky-400/60 bg-sky-500/20 text-sky-200'
+                    : 'border-white/15 bg-[#232730] text-slate-200 hover:border-sky-400/50 hover:text-sky-200'
+                }`}
+              >
+                <Bot className="h-3.5 w-3.5" />
+                <span>AI Copilot</span>
+              </button>
               <button
                 type="button"
                 onClick={handleCreateBlankProject}
@@ -195,13 +227,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        <main
-          className={`min-h-0 flex-1 ${
-            isStudioRoute ? 'overflow-hidden p-1.5' : 'overflow-y-auto p-5 md:p-6'
-          }`}
-        >
-          {children}
-        </main>
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <main
+            className={`min-w-0 min-h-0 flex-1 ${
+              isStudioRoute ? 'overflow-hidden p-1.5' : 'overflow-y-auto p-5 md:p-6'
+            }`}
+          >
+            {children}
+          </main>
+          <AiCoachChatDrawer />
+        </div>
       </div>
     </div>
   );

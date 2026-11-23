@@ -141,7 +141,7 @@ Hỗ trợ viết lời theo giai điệu/nền beat và giải đáp hướng d
 | :--- | :--- | :--- |
 | `FR-LYR-01` | **AI Gợi ý / Viết lời** | Dựa vào chủ đề, tâm trạng, ngôn ngữ (Tiếng Việt / Tiếng Anh) và tiết tấu giai điệu/beat để gợi ý lời bài hát chia theo từng đoạn (`Verse`, `Chorus`...). |
 | `FR-LYR-02` | **Viết lời trên nền Beat** | Cung cấp khung soạn lời (Lyric Pad) chạy song song khi đang phát beat hoặc loop đoạn nhạc để người dùng tự viết/chỉnh lời theo nhịp. |
-| `FR-LYR-03` | **AI Music Chatbot & Coach (Đa chế độ)** | Khung trò chuyện AI ngay trong Studio hỗ trợ **4 chế độ chuyên sâu** (`Producer`, `Hòa âm`, `Viết lời`, `Mix / Tune`) kèm ngữ cảnh 6 lượt gần nhất + trạng thái bài, Quick Prompt 1 chạm và nút **Suggested Actions** (`suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `regenerate_track`, `update_config`). |
+| `FR-LYR-03` | **Global AI Music Copilot (Multimodal & Tool Calling)** | Trợ lý AI gắn toàn cục trên cả 5 trang (`/`..`/settings`) với **4 chế độ chuyên sâu** (`Producer`, `Hòa âm`, `Viết lời`, `Mix / Tune`), **Mini-RAG `DawPlaybook`**, **SSE Token Streaming** (`/api/coach/chat/stream`), **Multimodal Audio & Voice** (`/api/coach/chat/audio` `<= 10 MB`, `Gửi kèm Vocal`, Mic WAV/Speech), 13+ **Tool Actions** (`set_track_mix`, `edit_structure_and_dynamics`, `update_lyrics_lines`, `create_template`, `export_project`, ...), **Áp dụng tất cả**, **Hoàn tác 1 chạm**, và lưu bền vững qua `IndexedDB` (`chat_threads`). |
 
 * **Phải có gì (`FR-LYRIC`):**
   * Tab/Panel **Lyrics & AI Coach** gắn cạnh Timeline.

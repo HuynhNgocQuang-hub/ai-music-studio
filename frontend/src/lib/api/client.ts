@@ -6,8 +6,10 @@ import type {
   AutotuneRequest,
   AutotuneResponse,
   ClipUploadResponse,
+  CoachAssistantMode,
   CoachChatRequest,
   CoachChatResponse,
+  CoachSuggestedAction,
   DenoiseRequest,
   DenoiseResponse,
   HealthResponse,
@@ -450,6 +452,136 @@ export async function chatWithCoach(payload: CoachChatRequest): Promise<CoachCha
       ...payload,
       history: cleanHistory,
     }),
+  });
+}
+
+export async function streamCoachChat(
+  payload: CoachChatRequest,
+  handlers: {
+    onChunk: (deltaText: string) => void;
+    onActions?: (data: { provider?: string; suggested_actions: CoachSuggestedAction[] }) => void;
+    onDone?: (res: CoachChatResponse) => void;
+    signal?: AbortSignal;
+  }
+): Promise<CoachChatResponse> {
+  const cleanHistory = payload.history.map(({ role, content, timestamp }) => ({
+    role,
+    content,
+    ...(timestamp ? { timestamp } : {}),
+  }));
+  const url = `${getApiBaseUrl()}/api/coach/chat/stream`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...buildLLMHeaders(),
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify({
+      ...payload,
+      history: cleanHistory,
+    }),
+    signal: handlers.signal,
+  });
+
+  if (!response.ok || !response.body) {
+    const fallback = await chatWithCoach(payload);
+    handlers.onChunk(fallback.reply);
+    handlers.onActions?.({ provider: fallback.provider, suggested_actions: fallback.suggested_actions });
+    handlers.onDone?.(fallback);
+    return fallback;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let eventName = 'message';
+  let dataLines: string[] = [];
+  let accReply = '';
+  let lastProvider: string | undefined;
+  let lastActions: CoachSuggestedAction[] = [];
+  let finalResp: CoachChatResponse | null = null;
+
+  const dispatchEvent = (evt: string, rawData: string) => {
+    if (!rawData) return;
+    try {
+      const parsed = JSON.parse(rawData) as Record<string, unknown>;
+      if (evt === 'chunk' && typeof parsed.text === 'string') {
+        accReply += parsed.text;
+        handlers.onChunk(parsed.text);
+      } else if (evt === 'actions') {
+        lastProvider = typeof parsed.provider === 'string' ? parsed.provider : lastProvider;
+        lastActions = Array.isArray(parsed.suggested_actions)
+          ? (parsed.suggested_actions as CoachSuggestedAction[])
+          : lastActions;
+        handlers.onActions?.({ provider: lastProvider, suggested_actions: lastActions });
+      } else if (evt === 'done') {
+        finalResp = {
+          reply: typeof parsed.reply === 'string' ? parsed.reply : accReply,
+          provider: typeof parsed.provider === 'string' ? parsed.provider : lastProvider,
+          suggested_actions: Array.isArray(parsed.suggested_actions)
+            ? (parsed.suggested_actions as CoachSuggestedAction[])
+            : lastActions,
+        };
+        handlers.onDone?.(finalResp);
+      } else if (evt === 'error' && typeof parsed.message === 'string') {
+        throw new ApiError(500, parsed.message);
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (line === '') {
+        dispatchEvent(eventName, dataLines.join('\n'));
+        eventName = 'message';
+        dataLines = [];
+      } else if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+  }
+  if (dataLines.length > 0) {
+    dispatchEvent(eventName, dataLines.join('\n'));
+  }
+
+  return (
+    finalResp ?? {
+      reply: accReply,
+      provider: lastProvider,
+      suggested_actions: lastActions,
+    }
+  );
+}
+
+export async function chatWithCoachAudio(params: {
+  project_id: string;
+  message: string;
+  mode?: CoachAssistantMode;
+  route?: string;
+  file?: Blob;
+  filename?: string;
+}): Promise<CoachChatResponse> {
+  const form = new FormData();
+  form.append('project_id', params.project_id);
+  form.append('message', params.message);
+  if (params.mode) form.append('mode', params.mode);
+  if (params.route) form.append('route', params.route);
+  if (params.file) {
+    form.append('file', params.file, params.filename || 'chat_audio.wav');
+  }
+  return requestJson<CoachChatResponse>('/api/coach/chat/audio', {
+    method: 'POST',
+    body: form,
   });
 }
 

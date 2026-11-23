@@ -1,7 +1,7 @@
 # Tài liệu Thiết kế Kiến trúc & Giao diện Hệ thống (`DESIGN_SPEC`)
 ## Dự án: AI Music Studio (Hybrid Multi-Agent DAW)
 
-- **Phiên bản:** 2.0 (Option B Production + FL Playlist Clip Architecture + AI Chatbot 4 Modes)
+- **Phiên bản:** 2.1 (Option B Production + FL Playlist + Global Multimodal AI Copilot)
 - **Cập nhật lần cuối:** 2026-11-23
 - **Liên kết tài liệu:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md)
 
@@ -120,7 +120,7 @@ erDiagram
   - `StepSequencer.tsx`: Lưới trống hỗ trợ `4/4` (16 bước) và `3/4` / `6/8` (12 bước).
   - `PianoRollEditor.tsx`: Bộ soạn nốt C1–C7, Scale highlight, Quantize, Velocity lane, Copy/Paste nốt.
   - `ConsoleMixerPanel.tsx`: Kênh trộn dọc 3-Band EQ, FX Send (`BUS A Reverb` + `BUS B Delay`), LED Meter và Master Bus.
-  - `AiCoachChatDrawer.tsx`: Ngăn kéo **AI Music Chatbot** 4 chế độ kèm Quick Prompts, Provider badge, Overdub Fit Check và nút áp dụng 1 chạm.
+  - `AiCoachChatDrawer.tsx`: Ngăn kéo **AI Music Copilot** toàn cục trên cả 5 trang (`AppShell.tsx` + `ProjectProvider.tsx`), hỗ trợ SSE Stream, Mic WAV / Speech & đính kèm Audio (`<= 10 MB`), **Áp dụng tất cả**, **Hoàn tác 1 chạm (`Revert`)** và lưu hội thoại trong `IndexedDB` (`chat_threads`).
 
 ### 4.2. Quy chuẩn Thẩm mỹ DAW & Khung Clip FL Studio 12
 - **Bảng màu nền Hardware Dark:**
@@ -132,19 +132,22 @@ erDiagram
 
 ---
 
-## 5. Thiết kế AI Chatbot Đa Chế Độ & An Toàn Hệ Thống
+## 5. Thiết kế AI Copilot Toàn Diện & An Toàn Hệ Thống
 
-### 5.1. Kiến trúc AI Music Chatbot (`4 Assistant Modes`)
-- **4 chế độ chuyên biệt (`CoachAssistantMode`):**
-  1. `producer`: Đánh giá cấu trúc tổng thể, BPM, đặt mô-típ Chorus, Overdub.
-  2. `arrangement`: Gợi ý tiến trình hợp âm (`vi - IV - I - V`, ...), tái tạo track trống/bass/đệm.
-  3. `lyricist`: Gợi ý lời Việt/Anh/Song ngữ khớp mật độ nốt/âm tiết, vần điệu Chorus/Verse.
-  4. `mix`: Tư vấn EQ 3 băng tần, Auto-Tune preset, Send FX, Audio-Trim & Auto-Mix `-1.0 dBFS`.
-- **Cơ chế An toàn (`Human-in-the-loop`):**
-  - Chatbot chỉ trả về văn bản phân tích và mảng `suggested_actions[]` (`update_config`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `auto_trim_vocal`, `suggest_lyrics`, `regenerate_track`).
-  - Không bao giờ tự ý ghi đè `ProjectState` khi người dùng chưa bấm nút xác nhận trên bong bóng chat.
+### 5.1. Kiến trúc Global AI Music Copilot (`4 Modes + Mini-RAG + Multimodal + Tool Calling`)
+- **4 chế độ chuyên biệt (`CoachAssistantMode`) gắn vào `AppShell` toàn app (`/`, `/create`, `/library`, `/settings`, `/studio/:id`):**
+  1. `producer`: Điều hướng trang, khởi tạo Starter Template từ Home, đánh giá cấu trúc, BPM, đặt mô-típ Chorus, Overdub & Fit Check.
+  2. `arrangement`: Gợi ý tiến trình hợp âm (`vi - IV - I - V`, ...), đổi nhịp `4/4|3/4|6/8`, thêm đoạn (`Bridge`), kéo **Dynamics Energy%**, tái tạo track trống/bass/đệm.
+  3. `lyricist`: Viết hoặc sửa từng dòng lời Việt/Anh/Song ngữ khớp mật độ nốt/âm tiết (`update_lyrics_lines`, `suggest_lyrics`).
+  4. `mix`: Tư vấn & chỉnh trực tiếp **3-Band EQ (`low_db`, `mid_db`, `high_db`)**, `volume`, `pan`, **FX Sends (`reverb_send`, `delay_send`)**, Auto-Tune preset, Auto-Trim & Auto-Mix `-1.0 dBFS`.
+- **Mini-RAG & Native Tool Calling:**
+  - `DawPlaybook.java` chuẩn hóa tiếng Việt không dấu (NFD) để truy hồi playbook hỗn hợp (`route`, `query`, `mode`) và truyền cùng full snapshot (`tracks`, EQ, FX, lyrics, sections, `fit_check`) vào LLM.
+  - `LlmAdapter.generateWithTools` / `generateAudioWithTools` gọi native Gemini `functionDeclarations` (kèm `inlineData` audio `<= 6 MB`) hoặc OpenAI `tools` (tự chuyển JSON Schema `type` về lowercase) với **13+ Action Tools**, plus `/api/coach/chat/stream` (SSE) và `/api/coach/chat/audio` (`<= 10 MB`, có **Java DSP Telemetry** đo RMS/Peak dBFS khi fallback Mock).
+- **Cơ chế An toàn (`Human-in-the-loop` + 1-Click Revert & IndexedDB Thread Memory):**
+  - AI chỉ đề xuất mảng `suggested_actions[]` (`set_track_mix`, `edit_structure_and_dynamics`, `update_lyrics_lines`, `suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `auto_trim_vocal`, `regenerate_track`, `update_config`, `navigate_tab`, `create_template`, `export_project`, `test_health`).
+  - Không tự ý sửa `ProjectState`; người dùng bấm từng nút hoặc **Áp dụng tất cả**, đồng thời snapshot trước khi chạy được giữ lại cho nút **`Hoàn tác` (1-Click Revert)**. Lịch sử chat lưu bền vững trong store `chat_threads` (`IndexedDB v2`).
 - **Model & Fallback Resilience (`LlmAdapter.java`):**
-  - Mặc định gọi **`gemini-3.8-flash`** qua header `x-goog-api-key` (hỗ trợ cả key `AQ...` lẫn `AIza...`); nếu model cấu hình trả `404` sẽ tự fallback sang `gemini-3.8-flash`, và nếu chưa cấu hình API Key sẽ chạy bộ phân tích ngữ cảnh + Heuristic Intent Engine cục bộ.
+  - Mặc định gọi **`gemini-3.8-flash`** qua header `x-goog-api-key` (hỗ trợ cả key `AQ...` lẫn `AIza...`); nếu model cấu hình trả `404` sẽ tự fallback sang `gemini-3.8-flash`, và nếu chưa cấu hình API Key hoặc quá tải cloud sẽ tự rơi mượt về bộ phân tích Heuristic + DSP Audio Telemetry cục bộ.
 
 ### 5.2. Kiến trúc Phòng thủ Bảo mật (Local Hardening Layers)
 - **Transport & Headers:** Cổng Docker `audio-worker` & `backend` bind về `127.0.0.1`; mọi HTTP response gắn `SecurityHeadersFilter` (`nosniff`, `DENY`, `no-referrer`, `Permissions-Policy`); `CorsConfig` giới hạn local origins.

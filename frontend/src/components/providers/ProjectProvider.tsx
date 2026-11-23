@@ -8,10 +8,20 @@ import {
   saveDraft,
   type StoredDraft,
 } from '@/lib/storage/indexeddb';
-import { syncProject } from '@/lib/api/client';
-import { createDefaultProjectState, type ProjectState } from '@/types/project';
+import { checkHealth, syncProject, testLlmConnection } from '@/lib/api/client';
+import { DAW_TEMPLATES, buildProjectFromTemplate } from '@/lib/music/presets';
+import {
+  createDefaultProjectState,
+  type CoachSuggestedAction,
+  type OverdubFitCheckResponse,
+  type ProjectState,
+} from '@/types/project';
 
 export type AutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+
+export type CoachActionExecutor = (
+  act: CoachSuggestedAction
+) => Promise<{ notice?: string; revertable?: boolean } | void>;
 
 interface ProjectContextValue {
   project: ProjectState;
@@ -27,6 +37,19 @@ interface ProjectContextValue {
   dismissRestorePrompt: () => void;
   acceptRestoreDraft: (draft: StoredDraft) => void;
   discardDraftById: (projectId: string) => Promise<void>;
+  copilotOpen: boolean;
+  setCopilotOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  latestFitCheck: OverdubFitCheckResponse | null;
+  setLatestFitCheck: React.Dispatch<React.SetStateAction<OverdubFitCheckResponse | null>>;
+  studioUiMeta: { studioMode?: 'quick' | 'pro'; activeTab?: string };
+  setStudioUiMeta: React.Dispatch<
+    React.SetStateAction<{ studioMode?: 'quick' | 'pro'; activeTab?: string }>
+  >;
+  registerCoachExecutor: (executor: CoachActionExecutor | null) => void;
+  executeGlobalCoachAction: (
+    act: CoachSuggestedAction,
+    navigate: (to: string) => void
+  ) => Promise<{ notice: string; snapshot?: ProjectState }>;
 }
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
@@ -37,6 +60,13 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [restorableDraft, setRestorableDraft] = useState<StoredDraft | null>(null);
+  const [copilotOpen, setCopilotOpen] = useState<boolean>(false);
+  const [latestFitCheck, setLatestFitCheck] = useState<OverdubFitCheckResponse | null>(null);
+  const [studioUiMeta, setStudioUiMeta] = useState<{
+    studioMode?: 'quick' | 'pro';
+    activeTab?: string;
+  }>({});
+  const coachExecutorRef = useRef<CoachActionExecutor | null>(null);
 
   const isDirtyRef = useRef(false);
   const saveSeqRef = useRef(0);
@@ -198,6 +228,75 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     setRestorableDraft((curr) => (curr?.project_id === projectId ? null : curr));
   }, []);
 
+  const registerCoachExecutor = useCallback((executor: CoachActionExecutor | null) => {
+    coachExecutorRef.current = executor;
+  }, []);
+
+  const executeGlobalCoachAction = useCallback(
+    async (
+      act: CoachSuggestedAction,
+      navigate: (to: string) => void
+    ): Promise<{ notice: string; snapshot?: ProjectState }> => {
+      const prevSnapshot = latestProjectRef.current;
+      const payload = act.payload ?? {};
+
+      if (act.action === 'create_template') {
+        const requestedGenre = String(payload.genre || 'Pop').toLowerCase();
+        const tpl =
+          DAW_TEMPLATES.find((t) => t.genre.toLowerCase() === requestedGenre) ||
+          DAW_TEMPLATES[0];
+        const next = buildProjectFromTemplate(tpl);
+        loadProjectIntoSession(next, { dirty: true });
+        navigate(`/studio/${encodeURIComponent(next.project_id)}`);
+        return { notice: `Đã khởi tạo "${tpl.name}" và mở Studio DAW.` };
+      }
+
+      if (act.action === 'test_health') {
+        const [h, llm] = await Promise.all([
+          checkHealth().catch(() => null),
+          testLlmConnection().catch(() => null),
+        ]);
+        const msg = `Health=${h?.status ?? 'unknown'} | Redis=${h?.redis?.connected ? 'OK' : 'Offline'} | LLM=${llm?.provider ?? 'mock'}: ${llm?.message ?? 'Ready'}`;
+        return { notice: msg };
+      }
+
+      if (coachExecutorRef.current) {
+        const res = await coachExecutorRef.current(act);
+        return {
+          notice: res?.notice || `Đã áp dụng đề xuất: ${act.label}`,
+          snapshot: res?.revertable === false ? undefined : prevSnapshot,
+        };
+      }
+
+      // Non-studio fallback: open Studio cleanly or update basic config
+      if (act.action === 'navigate_tab') {
+        if (typeof payload.tab === 'string') {
+          setStudioUiMeta((prev) => ({ ...prev, activeTab: payload.tab as string }));
+        }
+        navigate(`/studio/${encodeURIComponent(prevSnapshot.project_id)}`);
+        return { notice: `Đang mở Phòng thu DAW (${prevSnapshot.title || prevSnapshot.project_id}).` };
+      }
+
+      const next = updateProject((prev) => ({
+        ...prev,
+        config: {
+          ...prev.config,
+          ...(typeof payload.genre === 'string' ? { genre: payload.genre } : {}),
+          ...(typeof payload.mood === 'string' ? { mood: payload.mood } : {}),
+        },
+        analysis: {
+          ...prev.analysis,
+          ...(typeof payload.bpm === 'number'
+            ? { bpm: Math.max(40, Math.min(220, Math.round(payload.bpm))), bpm_locked: true }
+            : {}),
+        },
+      }));
+      await saveNow(true, next).catch(() => {});
+      return { notice: `Đã cập nhật: ${act.label}`, snapshot: prevSnapshot };
+    },
+    [loadProjectIntoSession, saveNow, updateProject]
+  );
+
   // Helper to hydrate if navigating directly to /studio/[id]
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -230,6 +329,14 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         dismissRestorePrompt,
         acceptRestoreDraft,
         discardDraftById,
+        copilotOpen,
+        setCopilotOpen,
+        latestFitCheck,
+        setLatestFitCheck,
+        studioUiMeta,
+        setStudioUiMeta,
+        registerCoachExecutor,
+        executeGlobalCoachAction,
       }}
     >
       {children}

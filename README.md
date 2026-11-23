@@ -74,13 +74,13 @@ Mở trình duyệt tại `http://localhost:3000` (mọi request `/api/*` đư�
 
 ## Tính năng Nổi bật (Pro DAW & Hybrid Multi-Agent — Phase 1–5)
 - **Pro DAW Workstation & Khung Clip FL Studio 12 (`/studio/:id`):** Top Transport cố định (`Play/Pause/Stop/Rec`, `Loop`, `Metronome`, `BPM`, `Key/Scale/Time Signature 4/4|3/4|6/8`, `Undo/Redo`, `Select/Split/Snap`, **`Quick | Pro DAW`**), Playlist **3 loại khung clip chuẩn FL Studio** (**Audio Waveform** polygon đối xứng, **Dynamics Automation Envelope** kéo chỉnh `section.energy`, **MIDI Pattern** chia theo Section + biến thể `#2`), và Bottom Dock (`Step Sequencer`, `Piano Roll`, `Console Mixer`, `Auto-Tune DSP`, `Lyrics & Karaoke`).
-- **AI Music Chatbot 4 Chế độ (`AiCoachChatDrawer.tsx`):** Hỏi đáp ngay trong Studio theo 4 vai trò (**`Producer` | `Hòa âm` | `Viết lời` | `Mix / Tune`**), nhớ ngữ cảnh 6 lượt gần nhất, có Quick Prompts, Provider badge (`gemini` / `openai` / `mock`), và **1-Click Suggested Actions** (`suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `regenerate_track`).
+- **AI Music Copilot Toàn cục & Multimodal (`AiCoachChatDrawer.tsx`):** Hoạt động xuyên suốt 5 màn hình (`/`, `/create`, `/library`, `/settings`, `/studio/:id`) với **4 chế độ (`Producer` | `Hòa âm` | `Viết lời` | `Mix / Tune`)**, **Mini-RAG `DawPlaybook`**, **SSE Token Streaming** (`/api/coach/chat/stream`), **Multimodal Audio/Voice** (`/api/coach/chat/audio` `<= 10 MB`, `Gửi kèm Vocal`, Mic WAV/Web Speech), **13+ Native Tool Actions** (`set_track_mix`, `edit_structure_and_dynamics`, `update_lyrics_lines`, `create_template`, `export_project`, ...), **Áp dụng tất cả**, **Hoàn tác 1 chạm**, và lưu lịch sử qua `IndexedDB chat_threads`.
 - **Web Audio + DSP Mixer, Formant Auto-Tune & Send FX Bus:** Tách route từng channel, Auto-Tune **bảo toàn formant Cepstral**, **3-Band EQ (`low_db`, `mid_db`, `high_db`)**, **Vocal Carve 2.2 kHz (`-2.5 dB`)** và **Send FX Bus (Hall Reverb + Tempo-Synced Delay)** — xuất `WAV`, `MP3 (320k / 192k)`, `Stems`, `.mid` và `.aimusic` với Master Limiter (`<= -1.0 dBFS`).
 - **Bảo mật, Ổn định TTL & Phòng chống DoS (Phase 5):** Bind Docker ports về `127.0.0.1`, `CorsConfig` + `SecurityHeadersFilter`, redact key trong `LlmAdapter`, giới hạn upload (`55MB` / `413` trên worker), chống Zip Bomb + collision-safe import (`.aimusic` `overwrite=false`), từ chối `total_bars > 256` (`HTTP 400`), và **Auto-Rehydrate audio từ `IndexedDB`** khi Redis TTL hết hạn.
 - **Session Vault (`/library`) & Settings (`/settings`):** Tìm kiếm, lọc, phân trang, xóa 2 bước nội tuyến, cấu hình Dual LLM & nút **Test API Key** (`POST /api/health/llm-test`).
 
-## Định hướng Các Phase Tiếp Theo (Phase 6–8)
-- **Phase 6 — AI Chatbot Streaming & Audio Demucs / Multi-Param Automation:** SSE token streaming cho Chatbot, A/B preview hợp âm gợi ý trước khi áp dụng, tách Stem Vocal/Beat (`audio-worker`), và vẽ đường Automation (`Volume`, `Pan`, `Filter`) phát realtime qua Web Audio.
+## Định hướng Các Phase Tiếp Theo (Phase 6B–8)
+- **Phase 6B — Stem Separation & Multi-Param Automation:** Tách Stem Vocal/Beat (`audio-worker`), A/B preview hợp âm gợi ý trước khi áp dụng, và vẽ đường Automation (`Volume`, `Pan`, `Filter`) phát realtime qua Web Audio.
 - **Phase 7 — Visual Pitch Editor & Hardware MIDI:** Kéo chỉnh cao độ/vibrato trực tiếp kiểu Melodyne-lite, hỗ trợ `WebMIDI` Keyboard ngoài, `AudioWorklet` thu mic độ trễ thấp, và Undo 50 bước.
 - **Phase 8 — Cloud Multi-User & Publishing (SaaS):** OAuth2/JWT, PostgreSQL + S3/MinIO cho `.aimusic`/stems, rate-limiting quota theo user, và chia sẻ link demo công khai.
 
@@ -90,7 +90,7 @@ Mở trình duyệt tại `http://localhost:3000` (mọi request `/api/*` đư�
 # Kiểm tra cấu hình Docker Compose nhóm music
 docker compose -p music config -q
 
-# Chạy unit, MockMvc & security tests cho Spring Boot Backend (35/35 pass)
+# Chạy unit, MockMvc & security tests cho Spring Boot Backend (37/37 pass)
 cd backend && mvn -B package
 
 # Chạy unit & DSP/DoS tests cho Python Audio DSP Worker trong Docker (16/16 pass)
@@ -99,6 +99,6 @@ docker compose -p music exec -T audio-worker pytest -v tests/test_worker.py
 # Kiểm tra TypeScript & build production cho React Vite Frontend (2165 modules)
 cd frontend && npx tsc --noEmit && npm run build
 
-# Chạy Live Full-Stack E2E (yêu cầu Redis :16379, audio-worker :8001, Backend :8000 đang chạy - 20/20 pass)
+# Chạy Live Full-Stack E2E (yêu cầu Redis :16379, audio-worker :8001, Backend :8000 đang chạy - 21/21 pass)
 docker run --rm --add-host=host.docker.internal:host-gateway -v "${PWD}:/workspace" -w /workspace -e "E2E_BASE_URL=http://host.docker.internal:8000" music-audio-worker pytest -v tests/e2e/test_phase1_e2e.py tests/e2e/test_phase2_3_e2e.py
 ```

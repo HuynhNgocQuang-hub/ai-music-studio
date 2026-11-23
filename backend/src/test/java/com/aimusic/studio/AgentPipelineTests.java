@@ -4,10 +4,12 @@ import com.aimusic.studio.agents.AgentOrchestrator;
 import com.aimusic.studio.agents.ArrangerAgent;
 import com.aimusic.studio.agents.CoachLyricistAgent;
 import com.aimusic.studio.agents.ComposerAgent;
+import com.aimusic.studio.agents.DawPlaybook;
 import com.aimusic.studio.agents.LlmAdapter;
 import com.aimusic.studio.agents.LlmContextHolder;
 import com.aimusic.studio.agents.MusicTheory;
 import com.aimusic.studio.agents.QaReviewerAgent;
+import com.aimusic.studio.audio.JavaAudioFallbackService;
 import com.aimusic.studio.model.ChordEvent;
 import com.aimusic.studio.model.MidiNote;
 import com.aimusic.studio.model.ProjectConfig;
@@ -628,5 +630,104 @@ class AgentPipelineTests {
         assertEquals(6.0, result.getMelodyNotes().get(0).getStartBeat(), 0.01);
         assertEquals(2.0, result.getTracks().get("vocal").getClips().get(0).getStartBar(), 0.01);
         assertTrue(result.getQaStatus().isApproved());
+    }
+
+    @Test
+    void fullSpectrumCopilotPlaybookToolsAndAudioTelemetry() {
+        // 1. Mini-RAG Playbook normalizes Vietnamese accents and retrieves mixing + error guides
+        String mixPlaybook = DawPlaybook.retrieveContext("/studio/demo", "Giọng vocal hơi chói và khô thì chỉnh EQ thế nào?", "mix");
+        assertTrue(mixPlaybook.contains("Console Mixer"), mixPlaybook);
+        assertTrue(mixPlaybook.contains("high_db"), mixPlaybook);
+
+        String errPlaybook = DawPlaybook.retrieveContext("/settings", "Gặp lỗi 404 model Gemini thì xử lý sao?", "producer");
+        assertTrue(errPlaybook.contains("gemini-3.8-flash"), errPlaybook);
+
+        // 2. Context-aware CoachLyricistAgent actions + real JavaAudioFallbackService DSP telemetry
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        JavaAudioFallbackService audioFallback = new JavaAudioFallbackService(objectMapper);
+        CoachLyricistAgent coach = new CoachLyricistAgent(adapter, audioFallback);
+        ProjectState state = sampleProjectState("enhance", "full_song");
+
+        CoachChatResponse eqResp = coach.chatCoach(
+                state,
+                "Vocal hơi chói quá và thiếu reverb",
+                List.of(),
+                "mix",
+                "/studio/" + state.getProjectId(),
+                Map.of(),
+                null,
+                null
+        );
+        assertTrue(eqResp.getSuggestedActions().stream().anyMatch(a ->
+                "set_track_mix".equals(a.getAction()) && Double.valueOf(-2.5).equals(a.getPayload().get("high_db"))));
+        assertTrue(eqResp.getSuggestedActions().stream().anyMatch(a ->
+                "set_track_mix".equals(a.getAction()) && Double.valueOf(0.28).equals(a.getPayload().get("reverb_send"))));
+
+        CoachChatResponse structResp = coach.chatCoach(
+                state,
+                "Chuyển sang nhịp 6/8 và thêm đoạn Bridge đẩy cao trào",
+                List.of(),
+                "arrangement",
+                "/studio/" + state.getProjectId(),
+                Map.of(),
+                null,
+                null
+        );
+        assertTrue(structResp.getSuggestedActions().stream().anyMatch(a ->
+                "edit_structure_and_dynamics".equals(a.getAction()) && "6/8".equals(a.getPayload().get("time_signature"))));
+        assertTrue(structResp.getSuggestedActions().stream().anyMatch(a ->
+                "edit_structure_and_dynamics".equals(a.getAction()) && "Bridge".equals(a.getPayload().get("add_section_name"))));
+
+        CoachChatResponse homeResp = coach.chatCoach(
+                state,
+                "Tạo project mẫu Ballad nhẹ mới",
+                List.of(),
+                "producer",
+                "/",
+                Map.of(),
+                null,
+                null
+        );
+        assertTrue(homeResp.getSuggestedActions().stream().anyMatch(a ->
+                "create_template".equals(a.getAction()) && "Ballad".equals(a.getPayload().get("genre"))));
+
+        // Synthesize 0.5s 22050Hz 16-bit mono WAV and confirm attached audio DSP telemetry
+        byte[] testWav = synthMonoWav(0.5, 22050, 0.25);
+        CoachChatResponse audioResp = coach.chatCoach(
+                state,
+                "Nghe thử đoạn vocal này xem sao",
+                List.of(),
+                "mix",
+                "/studio/" + state.getProjectId(),
+                Map.of(),
+                testWav,
+                "audio/wav"
+        );
+        assertTrue(audioResp.getReply().contains("dBFS"), audioResp.getReply());
+        assertFalse(audioResp.getSuggestedActions().isEmpty());
+    }
+
+    private static byte[] synthMonoWav(double durationSec, int sampleRate, double amplitude) {
+        int numSamples = (int) Math.round(durationSec * sampleRate);
+        int dataSize = numSamples * 2;
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(44 + dataSize).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        buf.put("RIFF".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        buf.putInt(36 + dataSize);
+        buf.put("WAVE".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        buf.put("fmt ".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        buf.putInt(16);
+        buf.putShort((short) 1);
+        buf.putShort((short) 1);
+        buf.putInt(sampleRate);
+        buf.putInt(sampleRate * 2);
+        buf.putShort((short) 2);
+        buf.putShort((short) 16);
+        buf.put("data".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        buf.putInt(dataSize);
+        for (int i = 0; i < numSamples; i++) {
+            double sample = amplitude * Math.sin(2.0 * Math.PI * 440.0 * i / sampleRate);
+            buf.putShort((short) Math.round(sample * 32767.0));
+        }
+        return buf.array();
     }
 }

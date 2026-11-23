@@ -1,9 +1,10 @@
-import type { ProjectState } from '@/types/project';
+import type { CoachAssistantMode, CoachMessage, ProjectState } from '@/types/project';
 
 const DB_NAME = 'ai_music_studio_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const DRAFTS_STORE = 'drafts';
 const AUDIO_STORE = 'audio_blobs';
+const CHAT_STORE = 'chat_threads';
 
 /**
  * Rolling cap of recent drafts to avoid disk bloat (SRS 4.1: max 3-5 recent drafts).
@@ -28,6 +29,13 @@ export interface StoredAudioBlob {
   updated_at: string;
 }
 
+export interface StoredChatThread {
+  thread_id: string;
+  mode: CoachAssistantMode;
+  messages: CoachMessage[];
+  updated_at: string;
+}
+
 function isBrowser(): boolean {
   return typeof window !== 'undefined' && typeof indexedDB !== 'undefined';
 }
@@ -49,6 +57,10 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(AUDIO_STORE)) {
         const audioStore = db.createObjectStore(AUDIO_STORE, { keyPath: 'key' });
         audioStore.createIndex('project_id', 'project_id', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(CHAT_STORE)) {
+        const chatStore = db.createObjectStore(CHAT_STORE, { keyPath: 'thread_id' });
+        chatStore.createIndex('updated_at', 'updated_at', { unique: false });
       }
     };
 
@@ -204,9 +216,75 @@ export async function clearAllDrafts(): Promise<void> {
   if (!isBrowser()) return;
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction([DRAFTS_STORE, AUDIO_STORE], 'readwrite');
+    const stores = db.objectStoreNames.contains(CHAT_STORE)
+      ? [DRAFTS_STORE, AUDIO_STORE, CHAT_STORE]
+      : [DRAFTS_STORE, AUDIO_STORE];
+    const tx = db.transaction(stores, 'readwrite');
     tx.objectStore(DRAFTS_STORE).clear();
     tx.objectStore(AUDIO_STORE).clear();
+    if (db.objectStoreNames.contains(CHAT_STORE)) {
+      tx.objectStore(CHAT_STORE).clear();
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+export async function getChatThread(threadId: string): Promise<StoredChatThread | null> {
+  if (!isBrowser() || !threadId) return null;
+  const db = await openDatabase();
+  if (!db.objectStoreNames.contains(CHAT_STORE)) {
+    db.close();
+    return null;
+  }
+  const result = await new Promise<StoredChatThread | null>((resolve, reject) => {
+    const tx = db.transaction(CHAT_STORE, 'readonly');
+    const req = tx.objectStore(CHAT_STORE).get(threadId);
+    req.onsuccess = () => resolve((req.result as StoredChatThread | undefined) ?? null);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return result;
+}
+
+export async function saveChatThread(
+  threadId: string,
+  mode: CoachAssistantMode,
+  messages: CoachMessage[]
+): Promise<void> {
+  if (!isBrowser() || !threadId) return;
+  const db = await openDatabase();
+  if (!db.objectStoreNames.contains(CHAT_STORE)) {
+    db.close();
+    return;
+  }
+  const trimmed = messages.slice(-40);
+  const record: StoredChatThread = {
+    thread_id: threadId,
+    mode,
+    messages: trimmed,
+    updated_at: new Date().toISOString(),
+  };
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(CHAT_STORE, 'readwrite');
+    tx.objectStore(CHAT_STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+export async function deleteChatThread(threadId: string): Promise<void> {
+  if (!isBrowser() || !threadId) return;
+  const db = await openDatabase();
+  if (!db.objectStoreNames.contains(CHAT_STORE)) {
+    db.close();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(CHAT_STORE, 'readwrite');
+    tx.objectStore(CHAT_STORE).delete(threadId);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

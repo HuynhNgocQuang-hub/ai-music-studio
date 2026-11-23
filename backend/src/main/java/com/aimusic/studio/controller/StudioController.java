@@ -31,20 +31,29 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @RestController
 public class StudioController {
 
+    private static final long MAX_CHAT_AUDIO_BYTES = 10L * 1024L * 1024L;
     private final CoachLyricistAgent coachLyricistAgent;
     private final ProjectStateStore store;
     private final AudioWorkerClient audioWorkerClient;
     private final JavaAudioFallbackService audioFallback;
     private final ObjectMapper objectMapper;
+    private final ExecutorService chatStreamExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "coach-sse-worker");
+        t.setDaemon(true);
+        return t;
+    });
 
     public StudioController(
             CoachLyricistAgent coachLyricistAgent,
@@ -85,12 +94,113 @@ public class StudioController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "message is required");
         }
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
+        byte[] attachedAudio = resolveProjectAudioIfRequested(state, req.getContext());
         LlmContextHolder.set(LlmContextHolder.extractFromRequest(request));
         try {
-            return coachLyricistAgent.chatCoach(state, req.getMessage(), req.getHistory(), req.getMode());
+            return coachLyricistAgent.chatCoach(
+                    state, req.getMessage(), req.getHistory(), req.getMode(),
+                    req.getRoute(), req.getContext(), attachedAudio, "audio/wav");
         } finally {
             LlmContextHolder.clear();
         }
+    }
+
+    @PostMapping(value = "/api/coach/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter chatWithCoachStream(@RequestBody CoachChatRequest req, HttpServletRequest request) {
+        if (req.getProjectId() == null || req.getProjectId().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
+        }
+        if (req.getMessage() == null || req.getMessage().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "message is required");
+        }
+        ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
+        byte[] attachedAudio = resolveProjectAudioIfRequested(state, req.getContext());
+        LlmContextHolder.LlmOverrides llmOverrides = LlmContextHolder.extractFromRequest(request);
+
+        SseEmitter emitter = new SseEmitter(60_000L);
+        chatStreamExecutor.execute(() -> {
+            LlmContextHolder.set(llmOverrides);
+            try {
+                CoachChatResponse full = coachLyricistAgent.chatCoach(
+                        state, req.getMessage(), req.getHistory(), req.getMode(),
+                        req.getRoute(), req.getContext(), attachedAudio, "audio/wav");
+
+                String reply = full.getReply() != null ? full.getReply() : "";
+                String[] tokens = reply.split("(?<=\\s)");
+                StringBuilder batch = new StringBuilder();
+                for (int i = 0; i < tokens.length; i++) {
+                    batch.append(tokens[i]);
+                    if ((i + 1) % 3 == 0 || i == tokens.length - 1) {
+                        emitter.send(SseEmitter.event().name("chunk")
+                                .data(Map.of("text", batch.toString())));
+                        batch.setLength(0);
+                    }
+                }
+                emitter.send(SseEmitter.event().name("actions")
+                        .data(Map.of(
+                                "provider", full.getProvider() != null ? full.getProvider() : "mock",
+                                "suggested_actions", full.getSuggestedActions())));
+                emitter.send(SseEmitter.event().name("done").data(full));
+                emitter.complete();
+            } catch (Exception ex) {
+                try {
+                    emitter.send(SseEmitter.event().name("error")
+                            .data(Map.of("message", ex.getMessage() != null ? ex.getMessage() : "Chatbot stream error.")));
+                } catch (IOException ignored) {}
+                emitter.complete();
+            } finally {
+                LlmContextHolder.clear();
+            }
+        });
+        return emitter;
+    }
+
+    @PostMapping(value = "/api/coach/chat/audio", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public CoachChatResponse chatWithCoachAudio(
+            @RequestParam("project_id") String projectId,
+            @RequestParam("message") String message,
+            @RequestParam(value = "mode", defaultValue = "producer") String mode,
+            @RequestParam(value = "route", defaultValue = "") String route,
+            @RequestParam(value = "file", required = false) MultipartFile file,
+            HttpServletRequest request
+    ) throws IOException {
+        if (projectId == null || projectId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
+        }
+        if (message == null || message.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "message is required");
+        }
+        byte[] audioBytes = null;
+        String audioMime = "audio/wav";
+        if (file != null && !file.isEmpty()) {
+            if (file.getSize() > MAX_CHAT_AUDIO_BYTES) {
+                throw new AudioValidationException("Chat audio exceeds maximum 10 MB.", HttpStatus.PAYLOAD_TOO_LARGE);
+            }
+            audioBytes = file.getBytes();
+            if (file.getContentType() != null && !file.getContentType().isBlank()) {
+                audioMime = file.getContentType();
+            }
+        }
+        ProjectState state = loadProjectState(projectId, null);
+        if (audioBytes == null) {
+            audioBytes = resolveVocalBytes(state, null);
+        }
+        LlmContextHolder.set(LlmContextHolder.extractFromRequest(request));
+        try {
+            return coachLyricistAgent.chatCoach(
+                    state, message, java.util.List.of(), mode, route, null, audioBytes, audioMime);
+        } finally {
+            LlmContextHolder.clear();
+        }
+    }
+
+    private byte[] resolveProjectAudioIfRequested(ProjectState state, Map<String, Object> context) {
+        if (context == null || context.isEmpty()) return null;
+        Object attach = context.get("attach_project_audio");
+        if (Boolean.TRUE.equals(attach) || "true".equalsIgnoreCase(String.valueOf(attach))) {
+            return resolveVocalBytes(state, null);
+        }
+        return null;
     }
 
     private static final long MAX_OVERDUB_UPLOAD_BYTES = 50L * 1024L * 1024L;

@@ -73,8 +73,10 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
    * **Tab 3 — `Console Mixer`:** Đổi nhạc cụ trực tiếp, **3-Band EQ (`low_db`, `mid_db`, `high_db`)** lưu bền vững vào backend, **FX SEND (`reverb_send`, `delay_send`)** riêng cho `Vocal` & `Lead`, Pan, Vertical Fader `0–120%`, 12-LED Meter, **`FX BUS`** return strip (`Hall Reverb` + `1/8D Ping-Pong Delay` + `BYPASS`), và **MASTER Bus** (`Auto-Mix` với Vocal Frequency Carve 2.2 kHz `-2.5 dB` + Limiter `<= -1.0 dBFS`).
    * **Tab 4 — `Auto-Tune DSP`:** Root, Scale, Retune Speed (`0–200ms`), Humanize, Mix %, Auto-Follow Project Key (tự re-tune debounced khi đổi Project Key/Scale).
    * **Tab 5 — `Lyrics & Karaoke`:** Đầy đủ CRUD (`+ Thêm dòng`, sửa `section` / `bar` / nội dung, nhảy nhanh `▶ b{bar}`, `Xóa dòng`) + AI Gợi ý lời & Karaoke Sync live.
-4. **Panel Phải (`AiCoachChatDrawer.tsx` — AI Music Chatbot & Fit Check):**
-   * Hỗ trợ **4 chế độ trợ lý AI (`Producer | Hòa âm | Viết lời | Mix / Tune`)** với bộ Quick Prompts theo chế độ, nhớ 6 lượt hội thoại gần nhất, badge hiển thị Provider (`gemini` / `openai` / `mock`), nút Xóa lịch sử chat, và **1-Click Suggested Actions** (`suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `regenerate_track`, `update_config`).
+4. **Panel Phải (`AiCoachChatDrawer.tsx` — Global AI Music Copilot & Fit Check):**
+   * Hoạt động đồng bộ trên **mọi màn hình** (`/`, `/create`, `/library`, `/settings`, `/studio/:id`) từ Activity Rail / Header với **4 chế độ chuyên sâu (`Producer | Hòa âm | Viết lời | Mix / Tune`)**, lưu bền vững hội thoại qua **IndexedDB `chat_threads`** (v2).
+   * Truyền trực tiếp **Live SSE Streaming** (`/api/coach/chat/stream`), hỗ trợ **Multimodal Audio Input** (nhấn đính kèm file audio `<= 10 MB`, bật **`Gửi kèm Vocal để AI nghe`**, hoặc nút Mic dùng Web Speech `vi-VN` / ghi âm WAV).
+   * Hỗ trợ **13+ Native Tool Actions** (`set_track_mix`, `edit_structure_and_dynamics`, `update_lyrics_lines`, `suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `auto_trim_vocal`, `regenerate_track`, `update_config`, `navigate_tab`, `create_template`, `export_project`, `test_health`), nút **`Áp dụng tất cả`**, và **`Hoàn tác` (1-Click Revert)** khôi phục snapshot trước khi bấm.
    * Hiển thị phân tích tự động mỗi khi thu đè (`Overdub`) lên beat (lệch nhịp `±ms`, chênh tông, mức Gain) kèm nút **1-Click Apply**.
 
 #### Trang C: `/library` (`LibraryPage.tsx`) & Trang Chủ `/` (`HomePage.tsx`)
@@ -120,7 +122,9 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 | `POST /api/studio/auto-mix` | Cân bằng Gain, Pan từng track & bật Master Limiter (`<= -1.0 dBFS`) | `{ project_id }` $\rightarrow$ `project_state`, `mix_notes`, `summary` |
 | `POST /api/studio/overdub-fit-check` | Upload clip thu đè lên beat & chạy AI Fit Check | Trả về `timing_offset_ms`, `pitch_issues[]`, `gain_suggestion`, danh sách **1-Click Fixes** |
 | `POST /api/lyrics/suggest` | Sinh/gợi ý lời bài hát khớp đoạn & tiết tấu | `{ project_id, language, topic, section }` $\rightarrow$ `lines[]` |
-| `POST /api/coach/chat` | Trợ lý AI Music Chatbot đa chế độ (`producer`, `arrangement`, `lyricist`, `mix`) kèm lịch sử & ngữ cảnh State | `{ project_id, mode, message, history }` $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
+| `POST /api/coach/chat` | Trợ lý AI Music Copilot (`producer`, `arrangement`, `lyricist`, `mix`) + Mini-RAG `DawPlaybook` + 13 Tool Declarations | `{ project_id, route, mode, message, context, project_state, history }` $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
+| `POST /api/coach/chat/stream` | **SSE Streaming** phản hồi Chatbot theo chunk từ trên mọi màn hình + push `suggested_actions` cuối luồng | `{ project_id, route, mode, message, context, project_state, history }` $\rightarrow$ `text/event-stream` (`chunk`, `actions`, `done`, `error`) |
+| `POST /api/coach/chat/audio` | Tiếp nhận file/mic WAV đính kèm (`<= 10 MB`, > 10 MB trả `413`) cho Gemini Multimodal hoặc Java DSP Telemetry | Multipart (`project_id`, `message`, `mode`, `route`, `file`) $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
 
 ### 3.4. Nhóm Persistence, CRUD, Sync & Export
 | Method & Endpoint | Mục đích | Payload / Output chính |

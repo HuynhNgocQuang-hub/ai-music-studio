@@ -36,7 +36,6 @@ import {
   autoTrimVocal,
   autotuneAudio,
   cancelJob,
-  chatWithCoach,
   denoiseAudio,
   exportAimusic,
   exportAudio,
@@ -73,7 +72,6 @@ import {
 } from '@/lib/music/presets';
 import { getAudioBlob, getDraft, markDraftSaved, saveAudioBlob } from '@/lib/storage/indexeddb';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
-import AiCoachChatDrawer from '@/components/studio/AiCoachChatDrawer';
 import ConsoleMixerPanel from '@/components/studio/ConsoleMixerPanel';
 import PianoRollEditor from '@/components/studio/PianoRollEditor';
 import QuickStudioView from '@/components/studio/QuickStudioView';
@@ -84,14 +82,12 @@ import type {
   AutoTunePreset,
   AutotuneSettings,
   ChordEvent,
-  CoachAssistantMode,
-  CoachMessage,
   CoachSuggestedAction,
+  LyricLine,
   MelodyMode,
   MotifPosition,
   OneClickFix,
   OutputMode,
-  OverdubFitCheckResponse,
   ProjectState,
   StructurePreset,
 } from '@/types/project';
@@ -122,8 +118,19 @@ export default function StudioPage() {
   const navigate = useNavigate();
   const params = useParams<{ id: string }>();
   const routeId = params?.id ? decodeURIComponent(params.id) : '';
-  const { project, updateProject, loadProjectIntoSession, saveNow, autoSaveStatus } =
-    useProjectSession();
+  const {
+    project,
+    updateProject,
+    loadProjectIntoSession,
+    saveNow,
+    autoSaveStatus,
+    copilotOpen,
+    setCopilotOpen,
+    setLatestFitCheck,
+    studioUiMeta,
+    setStudioUiMeta,
+    registerCoachExecutor,
+  } = useProjectSession();
   const engine = useMemo(() => getAudioEngine(), []);
   const latestProjectRef = useRef(project);
   latestProjectRef.current = project;
@@ -147,9 +154,13 @@ export default function StudioPage() {
   }>({ reverbReturn: 1.0, delayReturn: 1.0, bypassed: false });
   const [activeTab, setActiveTab] = useState<
     'sequencer' | 'piano_roll' | 'mixer' | 'autotune' | 'lyrics'
-  >('sequencer');
+  >(() => {
+    const t = studioUiMeta.activeTab;
+    return t === 'piano_roll' || t === 'mixer' || t === 'autotune' || t === 'lyrics'
+      ? t
+      : 'sequencer';
+  });
   const [selectedTrack, setSelectedTrack] = useState<'drums' | 'bass' | 'harmony' | 'lead'>('harmony');
-  const [coachOpen, setCoachOpen] = useState(false);
 
   // Undo / Redo (up to 20 snapshots)
   const [undoStack, setUndoStack] = useState<ProjectState[]>([]);
@@ -195,29 +206,18 @@ export default function StudioPage() {
     };
   }, [exportMenuOpen]);
 
-  // Overdub & AI Fit Check
+  // Overdub & Lyrics state (Global AI Copilot lives in ProjectProvider / AppShell)
   const [isOverdubbing, setIsOverdubbing] = useState(false);
-  const [fitCheck, setFitCheck] = useState<OverdubFitCheckResponse | null>(null);
   const [lastOverdubClipId, setLastOverdubClipId] = useState<string | null>(null);
-  const [appliedFixIds, setAppliedFixIds] = useState<string[]>([]);
   const overdubRecorderRef = useRef<MediaRecorder | null>(null);
   const sseCleanupRef = useRef<(() => void) | null>(null);
 
-  // Lyrics & AI Coach
   const [lyricTopic, setLyricTopic] = useState('Ký ức mùa hè');
   const [lyricLoading, setLyricLoading] = useState(false);
-  const [coachMode, setCoachMode] = useState<CoachAssistantMode>('producer');
-  const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([
-    {
-      role: 'assistant',
-      content:
-        'Xin chào! Tôi là AI Music Chatbot đa chế độ (Producer / Hòa âm / Viết lời / Mix & Tune). Chọn chế độ bên trên hoặc hỏi trực tiếp để nhận đề xuất áp dụng 1 chạm.',
-    },
-  ]);
-  const [coachInput, setCoachInput] = useState('');
-  const [coachLoading, setCoachLoading] = useState(false);
-  const [appliedCoachActions, setAppliedCoachActions] = useState<string[]>([]);
-  const [applyingCoachActionKey, setApplyingCoachActionKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setStudioUiMeta({ studioMode, activeTab });
+  }, [studioMode, activeTab, setStudioUiMeta]);
 
   // Load project from IndexedDB or Backend only when routeId changes
   useEffect(() => {
@@ -826,15 +826,14 @@ export default function StudioPage() {
             await engine.loadAudioFromBlob(cacheKey, wavBlob);
 
             setLastOverdubClipId(clip.id);
-            setAppliedFixIds([]);
             setUndoStack((s) => [...s.slice(-19), current]);
             setRedoStack([]);
             loadProjectIntoSession(clipRes.project_state, { dirty: true });
             await engine.syncFromProject(clipRes.project_state);
 
             const res = await overdubFitCheck(current.project_id, wavBlob);
-            setFitCheck(res);
-            setCoachOpen(true);
+            setLatestFitCheck(res);
+            setCopilotOpen(true);
             setStudioNotice('Đã upload bản thu Overdub và hoàn tất AI Fit Check.');
           } catch {
             const localClipId = `clip_overdub_${Date.now()}`;
@@ -912,7 +911,6 @@ export default function StudioPage() {
           },
         };
       });
-      setAppliedFixIds((prev) => (prev.includes(fix.id) ? prev : [...prev, fix.id]));
       setStudioNotice(`Đã dịch timing vocal ${shiftMs > 0 ? `+${shiftMs}` : shiftMs} ms.`);
       return;
     }
@@ -936,7 +934,6 @@ export default function StudioPage() {
         volume: nextVol,
         pan: current.tracks.vocal?.pan ?? 0.0,
       });
-      setAppliedFixIds((prev) => (prev.includes(fix.id) ? prev : [...prev, fix.id]));
       setStudioNotice(`Đã chỉnh Gain vocal (${deltaDb > 0 ? `+${deltaDb}` : deltaDb} dB → ${Math.round(nextVol * 100)}%).`);
       return;
     }
@@ -972,7 +969,6 @@ export default function StudioPage() {
         }));
         await engine.syncFromProject(updated, { forceSlots: ['autotune'] });
         engine.setABMode('autotune');
-        setAppliedFixIds((prev) => (prev.includes(fix.id) ? prev : [...prev, fix.id]));
         setStudioNotice(`Đã bật Auto-Tune (${preset}) theo ${nextSettings.key} ${nextSettings.scale}.`);
       } catch (err) {
         setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi áp dụng Auto-Tune 1-Click Fix.');
@@ -1040,240 +1036,359 @@ export default function StudioPage() {
     }
   };
 
-  const handleClearCoachChat = () => {
-    setCoachMessages([
-      {
-        role: 'assistant',
-        content:
-          'Đã làm mới cuộc trò chuyện. Hãy chọn chế độ (Producer / Hòa âm / Viết lời / Mix) và đặt câu hỏi bất kỳ về dự án hiện tại!',
-      },
-    ]);
-    setAppliedCoachActions([]);
-  };
-
-  const handleSendCoach = async (overrideText?: string) => {
-    const msg = (overrideText ?? coachInput).trim();
-    if (!msg) return;
-    const nextHistory: CoachMessage[] = [
-      ...coachMessages,
-      { role: 'user', content: msg, timestamp: new Date().toISOString() },
-    ];
-    setCoachMessages(nextHistory);
-    if (overrideText === undefined) {
-      setCoachInput('');
-    }
-    setCoachLoading(true);
-    try {
-      try {
-        await saveNow(true);
-      } catch {
-        // Proceed and let chatWithCoach report connection/API status
-      }
-      const res = await chatWithCoach({
-        project_id: project.project_id,
-        message: msg,
-        mode: coachMode,
-        history: nextHistory,
-      });
-      setCoachMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: res.reply,
-          provider: res.provider,
-          timestamp: new Date().toISOString(),
-          suggested_actions: res.suggested_actions,
-        },
-      ]);
-    } catch (err) {
-      setCoachMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: err instanceof ApiError ? `Lỗi: ${err.detail}` : 'AI Coach hiện không phản hồi.',
-        },
-      ]);
-    } finally {
-      setCoachLoading(false);
-    }
-  };
-
-  const handleApplyCoachAction = async (msgIdx: number, act: CoachSuggestedAction) => {
-    const actionKey = `${msgIdx}:${act.id}`;
-    if (appliedCoachActions.includes(actionKey)) return;
-    setApplyingCoachActionKey(actionKey);
+  const handleExecuteStudioCoachAction = async (
+    act: CoachSuggestedAction
+  ): Promise<{ notice?: string; revertable?: boolean }> => {
     const payload = act.payload ?? {};
     const current = latestProjectRef.current;
 
-    try {
-      if (act.action === 'auto_mix') {
-        await handleAutoMix();
-        setAppliedCoachActions((prev) => [...prev, actionKey]);
-        return;
+    if (act.action === 'apply_fit_fix' && payload.fix) {
+      await handleApplyOneClickFix(payload.fix as OneClickFix);
+      return { notice: `Đã áp dụng Fit Fix: ${act.label}`, revertable: true };
+    }
+    if (act.action === 'auto_mix') {
+      await handleAutoMix();
+      return { notice: 'Đã chạy AI Auto-Mix (-1.0 dBFS).', revertable: true };
+    }
+    if (act.action === 'auto_trim_vocal') {
+      await handleAutoTrimVocal();
+      return { notice: 'Đã chạy AI Auto-Trim Vocal.', revertable: true };
+    }
+    if (act.action === 'navigate_tab') {
+      const targetTab = String(payload.tab || 'mixer');
+      if (
+        targetTab === 'sequencer' ||
+        targetTab === 'piano_roll' ||
+        targetTab === 'mixer' ||
+        targetTab === 'autotune' ||
+        targetTab === 'lyrics'
+      ) {
+        setStudioMode('pro');
+        setDockOpen(true);
+        setActiveTab(targetTab);
+        return { notice: `Đã chuyển sang tab ${targetTab}.`, revertable: false };
       }
-      if (act.action === 'auto_trim_vocal') {
-        await handleAutoTrimVocal();
-        setAppliedCoachActions((prev) => [...prev, actionKey]);
-        return;
+      return { notice: 'Đã mở Pro DAW Dock.', revertable: false };
+    }
+    if (act.action === 'export_project') {
+      const fmt = String(payload.format || 'mp3').toLowerCase();
+      if (fmt === 'aimusic') {
+        await handleSaveAimusic();
+        return { notice: 'Đang tải xuống file .aimusic.', revertable: false };
       }
-      if (act.action === 'suggest_lyrics') {
-        const res = await suggestLyrics({
-          project_id: current.project_id,
-          language: typeof payload.language === 'string' ? payload.language : current.lyrics.language || 'vi',
-          topic: typeof payload.topic === 'string' ? payload.topic : lyricTopic || 'Ký ức & Hy vọng',
-          section: typeof payload.section === 'string' ? payload.section : 'Chorus',
-        });
-        mutateWithUndo((prev) => ({
-          ...prev,
-          lyrics: { ...prev.lyrics, lines: res.lines },
-        }));
-        setAppliedCoachActions((prev) => [...prev, actionKey]);
-        setActiveTab('lyrics');
-        setStudioNotice(`AI Chatbot đã gợi ý lời (${res.lines.length} câu) & cập nhật vào tab Lyrics.`);
-        return;
-      }
-      if (act.action === 'regenerate_track') {
-        const targetTrack = typeof payload.target_track === 'string' ? payload.target_track : 'drums';
-        setAppliedCoachActions((prev) => [...prev, actionKey]);
-        await handleRegenerateTrack(targetTrack);
-        return;
-      }
-
-      if (act.action === 'apply_autotune' || act.action === 'update_autotune' || payload.autotune_settings || payload.preset) {
-        const rawPreset = String(
-          (payload.autotune_settings as Partial<AutotuneSettings> | undefined)?.preset ||
-          payload.preset ||
-          (current.autotune_settings.preset === 'off' ? 'balanced' : current.autotune_settings.preset)
-        ) as AutoTunePreset;
-        const preset: AutoTunePreset =
-          rawPreset === 'off' || rawPreset === 'natural' || rawPreset === 'balanced' || rawPreset === 'modern'
-            ? rawPreset
-            : 'balanced';
-        const isOff = preset === 'off';
-        const nextSettings: AutotuneSettings = {
-          ...current.autotune_settings,
-          ...(typeof payload.autotune_settings === 'object' && payload.autotune_settings
-            ? (payload.autotune_settings as Partial<AutotuneSettings>)
-            : {}),
-          enabled: !isOff,
-          preset,
-          key: typeof payload.key === 'string' ? payload.key : current.autotune_settings.key,
-          scale: typeof payload.scale === 'string' ? payload.scale : current.autotune_settings.scale,
-          mix_percent: isOff ? 0 : current.autotune_settings.mix_percent || 85,
-        };
-        const nextState = mutateWithUndo((prev) => ({
-          ...prev,
-          autotune_settings: nextSettings,
-          ...(isOff ? { audio_assets: { ...prev.audio_assets, tuned_vocal_ref: null } } : {}),
-        }));
-        await saveNow(true, nextState);
-        const res = await autotuneAudio({
-          project_id: current.project_id,
-          autotune_settings: nextSettings,
-        });
-        const updated = updateProject((prev) => ({
-          ...prev,
-          autotune_settings: nextSettings,
-          audio_assets: { ...prev.audio_assets, tuned_vocal_ref: isOff ? null : res.tuned_vocal_ref },
-        }));
-        await engine.syncFromProject(updated, isOff ? undefined : { forceSlots: ['autotune'] });
-        engine.setABMode(isOff ? 'dry' : 'autotune');
-        setAppliedCoachActions((prev) => [...prev, actionKey]);
-        setStudioNotice(`Đã áp dụng đề xuất Coach: ${act.label}`);
-        return;
-      }
-
-      if (act.action === 'rearrange_chords' || Array.isArray(payload.chords)) {
-        let nextChords: ChordEvent[] = current.song_structure.chords;
-        if (Array.isArray(payload.chords) && payload.chords.length > 0) {
-          nextChords = payload.chords as ChordEvent[];
-        } else {
-          const rootIdx = Math.max(0, KEYS.indexOf(current.analysis.detected_key));
-          const prog = [
-            `${KEYS[(rootIdx + 9) % 12]}m`,
-            KEYS[(rootIdx + 5) % 12],
-            KEYS[rootIdx],
-            KEYS[(rootIdx + 7) % 12],
-          ];
-          const totalBars = Math.max(4, current.song_structure.total_bars || 8);
-          const beatsPerChord = getBeatsPerBar(current.analysis.time_signature);
-          nextChords = Array.from({ length: totalBars }, (_, barIdx) => ({
-            bar: barIdx + 1,
-            beat: 1,
-            symbol: prog[barIdx % prog.length],
-            duration_beats: beatsPerChord,
-          }));
-        }
-        const nextState = mutateWithUndo((prev) => ({
-          ...prev,
-          song_structure: { ...prev.song_structure, chords: nextChords },
-        }));
-        setChordsDirty(true);
-        await saveNow(true, nextState);
-        setAppliedCoachActions((prev) => [...prev, actionKey]);
-        setStudioNotice(`Đã cập nhật hợp âm theo Coach (${act.label}). Đang đồng bộ hòa âm...`);
-        await handleRearrangeChords();
-        return;
-      }
-
+      const kind = fmt === 'wav' || fmt === 'stems' || fmt === 'midi' ? fmt : 'mp3';
+      const bitrate = payload.bitrate === '192k' ? '192k' : '320k';
+      await handleExport(kind, bitrate);
+      return { notice: `Đã xuất file ${kind.toUpperCase()}.`, revertable: false };
+    }
+    if (act.action === 'set_track_mix') {
+      const tid = String(payload.track_id || 'vocal');
       const nextState = mutateWithUndo((prev) => {
-        const nextConfig = { ...prev.config };
-        const nextAnalysis = { ...prev.analysis };
-        let nextAutotune = prev.autotune_settings;
+        const currTrack = prev.tracks[tid];
+        if (!currTrack) return prev;
+        const nextVol =
+          typeof payload.volume === 'number'
+            ? Math.max(0, Math.min(1.2, payload.volume))
+            : currTrack.volume ?? 0.85;
+        const nextPan =
+          typeof payload.pan === 'number'
+            ? Math.max(-1, Math.min(1, payload.pan))
+            : currTrack.pan ?? 0;
+        const nextLow =
+          typeof payload.low_db === 'number'
+            ? Math.max(-12, Math.min(12, payload.low_db))
+            : currTrack.low_db ?? 0;
+        const nextMid =
+          typeof payload.mid_db === 'number'
+            ? Math.max(-12, Math.min(12, payload.mid_db))
+            : currTrack.mid_db ?? 0;
+        const nextHigh =
+          typeof payload.high_db === 'number'
+            ? Math.max(-12, Math.min(12, payload.high_db))
+            : currTrack.high_db ?? 0;
+        const nextRev =
+          typeof payload.reverb_send === 'number'
+            ? Math.max(0, Math.min(1, payload.reverb_send))
+            : currTrack.reverb_send ?? 0;
+        const nextDly =
+          typeof payload.delay_send === 'number'
+            ? Math.max(0, Math.min(1, payload.delay_send))
+            : currTrack.delay_send ?? 0;
+        const nextMute = typeof payload.mute === 'boolean' ? payload.mute : Boolean(currTrack.mute);
+        const nextSolo = typeof payload.solo === 'boolean' ? payload.solo : Boolean(currTrack.solo);
 
-        if (typeof payload.motif_position === 'string') {
-          nextConfig.motif_position = payload.motif_position as MotifPosition;
-        }
-        if (typeof payload.output_mode === 'string') {
-          nextConfig.output_mode = payload.output_mode as OutputMode;
-        }
-        if (typeof payload.melody_mode === 'string') {
-          nextConfig.melody_mode = payload.melody_mode as MelodyMode;
-        }
-        if (typeof payload.structure_preset === 'string') {
-          nextConfig.structure_preset = payload.structure_preset as StructurePreset;
-        }
-        if (typeof payload.genre === 'string') nextConfig.genre = payload.genre;
-        if (typeof payload.mood === 'string') nextConfig.mood = payload.mood;
-
-        if (typeof payload.bpm === 'number' && Number.isFinite(payload.bpm)) {
-          const clampedBpm = Math.max(40, Math.min(220, Math.round(payload.bpm)));
-          nextAnalysis.bpm = clampedBpm;
-          nextAnalysis.bpm_locked = true;
-          engine.setBpm(clampedBpm);
-        }
-        if (typeof payload.key === 'string') {
-          nextAnalysis.detected_key = payload.key;
-          nextAnalysis.key_locked = true;
-          if (nextAutotune.auto_follow_project_key) {
-            nextAutotune = { ...nextAutotune, key: payload.key };
-          }
-        }
-        if (typeof payload.scale === 'string') {
-          nextAnalysis.detected_scale = payload.scale;
-          nextAnalysis.key_locked = true;
-          if (nextAutotune.auto_follow_project_key) {
-            nextAutotune = { ...nextAutotune, scale: payload.scale };
-          }
-        }
+        engine.setChannelConfig({ id: tid, mute: nextMute, solo: nextSolo, volume: nextVol, pan: nextPan });
+        engine.setChannelEq(tid, { lowDb: nextLow, midDb: nextMid, highDb: nextHigh });
+        engine.setChannelSends(tid, { reverbSend: nextRev, delaySend: nextDly });
 
         return {
           ...prev,
-          config: nextConfig,
-          analysis: nextAnalysis,
-          autotune_settings: nextAutotune,
+          tracks: {
+            ...prev.tracks,
+            [tid]: {
+              ...currTrack,
+              volume: nextVol,
+              pan: nextPan,
+              mute: nextMute,
+              solo: nextSolo,
+              low_db: nextLow,
+              mid_db: nextMid,
+              high_db: nextHigh,
+              reverb_send: nextRev,
+              delay_send: nextDly,
+              ...(currTrack.type === 'midi' && typeof payload.instrument === 'string'
+                ? { instrument: payload.instrument }
+                : {}),
+            },
+          },
         };
       });
-
       await saveNow(true, nextState);
-      setAppliedCoachActions((prev) => [...prev, actionKey]);
-      setStudioNotice(`Đã áp dụng đề xuất Coach: ${act.label}`);
-    } catch (err) {
-      setStudioNotice(err instanceof ApiError ? err.detail : `Lỗi áp dụng đề xuất: ${act.label}`);
-    } finally {
-      setApplyingCoachActionKey(null);
+      if (typeof payload.instrument === 'string') {
+        await engine.syncFromProject(nextState);
+      }
+      setStudioNotice(`Copilot đã chỉnh Mix/EQ track ${tid.toUpperCase()}.`);
+      return { notice: `Đã chỉnh Mix/EQ cho ${tid.toUpperCase()}.`, revertable: true };
     }
+    if (act.action === 'edit_structure_and_dynamics') {
+      const nextState = mutateWithUndo((prev) => {
+        let nextTimeSig = prev.analysis.time_signature;
+        if (
+          payload.time_signature === '4/4' ||
+          payload.time_signature === '3/4' ||
+          payload.time_signature === '6/8'
+        ) {
+          nextTimeSig = payload.time_signature;
+        }
+        let nextSections = [...prev.song_structure.sections];
+        if (typeof payload.target_section === 'string' && typeof payload.section_energy === 'number') {
+          const tSec = payload.target_section.toLowerCase();
+          const val = Math.max(0.1, Math.min(1, payload.section_energy));
+          nextSections = nextSections.map((s) =>
+            s.name.toLowerCase().includes(tSec) ? { ...s, energy: val } : s
+          );
+        }
+        let nextTotalBars = prev.song_structure.total_bars;
+        if (typeof payload.add_section_name === 'string' && payload.add_section_name.trim()) {
+          const bars = Math.max(1, Math.min(16, Number(payload.section_bars) || 4));
+          const last = nextSections[nextSections.length - 1];
+          const startBar = last ? last.start_bar + last.bars : 1;
+          nextSections.push({
+            name: payload.add_section_name.trim(),
+            start_bar: startBar,
+            bars,
+            energy: typeof payload.section_energy === 'number' ? Math.max(0.1, Math.min(1, payload.section_energy)) : 0.78,
+          });
+          nextTotalBars = Math.max(4, startBar + bars - 1);
+        }
+        return {
+          ...prev,
+          analysis: { ...prev.analysis, time_signature: nextTimeSig },
+          song_structure: {
+            ...prev.song_structure,
+            total_bars: nextTotalBars,
+            sections: nextSections,
+          },
+        };
+      });
+      await saveNow(true, nextState);
+      if (payload.time_signature === '6/8' || payload.time_signature === '3/4' || payload.time_signature === '4/4') {
+        setStudioMode('pro');
+        setDockOpen(true);
+        setActiveTab('sequencer');
+      }
+      setStudioNotice(`Đã cập nhật Cấu trúc / Dynamics (${act.label}).`);
+      return { notice: `Đã cập nhật Cấu trúc & Dynamics.`, revertable: true };
+    }
+    if (act.action === 'update_lyrics_lines' && Array.isArray(payload.lines)) {
+      const incoming = payload.lines
+        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+        .map((item, i) => ({
+          section: typeof item.section === 'string' ? item.section : 'Chorus',
+          bar: Math.max(1, Number(item.bar) || i + 1),
+          text: String(item.text || '').trim(),
+        }))
+        .filter((l) => l.text.length > 0);
+      if (incoming.length > 0) {
+        const nextState = mutateWithUndo((prev) => ({
+          ...prev,
+          lyrics: { ...prev.lyrics, lines: incoming },
+        }));
+        await saveNow(true, nextState);
+        setStudioMode('pro');
+        setDockOpen(true);
+        setActiveTab('lyrics');
+        setStudioNotice(`Copilot đã cập nhật ${incoming.length} câu lời vào Lyrics & Karaoke.`);
+        return { notice: `Đã cập nhật ${incoming.length} câu lời.`, revertable: true };
+      }
+    }
+    if (act.action === 'suggest_lyrics') {
+      const res = await suggestLyrics({
+        project_id: current.project_id,
+        language: typeof payload.language === 'string' ? payload.language : current.lyrics.language || 'vi',
+        topic: typeof payload.topic === 'string' ? payload.topic : lyricTopic || 'Ký ức & Hy vọng',
+        section: typeof payload.section === 'string' ? payload.section : 'Chorus',
+      });
+      mutateWithUndo((prev) => ({
+        ...prev,
+        lyrics: { ...prev.lyrics, lines: res.lines },
+      }));
+      setStudioMode('pro');
+      setDockOpen(true);
+      setActiveTab('lyrics');
+      setStudioNotice(`AI Copilot đã gợi ý lời (${res.lines.length} câu) & cập nhật vào tab Lyrics.`);
+      return { notice: `Đã gợi ý ${res.lines.length} câu lời mới.`, revertable: true };
+    }
+    if (act.action === 'regenerate_track') {
+      const targetTrack = typeof payload.target_track === 'string' ? payload.target_track : 'drums';
+      await handleRegenerateTrack(targetTrack);
+      return { notice: `Đang tái tạo lại track ${targetTrack.toUpperCase()}...`, revertable: true };
+    }
+    if (act.action === 'apply_autotune' || act.action === 'update_autotune' || payload.autotune_settings || payload.preset) {
+      const rawPreset = String(
+        (payload.autotune_settings as Partial<AutotuneSettings> | undefined)?.preset ||
+          payload.preset ||
+          (current.autotune_settings.preset === 'off' ? 'balanced' : current.autotune_settings.preset)
+      ) as AutoTunePreset;
+      const preset: AutoTunePreset =
+        rawPreset === 'off' || rawPreset === 'natural' || rawPreset === 'balanced' || rawPreset === 'modern'
+          ? rawPreset
+          : 'balanced';
+      const isOff = preset === 'off';
+      const nextSettings: AutotuneSettings = {
+        ...current.autotune_settings,
+        ...(typeof payload.autotune_settings === 'object' && payload.autotune_settings
+          ? (payload.autotune_settings as Partial<AutotuneSettings>)
+          : {}),
+        enabled: !isOff,
+        preset,
+        key: typeof payload.key === 'string' ? payload.key : current.autotune_settings.key,
+        scale: typeof payload.scale === 'string' ? payload.scale : current.autotune_settings.scale,
+        mix_percent: isOff ? 0 : current.autotune_settings.mix_percent || 85,
+      };
+      const nextState = mutateWithUndo((prev) => ({
+        ...prev,
+        autotune_settings: nextSettings,
+        ...(isOff ? { audio_assets: { ...prev.audio_assets, tuned_vocal_ref: null } } : {}),
+      }));
+      await saveNow(true, nextState);
+      const res = await autotuneAudio({
+        project_id: current.project_id,
+        autotune_settings: nextSettings,
+      });
+      const updated = updateProject((prev) => ({
+        ...prev,
+        autotune_settings: nextSettings,
+        audio_assets: { ...prev.audio_assets, tuned_vocal_ref: isOff ? null : res.tuned_vocal_ref },
+      }));
+      await engine.syncFromProject(updated, isOff ? undefined : { forceSlots: ['autotune'] });
+      engine.setABMode(isOff ? 'dry' : 'autotune');
+      setStudioNotice(`Đã áp dụng đề xuất Copilot: ${act.label}`);
+      return { notice: `Đã áp dụng Auto-Tune (${preset}).`, revertable: true };
+    }
+    if (act.action === 'rearrange_chords' || Array.isArray(payload.chords)) {
+      let nextChords: ChordEvent[] = current.song_structure.chords;
+      const totalBars = Math.max(4, current.song_structure.total_bars || 8);
+      const beatsPerChord = getBeatsPerBar(current.analysis.time_signature);
+      if (Array.isArray(payload.chords) && payload.chords.length > 0) {
+        if (typeof payload.chords[0] === 'string') {
+          const syms = payload.chords as string[];
+          nextChords = Array.from({ length: totalBars }, (_, barIdx) => ({
+            bar: barIdx + 1,
+            beat: 1,
+            symbol: syms[barIdx % syms.length],
+            duration_beats: beatsPerChord,
+          }));
+        } else {
+          nextChords = payload.chords as ChordEvent[];
+        }
+      } else {
+        const rootIdx = Math.max(0, KEYS.indexOf(current.analysis.detected_key));
+        const prog = [
+          `${KEYS[(rootIdx + 9) % 12]}m`,
+          KEYS[(rootIdx + 5) % 12],
+          KEYS[rootIdx],
+          KEYS[(rootIdx + 7) % 12],
+        ];
+        nextChords = Array.from({ length: totalBars }, (_, barIdx) => ({
+          bar: barIdx + 1,
+          beat: 1,
+          symbol: prog[barIdx % prog.length],
+          duration_beats: beatsPerChord,
+        }));
+      }
+      const nextState = mutateWithUndo((prev) => ({
+        ...prev,
+        song_structure: { ...prev.song_structure, chords: nextChords },
+      }));
+      setChordsDirty(true);
+      await saveNow(true, nextState);
+      setStudioNotice(`Đã cập nhật hợp âm theo Copilot (${act.label}). Đang đồng bộ hòa âm...`);
+      await handleRearrangeChords();
+      return { notice: 'Đã đổi hợp âm & đồng bộ track đệm.', revertable: true };
+    }
+
+    const nextState = mutateWithUndo((prev) => {
+      const nextConfig = { ...prev.config };
+      const nextAnalysis = { ...prev.analysis };
+      let nextAutotune = prev.autotune_settings;
+
+      if (typeof payload.motif_position === 'string') {
+        nextConfig.motif_position = payload.motif_position as MotifPosition;
+      }
+      if (typeof payload.output_mode === 'string') {
+        nextConfig.output_mode = payload.output_mode as OutputMode;
+      }
+      if (typeof payload.melody_mode === 'string') {
+        nextConfig.melody_mode = payload.melody_mode as MelodyMode;
+      }
+      if (typeof payload.structure_preset === 'string') {
+        nextConfig.structure_preset = payload.structure_preset as StructurePreset;
+      }
+      if (typeof payload.genre === 'string') nextConfig.genre = payload.genre;
+      if (typeof payload.mood === 'string') nextConfig.mood = payload.mood;
+
+      if (typeof payload.bpm === 'number' && Number.isFinite(payload.bpm)) {
+        const clampedBpm = Math.max(40, Math.min(220, Math.round(payload.bpm)));
+        nextAnalysis.bpm = clampedBpm;
+        nextAnalysis.bpm_locked = true;
+        engine.setBpm(clampedBpm);
+      }
+      if (typeof payload.key === 'string') {
+        nextAnalysis.detected_key = payload.key;
+        nextAnalysis.key_locked = true;
+        if (nextAutotune.auto_follow_project_key) {
+          nextAutotune = { ...nextAutotune, key: payload.key };
+        }
+      }
+      if (typeof payload.scale === 'string') {
+        nextAnalysis.detected_scale = payload.scale;
+        nextAnalysis.key_locked = true;
+        if (nextAutotune.auto_follow_project_key) {
+          nextAutotune = { ...nextAutotune, scale: payload.scale };
+        }
+      }
+
+      return {
+        ...prev,
+        config: nextConfig,
+        analysis: nextAnalysis,
+        autotune_settings: nextAutotune,
+      };
+    });
+
+    await saveNow(true, nextState);
+    setStudioNotice(`Đã áp dụng đề xuất Copilot: ${act.label}`);
+    return { notice: `Đã áp dụng: ${act.label}`, revertable: true };
   };
+
+  const coachExecutorRef = useRef(handleExecuteStudioCoachAction);
+  coachExecutorRef.current = handleExecuteStudioCoachAction;
+
+  useEffect(() => {
+    registerCoachExecutor((act) => coachExecutorRef.current(act));
+    return () => registerCoachExecutor(null);
+  }, [registerCoachExecutor]);
 
   const handleAutoTrimVocal = async () => {
     const current = latestProjectRef.current;
@@ -1962,9 +2077,9 @@ export default function StudioPage() {
 
           <button
             type="button"
-            onClick={() => setCoachOpen((o) => !o)}
-            title="Bật/Tắt AI Music Coach"
-            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${coachOpen
+            onClick={() => setCopilotOpen((o) => !o)}
+            title="Bật/Tắt AI Music Copilot"
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${copilotOpen
                 ? 'border-amber-400/50 bg-amber-500/20 text-amber-200'
                 : 'border-white/15 bg-[#232730] text-slate-300 hover:bg-white/10'
               }`}
@@ -2896,27 +3011,6 @@ export default function StudioPage() {
               )}
             </div>
           </div>
-
-          {/* 4. RIGHT DRAWER: AI MUSIC CHATBOT & OVERDUB FIT CHECK */}
-          {coachOpen && (
-            <AiCoachChatDrawer
-              assistantMode={coachMode}
-              onModeChange={setCoachMode}
-              messages={coachMessages}
-              inputValue={coachInput}
-              loading={coachLoading}
-              appliedActions={appliedCoachActions}
-              applyingActionKey={applyingCoachActionKey}
-              fitCheck={fitCheck}
-              appliedFixIds={appliedFixIds}
-              onClose={() => setCoachOpen(false)}
-              onInputChange={setCoachInput}
-              onSend={(overrideText) => void handleSendCoach(overrideText)}
-              onClearChat={handleClearCoachChat}
-              onApplyAction={(msgIdx, act) => void handleApplyCoachAction(msgIdx, act)}
-              onApplyFix={(fix) => void handleApplyOneClickFix(fix)}
-            />
-          )}
         </div>
       )}
     </div>

@@ -1054,3 +1054,62 @@ def test_end_to_end_full_lifecycle_workflow(api_client):
     assert measure_wav_peak_dbfs(restored_wav.content) <= -1.0 + 1e-4
 
     api_client.delete(f"/api/projects/{pid}")
+
+
+def test_full_spectrum_copilot_stream_and_audio(api_client):
+    """Verify Global + Studio AI Copilot: /api/coach/chat, SSE /stream, /audio DSP upload & 10MB guard."""
+    up = api_client.post(
+        "/api/audio/upload",
+        data={"title": "Copilot E2E Song", "mode": "hum"},
+        files={"file": ("hum.wav", make_sine_wav(duration_sec=3.5, freq_hz=330.0), "audio/wav")},
+    )
+    assert up.status_code == 200, up.text
+    pid = up.json()["project_id"]
+
+    # 1. Global Copilot on "/" recommends create_template
+    home_chat = api_client.post(
+        "/api/coach/chat",
+        headers={"X-LLM-Provider": "mock"},
+        json={"project_id": "__home__", "route": "/", "mode": "producer", "message": "Tạo beat Lo-fi mới", "history": []},
+    )
+    assert home_chat.status_code == 200, home_chat.text
+    assert any(a["action"] == "create_template" for a in home_chat.json().get("suggested_actions", []))
+
+    # 2. Live SSE streaming returns chunk + actions + done with set_track_mix
+    sse_resp = api_client.post(
+        "/api/coach/chat/stream",
+        headers={"X-LLM-Provider": "mock"},
+        json={
+            "project_id": pid,
+            "route": f"/studio/{pid}",
+            "mode": "mix",
+            "message": "Vocal hơi chói và hơi khô",
+            "history": [],
+        },
+        timeout=30.0,
+    )
+    assert sse_resp.status_code == 200, sse_resp.text
+    assert "text/event-stream" in sse_resp.headers.get("content-type", "")
+    assert "event:chunk" in sse_resp.text and "event:actions" in sse_resp.text and "event:done" in sse_resp.text
+    assert "set_track_mix" in sse_resp.text
+
+    # 3. Multimodal WAV upload returns DSP telemetry (dBFS)
+    audio_resp = api_client.post(
+        "/api/coach/chat/audio",
+        headers={"X-LLM-Provider": "mock"},
+        data={"project_id": pid, "mode": "mix", "route": f"/studio/{pid}", "message": "Nghe giúp vocal này"},
+        files={"file": ("vocal.wav", make_sine_wav(duration_sec=1.5, freq_hz=440.0), "audio/wav")},
+    )
+    assert audio_resp.status_code == 200, audio_resp.text
+    assert "dBFS" in audio_resp.json().get("reply", "")
+    assert len(audio_resp.json().get("suggested_actions", [])) >= 1
+
+    # 4. Oversized audio (> 10 MB) returns 413
+    too_big = api_client.post(
+        "/api/coach/chat/audio",
+        data={"project_id": pid, "message": "Too big"},
+        files={"file": ("big.wav", b"RIFF" + b"\x00" * (10 * 1024 * 1024 + 128), "audio/wav")},
+    )
+    assert too_big.status_code == 413, too_big.text
+
+    api_client.delete(f"/api/projects/{pid}")

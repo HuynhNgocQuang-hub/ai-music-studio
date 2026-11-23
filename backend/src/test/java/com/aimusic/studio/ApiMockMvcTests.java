@@ -700,4 +700,69 @@ class ApiMockMvcTests {
         mockMvc.perform(get("/api/projects/" + pid))
                 .andExpect(status().isNotFound());
     }
+
+    @Test
+    void fullSpectrumCopilotSseStreamAudioUploadAndGlobalRoutes() throws Exception {
+        String pid = "mock_copilot_" + System.currentTimeMillis();
+        ProjectState state = ProjectState.createDefault(pid, "Copilot Test");
+        state.getAnalysis().setBpm(98.0);
+        state.getAnalysis().setDetectedKey("Am");
+        state.getAnalysis().setDetectedScale("minor");
+        mockMvc.perform(put("/api/projects/" + pid + "/sync")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(state)))
+                .andExpect(status().isOk());
+
+        // 1. Global Copilot on "/" suggests create_template
+        mockMvc.perform(post("/api/coach/chat")
+                        .header("X-LLM-Provider", "mock")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"__home__\",\"route\":\"/\",\"message\":\"Tạo template Ballad mới\",\"history\":[]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.suggested_actions[0].action").value("create_template"));
+
+        // 2. SSE live token streaming returns chunk + actions + done
+        MvcResult streamMvc = mockMvc.perform(post("/api/coach/chat/stream")
+                        .header("X-LLM-Provider", "mock")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"route\":\"/studio/" + pid + "\",\"mode\":\"mix\",\"message\":\"Vocal hơi chói và hơi khô\",\"history\":[]}"))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        String sseBody = mockMvc.perform(asyncDispatch(streamMvc))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Type", containsString("text/event-stream")))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        assertTrue(sseBody.contains("event:chunk"), sseBody);
+        assertTrue(sseBody.contains("event:actions"), sseBody);
+        assertTrue(sseBody.contains("event:done"), sseBody);
+        assertTrue(sseBody.contains("set_track_mix"), sseBody);
+
+        // 3. Multimodal WAV audio attachment returns DSP telemetry + actions
+        byte[] wavBytes = makeMelodyWav(1.0, 22050);
+        MockMultipartFile wavFile = new MockMultipartFile("file", "vocal_sample.wav", "audio/wav", wavBytes);
+        mockMvc.perform(multipart("/api/coach/chat/audio")
+                        .file(wavFile)
+                        .header("X-LLM-Provider", "mock")
+                        .param("project_id", pid)
+                        .param("mode", "mix")
+                        .param("route", "/studio/" + pid)
+                        .param("message", "Nghe thử file vocal này giúp tôi"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reply").value(containsString("dBFS")))
+                .andExpect(jsonPath("$.suggested_actions", not(empty())));
+
+        // 4. Oversized chat audio (> 10 MB) returns 413 Payload Too Large
+        byte[] oversized = new byte[10 * 1024 * 1024 + 64];
+        MockMultipartFile bigFile = new MockMultipartFile("file", "huge.wav", "audio/wav", oversized);
+        mockMvc.perform(multipart("/api/coach/chat/audio")
+                        .file(bigFile)
+                        .param("project_id", pid)
+                        .param("message", "Check size"))
+                .andExpect(status().isPayloadTooLarge());
+
+        mockMvc.perform(delete("/api/projects/" + pid)).andExpect(status().isOk());
+    }
 }
