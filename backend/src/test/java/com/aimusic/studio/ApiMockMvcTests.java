@@ -754,7 +754,15 @@ class ApiMockMvcTests {
                 .andExpect(jsonPath("$.reply").value(containsString("dBFS")))
                 .andExpect(jsonPath("$.suggested_actions", not(empty())));
 
-        // 4. Oversized chat audio (> 10 MB) returns 413 Payload Too Large
+        // 4. Broad audit prompt proposes comprehensive multi-category suggestions (>= 6 actions)
+        mockMvc.perform(post("/api/coach/chat")
+                        .header("X-LLM-Provider", "mock")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"route\":\"/studio/" + pid + "\",\"message\":\"AI làm được gì và đề xuất mọi thứ giúp tôi\",\"history\":[]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.suggested_actions.length()").value(greaterThanOrEqualTo(6)));
+
+        // 5. Oversized chat audio (> 10 MB) returns 413 Payload Too Large
         byte[] oversized = new byte[10 * 1024 * 1024 + 64];
         MockMultipartFile bigFile = new MockMultipartFile("file", "huge.wav", "audio/wav", oversized);
         mockMvc.perform(multipart("/api/coach/chat/audio")

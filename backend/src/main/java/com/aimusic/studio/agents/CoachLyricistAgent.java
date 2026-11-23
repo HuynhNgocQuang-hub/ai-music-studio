@@ -1,6 +1,7 @@
 package com.aimusic.studio.agents;
 
 import com.aimusic.studio.audio.JavaAudioFallbackService;
+import com.aimusic.studio.model.AutotuneSettings;
 import com.aimusic.studio.model.ChordEvent;
 import com.aimusic.studio.model.LyricLine;
 import com.aimusic.studio.model.ProjectAnalysis;
@@ -261,12 +262,12 @@ public class CoachLyricistAgent {
 
         String lowerMsg = message != null ? message.toLowerCase(Locale.ROOT) : "";
         if (actions.isEmpty()) {
-            buildHeuristicActions(actions, mode, lowerMsg, safeRoute, analysis, cfg, extraContext, audioTelemetry);
+            buildHeuristicActions(actions, mode, lowerMsg, safeRoute, projectState, analysis, cfg, extraContext, audioTelemetry);
         }
 
         if (toolResp.isMock()) {
             reply = buildContextAwareMockReply(
-                    mode, lowerMsg, safeRoute, analysis, cfg, lyricLines.size(), chordSyms, projectState.getTracks(), playbookContext, extraContext, audioTelemetry);
+                    mode, lowerMsg, safeRoute, projectState, analysis, cfg, lyricLines.size(), chordSyms, projectState.getTracks(), playbookContext, extraContext, audioTelemetry);
         } else if (reply == null || reply.isBlank()) {
             reply = String.format(Locale.ROOT,
                     "Tôi đã phân tích dự án %s (%s %s, %.0f BPM) và chuẩn bị sẵn các nút thao tác đề xuất bên dưới để bạn áp dụng ngay.",
@@ -336,6 +337,8 @@ public class CoachLyricistAgent {
     private static String defaultLabelForTool(String name, Map<String, Object> args) {
         return switch (name) {
             case "set_track_mix" -> "Chỉnh Mix/EQ track " + (args.getOrDefault("track_id", "vocal"));
+            case "manage_track" -> "Quản lý track " + (args.getOrDefault("track_id", "texture"));
+            case "apply_drum_groove" -> "Đổi điệu trống " + String.valueOf(args.getOrDefault("style", "pop")).toUpperCase(Locale.ROOT);
             case "edit_structure_and_dynamics" -> "Cập nhật Cấu trúc & Dynamics";
             case "update_lyrics_lines" -> "Áp dụng chỉnh sửa lời bài hát";
             case "suggest_lyrics" -> "AI Gợi ý lời bài hát";
@@ -343,10 +346,17 @@ public class CoachLyricistAgent {
             case "apply_autotune" -> "Áp dụng Auto-Tune (" + args.getOrDefault("preset", "balanced") + ")";
             case "auto_mix" -> "Chạy AI Auto-Mix (-1.0 dBFS)";
             case "auto_trim_vocal" -> "Chạy AI Auto-Trim Vocal";
+            case "set_mastering" -> "Chỉnh Mastering (" + args.getOrDefault("target_lufs", "-14") + " LUFS)";
             case "regenerate_track" -> "Tạo lại track " + args.getOrDefault("target_track", "drums");
+            case "regenerate_song" -> "Phối lại toàn bộ bài hát";
+            case "transport_control" -> "Điều khiển phát/Lịch sử (" + args.getOrDefault("command", "play") + ")";
             case "navigate_tab" -> "Mở tab " + args.getOrDefault("tab", "mixer");
+            case "navigate_route" -> "Chuyển sang trang " + args.getOrDefault("route", "/studio");
+            case "switch_studio_mode" -> "Chuyển chế độ " + args.getOrDefault("studio_mode", "pro");
             case "create_template" -> "Tạo Project mẫu " + args.getOrDefault("genre", "Pop");
             case "export_project" -> "Xuất file " + String.valueOf(args.getOrDefault("format", "mp3")).toUpperCase(Locale.ROOT);
+            case "test_health" -> "Kiểm tra API Key & Hệ thống";
+            case "clear_cache" -> "Dọn Cache hệ thống";
             default -> "Áp dụng cấu hình (" + name + ")";
         };
     }
@@ -361,22 +371,137 @@ public class CoachLyricistAgent {
         };
     }
 
+    private static String normText(String text) {
+        if (text == null || text.isBlank()) return "";
+        String decomposed = java.text.Normalizer.normalize(text.toLowerCase(Locale.ROOT), java.text.Normalizer.Form.NFD);
+        return decomposed.replaceAll("\\p{M}", "").replace('\u0111', 'd');
+    }
+
+    private static String detectTrackMention(String normMsg, String defaultTrack) {
+        if (normMsg.contains("drum") || normMsg.contains("trong")) return "drums";
+        if (normMsg.contains("bass") || normMsg.contains("tram")) return "bass";
+        if (normMsg.contains("harmony") || normMsg.contains("hop am") || normMsg.contains("dem") || normMsg.contains("piano")) return "harmony";
+        if (normMsg.contains("lead") || normMsg.contains("giai dieu") || normMsg.contains("flute")) return "lead";
+        if (normMsg.contains("texture") || normMsg.contains("sample") || normMsg.contains("hieu ung")) return "texture";
+        if (normMsg.contains("vocal") || normMsg.contains("giong") || normMsg.contains("hat")) return "vocal";
+        return defaultTrack;
+    }
+
+    private static boolean isBroadAuditPrompt(String normMsg) {
+        return normMsg.contains("moi thu")
+                || normMsg.contains("tat ca")
+                || normMsg.contains("lam gi")
+                || normMsg.contains("lam duoc gi")
+                || normMsg.contains("kha nang")
+                || normMsg.contains("tong the")
+                || normMsg.contains("danh gia")
+                || normMsg.contains("thieu gi")
+                || normMsg.contains("toan bo")
+                || normMsg.contains("toi uu")
+                || normMsg.contains("can lam gi");
+    }
+
+    private static void appendProjectAuditRecommendations(
+            List<CoachSuggestedAction> actions,
+            String route,
+            ProjectState projectState,
+            ProjectAnalysis analysis,
+            ProjectConfig cfg,
+            Map<String, Object> extraContext
+    ) {
+        Map<String, TrackState> tracks = projectState.getTracks();
+        TrackState vocal = tracks != null ? tracks.get("vocal") : null;
+        TrackState harmony = tracks != null ? tracks.get("harmony") : null;
+        List<LyricLine> lyrics = projectState.getLyrics() != null && projectState.getLyrics().getLines() != null
+                ? projectState.getLyrics().getLines() : List.of();
+        List<SongSection> sections = projectState.getSongStructure() != null && projectState.getSongStructure().getSections() != null
+                ? projectState.getSongStructure().getSections() : List.of();
+        AutotuneSettings tune = projectState.getAutotuneSettings();
+
+        if (route.equals("/") || route.startsWith("/library")) {
+            actions.add(new CoachSuggestedAction("audit_tpl_lofi", "Tạo & mở Studio (Lo-fi)", "create_template", Map.of("genre", "Lo-fi")));
+            actions.add(new CoachSuggestedAction("audit_tpl_pop", "Tạo & mở Studio (Pop)", "create_template", Map.of("genre", "Pop")));
+            actions.add(new CoachSuggestedAction("audit_go_create", "Vào trang Thu Mic / Upload (/create)", "navigate_route", Map.of("route", "/create")));
+            actions.add(new CoachSuggestedAction("audit_go_settings", "Mở Cài đặt API Key (/settings)", "navigate_route", Map.of("route", "/settings")));
+        }
+
+        if (vocal == null || vocal.getReverbSend() <= 0.05) {
+            actions.add(new CoachSuggestedAction(
+                    "audit_vocal_space",
+                    "Thêm Reverb & Delay cho Vocal",
+                    "set_track_mix",
+                    Map.of("track_id", "vocal", "reverb_send", 0.28, "delay_send", 0.14)
+            ));
+        }
+        if (harmony != null && harmony.getLowDb() >= 0.0) {
+            actions.add(new CoachSuggestedAction(
+                    "audit_carve_harmony",
+                    "Cắt Low Harmony (-2.5 dB) làm thoáng Vocal",
+                    "set_track_mix",
+                    Map.of("track_id", "harmony", "low_db", -2.5)
+            ));
+        }
+        if (tune == null || !tune.isEnabled() || "off".equalsIgnoreCase(tune.getPreset())) {
+            actions.add(new CoachSuggestedAction(
+                    "audit_autotune",
+                    "Bật Auto-Tune mức Vừa (" + analysis.getDetectedKey() + " " + analysis.getDetectedScale() + ")",
+                    "apply_autotune",
+                    Map.of("preset", "balanced")
+            ));
+        }
+        if (lyrics.isEmpty()) {
+            actions.add(new CoachSuggestedAction(
+                    "audit_lyrics",
+                    "AI Sáng tác lời theo cấu trúc bài",
+                    "suggest_lyrics",
+                    Map.of("language", "vi", "section", "Chorus", "topic", cfg.getMood() != null ? cfg.getMood() : "Cảm xúc")
+            ));
+        }
+        boolean hasBridge = sections.stream().anyMatch(s -> s.getName() != null && s.getName().toLowerCase(Locale.ROOT).contains("bridge"));
+        if (!hasBridge) {
+            actions.add(new CoachSuggestedAction(
+                    "audit_add_bridge",
+                    "Thêm đoạn Bridge (4 ô nhịp)",
+                    "edit_structure_and_dynamics",
+                    Map.of("add_section_name", "Bridge", "section_bars", 4, "section_energy", 0.85)
+            ));
+        }
+        boolean lowChorus = sections.stream().anyMatch(s -> s.getName() != null && s.getName().toLowerCase(Locale.ROOT).contains("chorus") && s.getEnergy() < 0.90);
+        if (lowChorus) {
+            actions.add(new CoachSuggestedAction(
+                    "audit_boost_chorus",
+                    "Đẩy Dynamics Chorus lên 95%",
+                    "edit_structure_and_dynamics",
+                    Map.of("target_section", "Chorus", "section_energy", 0.95)
+            ));
+        }
+        if (extraContext != null && extraContext.get("fit_check") != null) {
+            actions.add(new CoachSuggestedAction("audit_auto_trim", "Chạy AI Auto-Trim Vocal", "auto_trim_vocal", Map.of()));
+        }
+        actions.add(new CoachSuggestedAction("audit_auto_mix", "Chạy AI Auto-Mix (-1.0 dBFS)", "auto_mix", Map.of()));
+        actions.add(new CoachSuggestedAction("audit_export_mp3", "Xuất MP3 320kbps", "export_project", Map.of("format", "mp3", "bitrate", "320k")));
+    }
+
     private static void buildHeuristicActions(
             List<CoachSuggestedAction> actions,
             String mode,
             String lowerMsg,
             String route,
+            ProjectState projectState,
             ProjectAnalysis analysis,
             ProjectConfig cfg,
             Map<String, Object> extraContext,
             AudioTelemetry audioTelemetry
     ) {
+        String normMsg = normText(lowerMsg);
         boolean onHomeOrLibrary = route.equals("/") || route.startsWith("/library");
-        if (onHomeOrLibrary && (lowerMsg.contains("tạo") || lowerMsg.contains("beat") || lowerMsg.contains("mẫu") || lowerMsg.contains("lo-fi") || lowerMsg.contains("trap") || lowerMsg.contains("pop") || lowerMsg.contains("ballad"))) {
-            String tplGenre = lowerMsg.contains("trap") ? "Hip-hop"
-                    : lowerMsg.contains("lo-fi") || lowerMsg.contains("lofi") ? "Lo-fi"
-                    : lowerMsg.contains("ballad") ? "Ballad"
-                    : lowerMsg.contains("edm") || lowerMsg.contains("house") ? "EDM" : "Pop";
+        boolean broadAudit = isBroadAuditPrompt(normMsg);
+
+        if (onHomeOrLibrary && (normMsg.contains("tao") || normMsg.contains("beat") || normMsg.contains("mau") || normMsg.contains("lo-fi") || normMsg.contains("trap") || normMsg.contains("pop") || normMsg.contains("ballad") || normMsg.contains("edm"))) {
+            String tplGenre = normMsg.contains("trap") ? "Hip-hop"
+                    : normMsg.contains("lo-fi") || normMsg.contains("lofi") ? "Lo-fi"
+                    : normMsg.contains("ballad") ? "Ballad"
+                    : normMsg.contains("edm") || normMsg.contains("house") ? "EDM" : "Pop";
             actions.add(new CoachSuggestedAction(
                     "create_starter_" + tplGenre.toLowerCase(Locale.ROOT),
                     "Tạo & mở Studio (" + tplGenre + ")",
@@ -389,27 +514,91 @@ public class CoachLyricistAgent {
             if (audioTelemetry.clipping()) {
                 actions.add(new CoachSuggestedAction(
                         "tame_vocal_clipping",
-                        "Giảm Gain Vocal & Auto-Mix (-1.0 dBFS)",
+                        "Giảm Gain Vocal & Chống vỡ tiếng",
                         "set_track_mix",
                         Map.of("track_id", "vocal", "volume", 0.78, "high_db", -1.5)
                 ));
             } else if (audioTelemetry.tooQuiet()) {
                 actions.add(new CoachSuggestedAction(
                         "boost_vocal_gain",
-                        "Tăng âm lượng Vocal & Chạy Auto-Trim",
+                        "Tăng âm lượng Vocal & Clear hơn",
                         "set_track_mix",
                         Map.of("track_id", "vocal", "volume", 1.08, "mid_db", 2.0)
                 ));
             }
-            actions.add(new CoachSuggestedAction(
-                    "tune_after_listen",
-                    "Bật Auto-Tune mức Vừa",
-                    "apply_autotune",
-                    Map.of("preset", "balanced")
-            ));
+            actions.add(new CoachSuggestedAction("trim_after_listen", "Chạy AI Auto-Trim Vocal", "auto_trim_vocal", Map.of()));
+            actions.add(new CoachSuggestedAction("tune_after_listen", "Bật Auto-Tune mức Vừa", "apply_autotune", Map.of("preset", "balanced")));
         }
 
-        if (lowerMsg.contains("chói") || lowerMsg.contains("gắt") || lowerMsg.contains("sibilan") || lowerMsg.contains("bright")) {
+        // Route & Studio Mode Navigation
+        if (normMsg.contains("settings") || normMsg.contains("cai dat") || normMsg.contains("nhap key")) {
+            actions.add(new CoachSuggestedAction("nav_settings", "Mở Cài đặt API & Engine (/settings)", "navigate_route", Map.of("route", "/settings")));
+        } else if (normMsg.contains("thu vien") || normMsg.contains("library") || normMsg.contains("danh sach bai")) {
+            actions.add(new CoachSuggestedAction("nav_library", "Mở Kho Session (/library)", "navigate_route", Map.of("route", "/library")));
+        } else if (normMsg.contains("trang tao") || normMsg.contains("thu mic") || normMsg.contains("upload file") || normMsg.contains("/create")) {
+            actions.add(new CoachSuggestedAction("nav_create", "Mở AI Generator Wizard (/create)", "navigate_route", Map.of("route", "/create")));
+        } else if (normMsg.contains("trang chu") || normMsg.contains("home")) {
+            actions.add(new CoachSuggestedAction("nav_home", "Về Trang chủ (/)", "navigate_route", Map.of("route", "/")));
+        } else if (normMsg.contains("mo studio") || normMsg.contains("vao studio") || normMsg.contains("phong thu")) {
+            actions.add(new CoachSuggestedAction("nav_studio", "Mở Phòng thu DAW (/studio)", "navigate_route", Map.of("route", "/studio")));
+        }
+
+        if (normMsg.contains("quick") || normMsg.contains("che do nhanh") || normMsg.contains("che do gon")) {
+            actions.add(new CoachSuggestedAction("mode_quick", "Chuyển sang Chế độ Quick", "switch_studio_mode", Map.of("studio_mode", "quick")));
+        } else if (normMsg.contains("pro daw") || normMsg.contains("che do pro") || normMsg.contains("chuyen nghiep")) {
+            actions.add(new CoachSuggestedAction("mode_pro", "Chuyển sang Chế độ Pro DAW", "switch_studio_mode", Map.of("studio_mode", "pro")));
+        }
+
+        // Transport, Loop, Metronome, Undo/Redo
+        if (normMsg.contains("phat nhac") || normMsg.contains("nghe thu") || normMsg.equals("play") || normMsg.contains("bat nhac")) {
+            actions.add(new CoachSuggestedAction("transport_play", "Phát nhạc ngay (Play)", "transport_control", Map.of("command", "play")));
+        } else if (normMsg.contains("dung nhac") || normMsg.contains("tam dung") || normMsg.contains("stop")) {
+            actions.add(new CoachSuggestedAction("transport_stop", "Dừng phát nhạc (Stop)", "transport_control", Map.of("command", "stop")));
+        }
+        if (normMsg.contains("vong lap") || normMsg.contains("loop")) {
+            actions.add(new CoachSuggestedAction("transport_loop", "Bật/Tắt Lặp (Loop)", "transport_control", Map.of("command", "loop")));
+        }
+        if (normMsg.contains("metronome") || normMsg.contains("may dem nhip")) {
+            actions.add(new CoachSuggestedAction("transport_metro", "Bật/Tắt Metronome", "transport_control", Map.of("command", "metronome")));
+        }
+        if (normMsg.contains("hoan tac") || normMsg.contains("undo") || normMsg.contains("quay lai buoc")) {
+            actions.add(new CoachSuggestedAction("transport_undo", "Hoàn tác thao tác gần nhất (Undo)", "transport_control", Map.of("command", "undo")));
+        } else if (normMsg.contains("redo") || normMsg.contains("lam lai")) {
+            actions.add(new CoachSuggestedAction("transport_redo", "Làm lại (Redo)", "transport_control", Map.of("command", "redo")));
+        }
+
+        // Track Mix, EQ, Mute/Solo, Lock, Manage Track, Instruments, Grooves
+        if (normMsg.contains("tat tieng") || normMsg.contains("mute")) {
+            String t = detectTrackMention(normMsg, "drums");
+            actions.add(new CoachSuggestedAction("mute_" + t, "Tắt tiếng track " + t.toUpperCase(Locale.ROOT), "set_track_mix", Map.of("track_id", t, "mute", true)));
+        } else if (normMsg.contains("solo") || normMsg.contains("chi nghe")) {
+            String t = detectTrackMention(normMsg, "vocal");
+            actions.add(new CoachSuggestedAction("solo_" + t, "Solo chỉ nghe track " + t.toUpperCase(Locale.ROOT), "set_track_mix", Map.of("track_id", t, "solo", true)));
+        }
+        if (normMsg.contains("khoa track") || normMsg.contains("giu nguyen track") || normMsg.contains("lock")) {
+            String t = detectTrackMention(normMsg, "vocal");
+            actions.add(new CoachSuggestedAction("lock_" + t, "Khóa/Mở khóa track " + t.toUpperCase(Locale.ROOT), "manage_track", Map.of("operation", "toggle_lock", "track_id", t)));
+        }
+        if (normMsg.contains("them track") || normMsg.contains("them texture") || normMsg.contains("them kenh")) {
+            actions.add(new CoachSuggestedAction("add_texture_track", "Thêm track Texture mới", "manage_track", Map.of("operation", "add", "track_id", "texture")));
+        }
+        if (normMsg.contains("doi tieng") || normMsg.contains("nhac cu") || normMsg.contains("flute") || normMsg.contains("warm pad") || normMsg.contains("guitar") || normMsg.contains("808") || normMsg.contains("synth bass")) {
+            if (normMsg.contains("flute") || normMsg.contains("sao")) {
+                actions.add(new CoachSuggestedAction("inst_flute", "Đổi Lead sang Sáo (Flute)", "manage_track", Map.of("operation", "set_instrument", "track_id", "lead", "instrument", "flute")));
+            } else if (normMsg.contains("warm pad") || normMsg.contains("pad") || normMsg.contains("string")) {
+                actions.add(new CoachSuggestedAction("inst_pad", "Đổi Harmony sang Warm Pad", "manage_track", Map.of("operation", "set_instrument", "track_id", "harmony", "instrument", "warm_pad")));
+            } else if (normMsg.contains("synth bass") || normMsg.contains("808")) {
+                actions.add(new CoachSuggestedAction("inst_808", "Đổi Bass sang Synth Bass", "manage_track", Map.of("operation", "set_instrument", "track_id", "bass", "instrument", "synth_bass")));
+            } else {
+                actions.add(new CoachSuggestedAction("inst_guitar", "Đổi Harmony sang Guitar Acoustic", "manage_track", Map.of("operation", "set_instrument", "track_id", "harmony", "instrument", "acoustic_guitar")));
+            }
+        }
+        if (normMsg.contains("dieu trong") || normMsg.contains("groove") || (normMsg.contains("trong") && (normMsg.contains("trap") || normMsg.contains("lofi") || normMsg.contains("lo-fi") || normMsg.contains("edm") || normMsg.contains("pop")))) {
+            String g = normMsg.contains("trap") ? "trap" : (normMsg.contains("lofi") || normMsg.contains("lo-fi")) ? "lofi" : normMsg.contains("edm") ? "edm" : "pop";
+            actions.add(new CoachSuggestedAction("groove_" + g, "Nạp điệu trống " + g.toUpperCase(Locale.ROOT), "apply_drum_groove", Map.of("style", g)));
+        }
+
+        if (normMsg.contains("choi") || normMsg.contains("gat") || normMsg.contains("sibilan") || normMsg.contains("bright")) {
             actions.add(new CoachSuggestedAction(
                     "soften_vocal_high",
                     "Giảm High Vocal (-2.5 dB)",
@@ -417,7 +606,7 @@ public class CoachLyricistAgent {
                     Map.of("track_id", "vocal", "high_db", -2.5)
             ));
         }
-        if (lowerMsg.contains("khô") || lowerMsg.contains("reverb") || lowerMsg.contains("vang") || lowerMsg.contains("rộng")) {
+        if (normMsg.contains("kho") || normMsg.contains("reverb") || normMsg.contains("vang") || normMsg.contains("rong") || normMsg.contains("delay")) {
             actions.add(new CoachSuggestedAction(
                     "add_vocal_space",
                     "Thêm Hall Reverb & Delay nhẹ cho Vocal",
@@ -425,7 +614,7 @@ public class CoachLyricistAgent {
                     Map.of("track_id", "vocal", "reverb_send", 0.28, "delay_send", 0.14)
             ));
         }
-        if (lowerMsg.contains("bùng") || lowerMsg.contains("ù") || lowerMsg.contains("đục") || lowerMsg.contains("muddy")) {
+        if (normMsg.contains("bung") || normMsg.contains("u ") || normMsg.contains("duc") || normMsg.contains("muddy")) {
             actions.add(new CoachSuggestedAction(
                     "cut_harmony_low",
                     "Cắt Low Harmony (-2.5 dB) cho đỡ đục",
@@ -433,15 +622,24 @@ public class CoachLyricistAgent {
                     Map.of("track_id", "harmony", "low_db", -2.5)
             ));
         }
-        if (lowerMsg.contains("6/8")) {
-            actions.add(new CoachSuggestedAction(
-                    "switch_68_meter",
-                    "Chuyển nhịp 6/8 & mở Step Sequencer",
-                    "edit_structure_and_dynamics",
-                    Map.of("time_signature", "6/8")
-            ));
+        if (normMsg.contains("trim") || normMsg.contains("khoang lang") || normMsg.contains("cat dau")) {
+            actions.add(new CoachSuggestedAction("run_auto_trim", "Chạy AI Auto-Trim Vocal", "auto_trim_vocal", Map.of()));
         }
-        if (lowerMsg.contains("bridge") || lowerMsg.contains("thêm đoạn")) {
+        if (normMsg.contains("master") || normMsg.contains("lufs") || normMsg.contains("limiter") || normMsg.contains("lon tieng")) {
+            actions.add(new CoachSuggestedAction("boost_master_lufs", "Đặt Mastering -12 LUFS & Limiter -1.0 dBFS", "set_mastering", Map.of("auto_mix_enabled", true, "target_lufs", -12.0, "limiter_ceiling_db", -1.0)));
+        }
+
+        // Rhythm, Structure, Bridge, Dynamics & Full Regen
+        if (normMsg.contains("6/8")) {
+            actions.add(new CoachSuggestedAction("switch_68_meter", "Chuyển nhịp 6/8 & mở Step Sequencer", "edit_structure_and_dynamics", Map.of("time_signature", "6/8")));
+        } else if (normMsg.contains("3/4") || normMsg.contains("waltz")) {
+            actions.add(new CoachSuggestedAction("switch_34_meter", "Chuyển nhịp 3/4 & mở Step Sequencer", "edit_structure_and_dynamics", Map.of("time_signature", "3/4")));
+        } else if (normMsg.contains("4/4")) {
+            actions.add(new CoachSuggestedAction("switch_44_meter", "Chuyển về nhịp chuẩn 4/4", "edit_structure_and_dynamics", Map.of("time_signature", "4/4")));
+        }
+        if (normMsg.contains("xoa bridge") || normMsg.contains("bo bridge")) {
+            actions.add(new CoachSuggestedAction("del_bridge_section", "Xóa đoạn Bridge", "edit_structure_and_dynamics", Map.of("delete_section_name", "Bridge")));
+        } else if (normMsg.contains("bridge") || normMsg.contains("them doan")) {
             actions.add(new CoachSuggestedAction(
                     "add_bridge_section",
                     "Thêm đoạn Bridge (4 ô nhịp)",
@@ -449,7 +647,7 @@ public class CoachLyricistAgent {
                     Map.of("add_section_name", "Bridge", "section_bars", 4, "section_energy", 0.85)
             ));
         }
-        if (lowerMsg.contains("cao trào") || lowerMsg.contains("năng lượng") || lowerMsg.contains("dynamics")) {
+        if (normMsg.contains("cao trao") || normMsg.contains("nang luong") || normMsg.contains("dynamics")) {
             actions.add(new CoachSuggestedAction(
                     "boost_chorus_dynamics",
                     "Đẩy năng lượng Chorus lên 95%",
@@ -457,8 +655,15 @@ public class CoachLyricistAgent {
                     Map.of("target_section", "Chorus", "section_energy", 0.95)
             ));
         }
-        if (lowerMsg.contains("xuất") || lowerMsg.contains("tải") || lowerMsg.contains("export") || lowerMsg.contains("mp3") || lowerMsg.contains("wav") || lowerMsg.contains("stems")) {
-            String fmt = lowerMsg.contains("stems") ? "stems" : lowerMsg.contains("wav") ? "wav" : lowerMsg.contains("midi") ? "midi" : "mp3";
+        if (normMsg.contains("phoi lai toan bai") || normMsg.contains("tao lai bai") || normMsg.contains("regenerate song")) {
+            actions.add(new CoachSuggestedAction("regen_full_song", "Phối lại toàn bộ bài hát bằng Multi-Agent", "regenerate_song", Map.of()));
+        }
+
+        String exportScan = normMsg.replace("de xuat", "").replace("san xuat", "");
+        if (exportScan.contains("xuat") || normMsg.contains("tai file") || normMsg.contains("tai ve") || normMsg.contains("tai xuong")
+                || normMsg.contains("export") || normMsg.contains("download") || normMsg.contains("mp3")
+                || normMsg.contains("wav") || normMsg.contains("stems") || normMsg.contains("midi") || normMsg.contains("aimusic")) {
+            String fmt = normMsg.contains("stems") ? "stems" : normMsg.contains("wav") ? "wav" : normMsg.contains("midi") ? "midi" : normMsg.contains("aimusic") ? "aimusic" : "mp3";
             actions.add(new CoachSuggestedAction(
                     "export_" + fmt,
                     "Xuất ngay file " + fmt.toUpperCase(Locale.ROOT),
@@ -467,7 +672,7 @@ public class CoachLyricistAgent {
             ));
         }
 
-        if ("lyricist".equals(mode) || lowerMsg.contains("lời") || lowerMsg.contains("lyric") || lowerMsg.contains("viết")) {
+        if ("lyricist".equals(mode) || normMsg.contains("loi") || normMsg.contains("lyric") || normMsg.contains("viet")) {
             actions.add(new CoachSuggestedAction(
                     "suggest_lyrics_topic",
                     "AI Gợi ý lời (" + (cfg.getMood() != null ? cfg.getMood() : "Cảm xúc") + ")",
@@ -475,7 +680,7 @@ public class CoachLyricistAgent {
                     Map.of("language", "vi", "section", "Chorus", "topic", cfg.getMood() != null ? cfg.getMood() : "Ký ức")
             ));
         }
-        if (lowerMsg.contains("chorus") || lowerMsg.contains("verse") || lowerMsg.contains("đoạn") || lowerMsg.contains("cấu trúc")) {
+        if (normMsg.contains("chorus") || normMsg.contains("verse") || normMsg.contains("doan") || normMsg.contains("cau truc")) {
             actions.add(new CoachSuggestedAction(
                     "set_motif_chorus",
                     "Đặt mô-típ làm Chorus",
@@ -483,66 +688,72 @@ public class CoachLyricistAgent {
                     Map.of("motif_position", "chorus", "output_mode", "full_song")
             ));
         }
-        if ("arrangement".equals(mode) || lowerMsg.contains("buồn") || lowerMsg.contains("sad") || lowerMsg.contains("hợp âm") || lowerMsg.contains("chord")) {
+        if ("arrangement".equals(mode) || normMsg.contains("buon") || normMsg.contains("sad") || normMsg.contains("hop am") || normMsg.contains("chord")) {
             actions.add(new CoachSuggestedAction(
                     "try_minor_rearrange",
                     "Đổi vòng hợp âm vi - IV - I - V",
                     "rearrange_chords",
                     Map.of("suggestion", "Use vi - IV - I - V progression")
             ));
-        }
-        if ("mix".equals(mode) || lowerMsg.contains("auto-tune") || lowerMsg.contains("phô") || lowerMsg.contains("cao độ") || lowerMsg.contains("tune")) {
             actions.add(new CoachSuggestedAction(
-                    "apply_balanced_tune",
-                    "Bật Auto-Tune mức Vừa",
+                    "try_pop_rearrange",
+                    "Đổi vòng Pop C - G - Am - F",
+                    "rearrange_chords",
+                    Map.of("chords", List.of("C", "G", "Am", "F"))
+            ));
+        }
+        if ("mix".equals(mode) || normMsg.contains("auto-tune") || normMsg.contains("autotune") || normMsg.contains("pho") || normMsg.contains("cao do") || normMsg.contains("tune")) {
+            String tunePreset = normMsg.contains("hien dai") || normMsg.contains("robot") ? "modern"
+                    : normMsg.contains("tu nhien") || normMsg.contains("nhe") ? "natural" : "balanced";
+            actions.add(new CoachSuggestedAction(
+                    "apply_" + tunePreset + "_tune",
+                    "Bật Auto-Tune (" + tunePreset + ")",
                     "apply_autotune",
-                    Map.of("preset", "balanced")
+                    Map.of("preset", tunePreset)
             ));
         }
-        if ("mix".equals(mode) || lowerMsg.contains("mix") || lowerMsg.contains("vỡ") || lowerMsg.contains("cân bằng") || lowerMsg.contains("nhỏ") || lowerMsg.contains("to") || lowerMsg.contains("eq")) {
-            actions.add(new CoachSuggestedAction(
-                    "run_auto_mix",
-                    "Chạy AI Auto-Mix (-1.0 dBFS)",
-                    "auto_mix",
-                    Map.of()
-            ));
-            actions.add(new CoachSuggestedAction(
-                    "open_mixer_tab",
-                    "Mở tab Console Mixer",
-                    "navigate_tab",
-                    Map.of("tab", "mixer")
-            ));
+        if ("mix".equals(mode) || normMsg.contains("mix") || normMsg.contains("vo") || normMsg.contains("can bang") || normMsg.contains("nho") || normMsg.contains("eq")) {
+            actions.add(new CoachSuggestedAction("run_auto_mix", "Chạy AI Auto-Mix (-1.0 dBFS)", "auto_mix", Map.of()));
+            actions.add(new CoachSuggestedAction("open_mixer_tab", "Mở tab Console Mixer", "navigate_tab", Map.of("tab", "mixer")));
         }
-        if (lowerMsg.contains("piano roll") || lowerMsg.contains("sửa nốt")) {
+
+        if (normMsg.contains("piano roll") || normMsg.contains("sua not")) {
             actions.add(new CoachSuggestedAction("open_piano_roll", "Mở tab Piano Roll", "navigate_tab", Map.of("tab", "piano_roll")));
+        } else if (normMsg.contains("sequencer") || normMsg.contains("bang go trong")) {
+            actions.add(new CoachSuggestedAction("open_seq_tab", "Mở tab Step Sequencer", "navigate_tab", Map.of("tab", "sequencer")));
+        } else if (normMsg.contains("tab auto-tune") || normMsg.contains("tab tune")) {
+            actions.add(new CoachSuggestedAction("open_tune_tab", "Mở tab Auto-Tune DSP", "navigate_tab", Map.of("tab", "autotune")));
+        } else if (normMsg.contains("tab loi") || normMsg.contains("tab lyrics")) {
+            actions.add(new CoachSuggestedAction("open_lyrics_tab", "Mở tab Lyrics & Karaoke", "navigate_tab", Map.of("tab", "lyrics")));
         }
-        if (lowerMsg.contains("trống") || lowerMsg.contains("drum")) {
+
+        if (normMsg.contains("trong") || normMsg.contains("drum")) {
             actions.add(new CoachSuggestedAction("regen_drums", "Tạo lại track Drums", "regenerate_track", Map.of("target_track", "drums")));
-        } else if (lowerMsg.contains("bass")) {
+        } else if (normMsg.contains("bass")) {
             actions.add(new CoachSuggestedAction("regen_bass", "Tạo lại track Bass", "regenerate_track", Map.of("target_track", "bass")));
         }
-        if (lowerMsg.contains("nhanh") || lowerMsg.contains("faster")) {
+        if (normMsg.contains("nhanh") || normMsg.contains("faster")) {
             actions.add(new CoachSuggestedAction("boost_bpm_8", "Tăng +8 BPM", "update_config", Map.of("bpm", Math.min(220.0, analysis.getBpm() + 8.0))));
-        } else if (lowerMsg.contains("chậm") || lowerMsg.contains("slow")) {
+        } else if (normMsg.contains("cham") || normMsg.contains("slow")) {
             actions.add(new CoachSuggestedAction("slow_bpm_8", "Giảm -8 BPM", "update_config", Map.of("bpm", Math.max(40.0, analysis.getBpm() - 8.0))));
         }
-
-        if (actions.isEmpty()) {
-            if (route.startsWith("/settings")) {
-                actions.add(new CoachSuggestedAction("run_llm_diag", "Kiểm tra API Key & Hệ thống", "test_health", Map.of()));
-            } else if (onHomeOrLibrary) {
-                actions.add(new CoachSuggestedAction("open_pop_template", "Khởi tạo nhanh Pop DAW", "create_template", Map.of("genre", "Pop")));
-            } else {
-                actions.add(new CoachSuggestedAction("run_auto_mix_default", "Chạy AI Auto-Mix", "auto_mix", Map.of()));
-                actions.add(new CoachSuggestedAction("suggest_lyrics_default", "Gợi ý lời nhanh", "suggest_lyrics", Map.of("language", "vi", "section", "Chorus")));
-            }
+        if (normMsg.contains("don cache") || normMsg.contains("xoa cache") || normMsg.contains("clear cache")) {
+            actions.add(new CoachSuggestedAction("clear_be_cache", "Dọn Cache Backend Redis", "clear_cache", Map.of("scope", "backend")));
+        }
+        if (normMsg.contains("test api") || normMsg.contains("kiem tra he thong") || normMsg.contains("health") || normMsg.contains("api key")) {
+            actions.add(new CoachSuggestedAction("run_llm_diag", "Kiểm tra API Key & Hệ thống", "test_health", Map.of()));
         }
 
-        // Deduplicate & cap heuristic chips cleanly to max 4 buttons
+        if (broadAudit || actions.isEmpty()) {
+            appendProjectAuditRecommendations(actions, route, projectState, analysis, cfg, extraContext);
+        }
+
+        // Deduplicate & keep up to 8 diverse recommendations on broad audits or 6 on focused asks
+        int cap = broadAudit ? 8 : 6;
         Map<String, CoachSuggestedAction> unique = new LinkedHashMap<>();
         for (CoachSuggestedAction a : actions) {
             unique.putIfAbsent(a.getId(), a);
-            if (unique.size() >= 4) break;
+            if (unique.size() >= cap) break;
         }
         actions.clear();
         actions.addAll(unique.values());
@@ -552,6 +763,7 @@ public class CoachLyricistAgent {
             String mode,
             String lowerMsg,
             String route,
+            ProjectState projectState,
             ProjectAnalysis analysis,
             ProjectConfig cfg,
             int lyricCount,
@@ -561,6 +773,7 @@ public class CoachLyricistAgent {
             Map<String, Object> extraContext,
             AudioTelemetry audioTelemetry
     ) {
+        String normMsg = normText(lowerMsg);
         String keyScale = analysis.getDetectedKey() + " " + analysis.getDetectedScale();
         String chordsStr = chordSyms.isEmpty() ? "chưa có hợp âm" : String.join(" - ", chordSyms.subList(0, Math.min(4, chordSyms.size())));
 
@@ -571,23 +784,44 @@ public class CoachLyricistAgent {
                     ? "âm lượng hơi nhỏ (RMS < -34 dBFS)"
                     : "độ động cân bằng tốt";
             return String.format(Locale.ROOT,
-                    "[Audio Telemetry • %.1fs] Tôi đã kiểm tra bản audio bạn đính kèm: đỉnh %.1f dBFS, mức trung bình %.1f dBFS — %s. Bạn có thể bấm các nút bên dưới để chỉnh Volume/EQ hoặc bật Auto-Tune ngay.",
+                    "[Audio Telemetry • %.1fs] Tôi đã kiểm tra bản audio bạn đính kèm: đỉnh %.1f dBFS, mức trung bình %.1f dBFS — %s. Bạn có thể bấm các nút bên dưới để chỉnh Volume/EQ, Auto-Trim hoặc bật Auto-Tune ngay.",
                     audioTelemetry.durationSec(), audioTelemetry.peakDbfs(), audioTelemetry.rmsDbfs(), healthDesc);
         }
 
         if (extraContext != null && extraContext.get("fit_check") instanceof Map<?, ?> fc
-                && (lowerMsg.contains("overdub") || lowerMsg.contains("thu đè") || lowerMsg.contains("lệch") || lowerMsg.contains("fit"))) {
+                && (normMsg.contains("overdub") || normMsg.contains("thu de") || normMsg.contains("lech") || normMsg.contains("fit"))) {
             return String.format(Locale.ROOT,
                     "[Overdub Fit Check] Bản thu đè gần nhất đang lệch %s ms (%s). Bạn có thể bấm 1-Click Fix ở banner trên hoặc dùng Auto-Mix & Auto-Tune bên dưới để làm khớp tức thì.",
                     fc.get("timing_offset_ms"), fc.get("gain_suggestion"));
         }
 
-        if (lowerMsg.contains("làm sao") || lowerMsg.contains("cách") || lowerMsg.contains("hướng dẫn") || lowerMsg.contains("404") || lowerMsg.contains("503") || lowerMsg.contains("lỗi") || route.startsWith("/settings")) {
+        if (isBroadAuditPrompt(normMsg)) {
+            TrackState vocal = tracks != null ? tracks.get("vocal") : null;
+            AutotuneSettings tune = projectState.getAutotuneSettings();
+            String tuneLabel = (tune != null && tune.isEnabled() && !"off".equalsIgnoreCase(tune.getPreset()))
+                    ? tune.getPreset() : "chưa bật";
+            int sectionCount = projectState.getSongStructure() != null && projectState.getSongStructure().getSections() != null
+                    ? projectState.getSongStructure().getSections().size() : 0;
+            return String.format(Locale.ROOT,
+                    "[Toàn bộ Khả năng & Đề xuất cho Dự án %s • %s %.0f BPM (%s)]\n"
+                            + "• Tình trạng hiện tại: %d section, hợp âm (%s), %d câu lời, Auto-Tune [%s], Vocal EQ %.0f/%.0f/%.0f dB (Reverb %.0f%%).\n"
+                            + "• Tôi có thể làm mọi thao tác an toàn cho bạn (kèm Hoàn tác 1 chạm): Tạo project mẫu, Chuyển trang/Tab & Quick/Pro, Điều khiển Play/Stop/Loop/Undo/Redo, Đổi BPM/Key/Nhịp (4/4|3/4|6/8), Thêm/Xóa Section & kéo Dynamics, Đổi hợp âm & Điệu trống (Pop/Trap/Lo-fi/EDM), Thêm/Khóa Track & Đổi nhạc cụ, Chỉnh Mix/3-Band EQ/FX/Auto-Mix/Mastering LUFS, Bật Auto-Tune Pro, Sáng tác/Sửa lời, Nghe audio WAV/Mic, Xuất WAV/MP3/Stems/MIDI/.aimusic và Chẩn đoán API Key.\n"
+                            + "• Bấm 'Áp dụng tất cả' hoặc chọn từng đề xuất tối ưu nhất bên dưới để thực thi ngay!",
+                    cfg.getGenre(), keyScale, analysis.getBpm(),
+                    analysis.getTimeSignature() != null ? analysis.getTimeSignature() : "4/4",
+                    sectionCount, chordsStr, lyricCount, tuneLabel,
+                    vocal != null ? vocal.getLowDb() : 0.0,
+                    vocal != null ? vocal.getMidDb() : 0.0,
+                    vocal != null ? vocal.getHighDb() : 0.0,
+                    vocal != null ? vocal.getReverbSend() * 100 : 0.0);
+        }
+
+        if (normMsg.contains("lam sao") || normMsg.contains("cach") || normMsg.contains("huong dan") || normMsg.contains("404") || normMsg.contains("503") || normMsg.contains("loi") || route.startsWith("/settings")) {
             return "Hướng dẫn nhanh theo Playbook DAW:\n" + playbookContext;
         }
 
         if (route.equals("/") || route.startsWith("/library")) {
-            return "Bạn đang ở khu vực quản lý dự án. Hãy mô tả thể loại & BPM bạn muốn (VD: 'Tạo bài Lo-fi nhẹ' hoặc 'Tạo beat Trap'), hoặc bấm nút bên dưới để tôi mở sẵn phiên DAW cho bạn!";
+            return "Bạn đang ở khu vực quản lý dự án. Tôi có thể tạo ngay Starter Template (Pop/Lo-fi/Trap/EDM/Ballad), mở nhanh /create để thu Mic, kiểm tra hệ thống /settings, hoặc bạn bấm các nút đề xuất ngay bên dưới!";
         }
 
         TrackState vocal = tracks != null ? tracks.get("vocal") : null;
@@ -596,10 +830,10 @@ public class CoachLyricistAgent {
                     "[Lyricist • %s %.0f BPM] Bài hiện có %d câu lời (%s, %s). Bạn nên giữ câu hook 6–10 âm tiết lặp ở Chorus và dùng nút bên dưới để AI viết/cập nhật thẳng vào Lyrics & Karaoke.",
                     keyScale, analysis.getBpm(), lyricCount, cfg.getGenre(), chordsStr);
             case "arrangement" -> String.format(Locale.ROOT,
-                    "[Arrangement • %s %.0f BPM] Vòng hợp âm (%s) cho %s. Bạn có thể đổi sang vòng vi - IV - I - V, chuyển nhịp 6/8 hoặc kéo chấm Dynamics Envelope để nâng cao trào Chorus.",
+                    "[Arrangement • %s %.0f BPM] Vòng hợp âm (%s) cho %s. Bạn có thể đổi vòng hợp âm, chọn điệu trống (Pop/Trap/Lo-fi/EDM), đổi nhạc cụ, chuyển nhịp 3/4 hoặc 6/8, hay thêm Bridge & nâng cao trào Chorus.",
                     keyScale, analysis.getBpm(), chordsStr, cfg.getGenre());
             case "mix" -> String.format(Locale.ROOT,
-                    "[Mix & Mastering • %.0f BPM] Vocal đang đặt Volume %d%% (EQ %.0f/%.0f/%.0f dB, Reverb %.0f%%). Đề xuất cắt bớt dải trầm ở Harmony nếu hơi đục, giữ High Vocal vừa phải và chạy Auto-Mix (<= -1.0 dBFS).",
+                    "[Mix & Mastering • %.0f BPM] Vocal đang đặt Volume %d%% (EQ %.0f/%.0f/%.0f dB, Reverb %.0f%%). Tôi có thể cắt chói/đục, thêm Reverb/Delay, Mute/Solo từng track, chạy Auto-Trim, Auto-Tune & Auto-Mix (-1.0 dBFS).",
                     analysis.getBpm(),
                     vocal != null ? Math.round(vocal.getVolume() * 100) : 95,
                     vocal != null ? vocal.getLowDb() : 0.0,
@@ -607,13 +841,13 @@ public class CoachLyricistAgent {
                     vocal != null ? vocal.getHighDb() : 0.0,
                     vocal != null ? vocal.getReverbSend() * 100 : 0.0);
             default -> String.format(Locale.ROOT,
-                    "Dự án %s (%s, %.0f BPM, hợp âm %s, %d câu lời): tôi có thể hỗ trợ chỉnh EQ/Mix từng kênh, đổi hợp âm, viết lời, chỉnh Dynamics Envelope hoặc xuất file MP3/WAV/Stems giúp bạn.",
+                    "Dự án %s (%s, %.0f BPM, hợp âm %s, %d câu lời): hãy gõ 'Đề xuất mọi thứ' để tôi kiểm tra toàn diện, hoặc ra lệnh bất kỳ (chỉnh EQ/FX, đổi nhạc cụ/điệu trống, thêm Bridge, viết lời, phát/dừng nhạc, chuyển trang, xuất MP3/WAV/Stems/MIDI).",
                     cfg.getGenre(), keyScale, analysis.getBpm(), chordsStr, lyricCount);
         };
     }
 
     private static final List<Map<String, Object>> TOOL_DECLARATIONS = List.of(
-            toolDecl("set_track_mix", "Adjust track volume, pan, mute, solo, instrument, 3-band EQ, or reverb/delay send FX",
+            toolDecl("set_track_mix", "Adjust track volume, pan, mute, solo, locked, instrument, 3-band EQ, or reverb/delay send FX",
                     Map.ofEntries(
                             Map.entry("track_id", Map.of("type", "STRING", "description", "vocal|texture|drums|bass|harmony|lead")),
                             Map.entry("volume", Map.of("type", "NUMBER", "description", "0.0 to 1.2")),
@@ -625,18 +859,32 @@ public class CoachLyricistAgent {
                             Map.entry("delay_send", Map.of("type", "NUMBER", "description", "0.0 to 1.0")),
                             Map.entry("instrument", Map.of("type", "STRING", "description", "Preset name if MIDI track")),
                             Map.entry("mute", Map.of("type", "BOOLEAN")),
-                            Map.entry("solo", Map.of("type", "BOOLEAN"))
+                            Map.entry("solo", Map.of("type", "BOOLEAN")),
+                            Map.entry("locked", Map.of("type", "BOOLEAN"))
                     ), List.of("track_id")),
-            toolDecl("edit_structure_and_dynamics", "Adjust time signature (4/4, 3/4, 6/8), update section energy (0.1-1.0), or add a section",
+            toolDecl("manage_track", "Add a track (e.g. texture/harmony/lead), clear notes/clips, remove optional track, toggle lock, or swap instrument",
+                    Map.of(
+                            "operation", Map.of("type", "STRING", "description", "add|clear|remove|toggle_lock|set_instrument"),
+                            "track_id", Map.of("type", "STRING", "description", "vocal|texture|drums|bass|harmony|lead"),
+                            "instrument", Map.of("type", "STRING", "description", "grand_piano|electric_piano|acoustic_guitar|warm_pad|strings|flute|synth_lead|finger_bass|upright_bass|synth_bass|acoustic_kit|lofi_kit|electronic_808"),
+                            "locked", Map.of("type", "BOOLEAN")
+                    ), List.of("operation", "track_id")),
+            toolDecl("apply_drum_groove", "Load a drum pattern preset matching current time signature and bars",
+                    Map.of("style", Map.of("type", "STRING", "description", "pop|trap|lofi|edm|clear")),
+                    List.of("style")),
+            toolDecl("edit_structure_and_dynamics", "Adjust time signature (4/4, 3/4, 6/8), total_bars (4-32), section energy (0.1-1.0), add or delete a section",
                     Map.of(
                             "time_signature", Map.of("type", "STRING", "description", "4/4|3/4|6/8"),
+                            "total_bars", Map.of("type", "INTEGER", "description", "4 to 32"),
                             "target_section", Map.of("type", "STRING", "description", "Existing section name e.g. Chorus"),
                             "section_energy", Map.of("type", "NUMBER", "description", "0.1 to 1.0"),
                             "add_section_name", Map.of("type", "STRING", "description", "New section name e.g. Bridge"),
+                            "delete_section_name", Map.of("type", "STRING", "description", "Existing section to remove e.g. Bridge"),
                             "section_bars", Map.of("type", "INTEGER", "description", "Bar count e.g. 4")
                     ), List.of()),
             toolDecl("update_lyrics_lines", "Replace or append specific lyric lines cleanly",
                     Map.of(
+                            "append", Map.of("type", "BOOLEAN", "description", "true to append to existing lines, false/omit to replace"),
                             "lines", Map.of("type", "ARRAY", "items", Map.of(
                                     "type", "OBJECT",
                                     "properties", Map.of(
@@ -656,24 +904,46 @@ public class CoachLyricistAgent {
                     Map.of("preset", Map.of("type", "STRING", "description", "off|natural|balanced|modern"),
                             "retune_speed_ms", Map.of("type", "NUMBER"),
                             "humanize", Map.of("type", "NUMBER"),
-                            "mix_percent", Map.of("type", "NUMBER")),
+                            "mix_percent", Map.of("type", "NUMBER"),
+                            "auto_follow_project_key", Map.of("type", "BOOLEAN")),
                     List.of("preset")),
             toolDecl("auto_mix", "Run AI Auto-Mix balancing gain, vocal carve 2.2kHz, and -1.0 dBFS limiter", Map.of(), List.of()),
             toolDecl("auto_trim_vocal", "Auto-trim silence and align vocal clip timing", Map.of(), List.of()),
+            toolDecl("set_mastering", "Update Mastering Limiter ceiling (<= -1.0 dBFS) and target LUFS (-20 to -8)",
+                    Map.of("auto_mix_enabled", Map.of("type", "BOOLEAN"),
+                            "target_lufs", Map.of("type", "NUMBER"),
+                            "limiter_ceiling_db", Map.of("type", "NUMBER")),
+                    List.of()),
             toolDecl("regenerate_track", "Regenerate a single unlocked MIDI track",
                     Map.of("target_track", Map.of("type", "STRING", "description", "drums|bass|harmony|lead")), List.of("target_track")),
-            toolDecl("update_config", "Update BPM, Key, Scale, Genre, Mood, Output Mode, or Motif Position",
+            toolDecl("regenerate_song", "Re-run full Multi-Agent composition pipeline for the entire project",
+                    Map.of("genre", Map.of("type", "STRING"), "mood", Map.of("type", "STRING"),
+                            "output_mode", Map.of("type", "STRING"), "melody_mode", Map.of("type", "STRING"),
+                            "structure_preset", Map.of("type", "STRING")),
+                    List.of()),
+            toolDecl("update_config", "Update BPM, Key, Scale, Genre, Mood, Output Mode, Structure Preset, or Motif Position",
                     Map.of("bpm", Map.of("type", "NUMBER"), "key", Map.of("type", "STRING"), "scale", Map.of("type", "STRING"),
                             "genre", Map.of("type", "STRING"), "mood", Map.of("type", "STRING"),
-                            "motif_position", Map.of("type", "STRING"), "output_mode", Map.of("type", "STRING")),
+                            "motif_position", Map.of("type", "STRING"), "output_mode", Map.of("type", "STRING"),
+                            "structure_preset", Map.of("type", "STRING")),
                     List.of()),
+            toolDecl("transport_control", "Control DAW playback or undo/redo history",
+                    Map.of("command", Map.of("type", "STRING", "description", "play|stop|pause|loop|metronome|undo|redo")),
+                    List.of("command")),
             toolDecl("navigate_tab", "Switch bottom dock tab in Studio",
                     Map.of("tab", Map.of("type", "STRING", "description", "sequencer|piano_roll|mixer|autotune|lyrics")), List.of("tab")),
+            toolDecl("navigate_route", "Navigate to any application screen",
+                    Map.of("route", Map.of("type", "STRING", "description", "/|/create|/library|/settings|/studio")), List.of("route")),
+            toolDecl("switch_studio_mode", "Toggle between Quick preview mode and Pro DAW workstation",
+                    Map.of("studio_mode", Map.of("type", "STRING", "description", "quick|pro")), List.of("studio_mode")),
             toolDecl("create_template", "Create a new starter DAW project and open Studio",
                     Map.of("genre", Map.of("type", "STRING", "description", "Pop|Lo-fi|Hip-hop|EDM|Ballad")), List.of("genre")),
             toolDecl("export_project", "Export audio, stems, MIDI, or .aimusic bundle",
                     Map.of("format", Map.of("type", "STRING", "description", "wav|mp3|stems|midi|aimusic"), "bitrate", Map.of("type", "STRING")),
-                    List.of("format"))
+                    List.of("format")),
+            toolDecl("test_health", "Run backend, Redis, Audio Worker, and LLM API Key diagnostic test", Map.of(), List.of()),
+            toolDecl("clear_cache", "Clear temporary backend Redis cache or browser IndexedDB drafts",
+                    Map.of("scope", Map.of("type", "STRING", "description", "backend|local")), List.of("scope"))
     );
 
     private static Map<String, Object> toolDecl(String name, String description, Map<String, Object> properties, List<String> required) {

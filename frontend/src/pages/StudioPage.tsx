@@ -337,7 +337,7 @@ export default function StudioPage() {
                     tuned_vocal_ref: recoveredTunedRef,
                   },
                 }));
-                await syncProject(recovered.project_id, recovered).catch(() => {});
+                await syncProject(recovered.project_id, recovered).catch(() => { });
                 await engine.syncFromProject(recovered, { forceSlots: ['dry', 'autotune'] });
                 setStudioNotice('Đã tự khôi phục vocal từ IndexedDB lên hệ thống sau khi hết cache Redis.');
               }
@@ -1054,6 +1054,48 @@ export default function StudioPage() {
       await handleAutoTrimVocal();
       return { notice: 'Đã chạy AI Auto-Trim Vocal.', revertable: true };
     }
+    if (act.action === 'switch_studio_mode') {
+      const nextMode = payload.studio_mode === 'quick' ? 'quick' : 'pro';
+      setStudioMode(nextMode);
+      setStudioUiMeta((prev) => ({ ...prev, studioMode: nextMode }));
+      setStudioNotice(`Copilot đã chuyển sang chế độ ${nextMode === 'quick' ? 'Quick Preview' : 'Pro DAW Workstation'}.`);
+      return { notice: `Đã chuyển sang ${nextMode.toUpperCase()}.`, revertable: false };
+    }
+    if (act.action === 'transport_control') {
+      const cmd = String(payload.command || 'play').toLowerCase();
+      if (cmd === 'play') {
+        await engine.syncFromProject(current);
+        engine.play(0);
+        setStudioNotice('Đang phát thử bài nhạc...');
+        return { notice: 'Đang phát nhạc (Play).', revertable: false };
+      }
+      if (cmd === 'pause') {
+        engine.pause();
+        return { notice: 'Đã tạm dừng (Pause).', revertable: false };
+      }
+      if (cmd === 'stop') {
+        engine.stop();
+        return { notice: 'Đã dừng phát nhạc (Stop).', revertable: false };
+      }
+      if (cmd === 'loop') {
+        const nextLoop = !engine.getSnapshot().loopEnabled;
+        engine.setLoop(nextLoop);
+        return { notice: nextLoop ? 'Đã bật Loop.' : 'Đã tắt Loop.', revertable: false };
+      }
+      if (cmd === 'metronome') {
+        const nextMet = !engine.getSnapshot().metronomeEnabled;
+        engine.setMetronomeEnabled(nextMet);
+        return { notice: nextMet ? 'Đã bật Metronome CLICK.' : 'Đã tắt Metronome CLICK.', revertable: false };
+      }
+      if (cmd === 'undo') {
+        handleUndo();
+        return { notice: 'Đã Hoàn tác thao tác gần nhất trên Studio.', revertable: false };
+      }
+      if (cmd === 'redo') {
+        handleRedo();
+        return { notice: 'Đã Làm lại (Redo).', revertable: false };
+      }
+    }
     if (act.action === 'navigate_tab') {
       const targetTab = String(payload.tab || 'mixer');
       if (
@@ -1070,6 +1112,160 @@ export default function StudioPage() {
       }
       return { notice: 'Đã mở Pro DAW Dock.', revertable: false };
     }
+    if (act.action === 'set_mastering') {
+      const nextState = mutateWithUndo((prev) => ({
+        ...prev,
+        mastering: {
+          auto_mix_enabled:
+            typeof payload.auto_mix_enabled === 'boolean'
+              ? payload.auto_mix_enabled
+              : prev.mastering.auto_mix_enabled,
+          limiter_ceiling_db:
+            typeof payload.limiter_ceiling_db === 'number'
+              ? Math.min(-1.0, Math.max(-3.0, payload.limiter_ceiling_db))
+              : prev.mastering.limiter_ceiling_db,
+          target_lufs:
+            typeof payload.target_lufs === 'number'
+              ? Math.max(-20, Math.min(-8, payload.target_lufs))
+              : prev.mastering.target_lufs,
+        },
+      }));
+      await saveNow(true, nextState);
+      setStudioNotice(`Đã cập nhật Mastering (${nextState.mastering.target_lufs} LUFS / ${nextState.mastering.limiter_ceiling_db} dBFS).`);
+      return { notice: `Đã chỉnh Mastering (${nextState.mastering.target_lufs} LUFS).`, revertable: true };
+    }
+    if (act.action === 'apply_drum_groove') {
+      const styleRaw = String(payload.style || 'pop').toLowerCase();
+      const style: DrumGrooveStyle =
+        styleRaw === 'trap' || styleRaw === 'lofi' || styleRaw === 'edm' || styleRaw === 'clear'
+          ? styleRaw
+          : 'pop';
+      const bars = Math.max(4, current.song_structure.total_bars || 8);
+      const notes = generateDrumPattern(style, bars, beatsPerBar);
+      const nextState = mutateWithUndo((prev) => {
+        const drums = prev.tracks.drums;
+        const nextDrums = drums
+          ? {
+            ...drums,
+            notes,
+            instrument: style === 'trap' ? 'electronic_808' : style === 'lofi' ? 'lofi_kit' : drums.instrument || 'acoustic_kit',
+          }
+          : {
+            type: 'midi' as const,
+            locked: false,
+            mute: false,
+            solo: false,
+            volume: 0.85,
+            pan: 0,
+            low_db: 0,
+            mid_db: 0,
+            high_db: 0,
+            reverb_send: 0,
+            delay_send: 0,
+            instrument: style === 'trap' ? 'electronic_808' : style === 'lofi' ? 'lofi_kit' : 'acoustic_kit',
+            notes,
+          };
+        return { ...prev, tracks: { ...prev.tracks, drums: nextDrums } };
+      });
+      await saveNow(true, nextState);
+      await engine.syncFromProject(nextState);
+      setStudioMode('pro');
+      setDockOpen(true);
+      setActiveTab('sequencer');
+      setStudioNotice(`Copilot đã nạp điệu trống ${style.toUpperCase()} (${notes.length} hit).`);
+      return { notice: `Đã đổi điệu trống ${style.toUpperCase()}.`, revertable: true };
+    }
+    if (act.action === 'manage_track') {
+      const op = String(payload.operation || 'add').toLowerCase();
+      const tid = String(payload.track_id || 'texture');
+      const nextState = mutateWithUndo((prev) => {
+        const existing = prev.tracks[tid];
+        if (op === 'toggle_lock' && existing) {
+          const nextLocked = typeof payload.locked === 'boolean' ? payload.locked : !existing.locked;
+          return { ...prev, tracks: { ...prev.tracks, [tid]: { ...existing, locked: nextLocked } } };
+        }
+        if (op === 'set_instrument' && existing && existing.type === 'midi') {
+          const inst = typeof payload.instrument === 'string' && payload.instrument ? payload.instrument : 'grand_piano';
+          return { ...prev, tracks: { ...prev.tracks, [tid]: { ...existing, instrument: inst } } };
+        }
+        if (op === 'clear' && existing) {
+          return {
+            ...prev,
+            tracks: {
+              ...prev.tracks,
+              [tid]: existing.type === 'audio' ? { ...existing, clips: [] } : { ...existing, notes: [] },
+            },
+          };
+        }
+        if (op === 'remove' && tid !== 'vocal' && prev.tracks[tid]) {
+          const copy = { ...prev.tracks };
+          delete copy[tid];
+          return { ...prev, tracks: copy };
+        }
+        if (op === 'add' && !existing) {
+          const created =
+            tid === 'texture'
+              ? {
+                type: 'audio' as const,
+                locked: false,
+                mute: false,
+                solo: false,
+                volume: 0.78,
+                pan: 0,
+                low_db: 0,
+                mid_db: 0,
+                high_db: 0,
+                reverb_send: 0.15,
+                delay_send: 0,
+                clips: [],
+              }
+              : {
+                type: 'midi' as const,
+                locked: false,
+                mute: false,
+                solo: false,
+                volume: 0.8,
+                pan: 0,
+                low_db: 0,
+                mid_db: 0,
+                high_db: 0,
+                reverb_send: 0.1,
+                delay_send: 0,
+                instrument: typeof payload.instrument === 'string' ? payload.instrument : 'warm_pad',
+                notes: [],
+              };
+          return { ...prev, tracks: { ...prev.tracks, [tid]: created } };
+        }
+        return prev;
+      });
+      await saveNow(true, nextState);
+      await engine.syncFromProject(nextState);
+      setStudioNotice(`Copilot đã cập nhật track ${tid.toUpperCase()} (${op}).`);
+      return { notice: `Đã ${op} track ${tid.toUpperCase()}.`, revertable: true };
+    }
+    if (act.action === 'regenerate_song') {
+      if (
+        typeof payload.genre === 'string' ||
+        typeof payload.mood === 'string' ||
+        typeof payload.output_mode === 'string' ||
+        typeof payload.melody_mode === 'string' ||
+        typeof payload.structure_preset === 'string'
+      ) {
+        mutateWithUndo((prev) => ({
+          ...prev,
+          config: {
+            ...prev.config,
+            ...(typeof payload.genre === 'string' ? { genre: payload.genre } : {}),
+            ...(typeof payload.mood === 'string' ? { mood: payload.mood } : {}),
+            ...(typeof payload.output_mode === 'string' ? { output_mode: payload.output_mode as OutputMode } : {}),
+            ...(typeof payload.melody_mode === 'string' ? { melody_mode: payload.melody_mode as MelodyMode } : {}),
+            ...(typeof payload.structure_preset === 'string' ? { structure_preset: payload.structure_preset as StructurePreset } : {}),
+          },
+        }));
+      }
+      await handleRegenerateFullSong();
+      return { notice: 'Đang phối lại toàn bộ bài hát bằng Multi-Agent...', revertable: true };
+    }
     if (act.action === 'export_project') {
       const fmt = String(payload.format || 'mp3').toLowerCase();
       if (fmt === 'aimusic') {
@@ -1084,7 +1280,22 @@ export default function StudioPage() {
     if (act.action === 'set_track_mix') {
       const tid = String(payload.track_id || 'vocal');
       const nextState = mutateWithUndo((prev) => {
-        const currTrack = prev.tracks[tid];
+        const currTrack = prev.tracks[tid] ?? (tid === 'texture'
+          ? {
+            type: 'audio' as const,
+            locked: false,
+            mute: false,
+            solo: false,
+            volume: 0.78,
+            pan: 0,
+            low_db: 0,
+            mid_db: 0,
+            high_db: 0,
+            reverb_send: 0.15,
+            delay_send: 0,
+            clips: [],
+          }
+          : undefined);
         if (!currTrack) return prev;
         const nextVol =
           typeof payload.volume === 'number'
@@ -1116,6 +1327,7 @@ export default function StudioPage() {
             : currTrack.delay_send ?? 0;
         const nextMute = typeof payload.mute === 'boolean' ? payload.mute : Boolean(currTrack.mute);
         const nextSolo = typeof payload.solo === 'boolean' ? payload.solo : Boolean(currTrack.solo);
+        const nextLocked = typeof payload.locked === 'boolean' ? payload.locked : Boolean(currTrack.locked);
 
         engine.setChannelConfig({ id: tid, mute: nextMute, solo: nextSolo, volume: nextVol, pan: nextPan });
         engine.setChannelEq(tid, { lowDb: nextLow, midDb: nextMid, highDb: nextHigh });
@@ -1131,6 +1343,7 @@ export default function StudioPage() {
               pan: nextPan,
               mute: nextMute,
               solo: nextSolo,
+              locked: nextLocked,
               low_db: nextLow,
               mid_db: nextMid,
               high_db: nextHigh,
@@ -1168,7 +1381,14 @@ export default function StudioPage() {
             s.name.toLowerCase().includes(tSec) ? { ...s, energy: val } : s
           );
         }
-        let nextTotalBars = prev.song_structure.total_bars;
+        if (typeof payload.delete_section_name === 'string' && payload.delete_section_name.trim()) {
+          const delTarget = payload.delete_section_name.trim().toLowerCase();
+          nextSections = nextSections.filter((s) => !s.name.toLowerCase().includes(delTarget));
+        }
+        let nextTotalBars =
+          typeof payload.total_bars === 'number'
+            ? Math.max(4, Math.min(32, Math.round(payload.total_bars)))
+            : prev.song_structure.total_bars;
         if (typeof payload.add_section_name === 'string' && payload.add_section_name.trim()) {
           const bars = Math.max(1, Math.min(16, Number(payload.section_bars) || 4));
           const last = nextSections[nextSections.length - 1];
@@ -1210,16 +1430,20 @@ export default function StudioPage() {
         }))
         .filter((l) => l.text.length > 0);
       if (incoming.length > 0) {
+        const shouldAppend = payload.append === true;
         const nextState = mutateWithUndo((prev) => ({
           ...prev,
-          lyrics: { ...prev.lyrics, lines: incoming },
+          lyrics: {
+            ...prev.lyrics,
+            lines: shouldAppend ? [...prev.lyrics.lines, ...incoming] : incoming,
+          },
         }));
         await saveNow(true, nextState);
         setStudioMode('pro');
         setDockOpen(true);
         setActiveTab('lyrics');
-        setStudioNotice(`Copilot đã cập nhật ${incoming.length} câu lời vào Lyrics & Karaoke.`);
-        return { notice: `Đã cập nhật ${incoming.length} câu lời.`, revertable: true };
+        setStudioNotice(`Copilot đã ${shouldAppend ? 'bổ sung' : 'cập nhật'} ${incoming.length} câu lời vào Lyrics & Karaoke.`);
+        return { notice: `Đã ${shouldAppend ? 'thêm' : 'cập nhật'} ${incoming.length} câu lời.`, revertable: true };
       }
     }
     if (act.action === 'suggest_lyrics') {
@@ -1247,8 +1471,8 @@ export default function StudioPage() {
     if (act.action === 'apply_autotune' || act.action === 'update_autotune' || payload.autotune_settings || payload.preset) {
       const rawPreset = String(
         (payload.autotune_settings as Partial<AutotuneSettings> | undefined)?.preset ||
-          payload.preset ||
-          (current.autotune_settings.preset === 'off' ? 'balanced' : current.autotune_settings.preset)
+        payload.preset ||
+        (current.autotune_settings.preset === 'off' ? 'balanced' : current.autotune_settings.preset)
       ) as AutoTunePreset;
       const preset: AutoTunePreset =
         rawPreset === 'off' || rawPreset === 'natural' || rawPreset === 'balanced' || rawPreset === 'modern'
@@ -1264,7 +1488,23 @@ export default function StudioPage() {
         preset,
         key: typeof payload.key === 'string' ? payload.key : current.autotune_settings.key,
         scale: typeof payload.scale === 'string' ? payload.scale : current.autotune_settings.scale,
-        mix_percent: isOff ? 0 : current.autotune_settings.mix_percent || 85,
+        retune_speed_ms:
+          typeof payload.retune_speed_ms === 'number'
+            ? Math.max(0, Math.min(200, payload.retune_speed_ms))
+            : current.autotune_settings.retune_speed_ms,
+        humanize:
+          typeof payload.humanize === 'number'
+            ? Math.max(0, Math.min(1, payload.humanize))
+            : current.autotune_settings.humanize,
+        mix_percent: isOff
+          ? 0
+          : typeof payload.mix_percent === 'number'
+            ? Math.max(0, Math.min(100, payload.mix_percent))
+            : current.autotune_settings.mix_percent || 85,
+        auto_follow_project_key:
+          typeof payload.auto_follow_project_key === 'boolean'
+            ? payload.auto_follow_project_key
+            : current.autotune_settings.auto_follow_project_key,
       };
       const nextState = mutateWithUndo((prev) => ({
         ...prev,
@@ -1649,8 +1889,8 @@ export default function StudioPage() {
             title="Ẩn/Hiện DAW Browser & Inspector"
             aria-label="Ẩn/Hiện DAW Browser"
             className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${browserOpen
-                ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
-                : 'border-white/10 bg-[#111317] text-slate-300 hover:bg-white/10'
+              ? 'border-amber-400/50 bg-amber-500/15 text-amber-200'
+              : 'border-white/10 bg-[#111317] text-slate-300 hover:bg-white/10'
               }`}
           >
             <FolderTree className="h-3.5 w-3.5" />
@@ -1687,10 +1927,10 @@ export default function StudioPage() {
               onClick={() => void saveNow(true)}
               title="Lưu & đồng bộ dự án (Ctrl+S)"
               className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition ${autoSaveStatus === 'saving'
-                  ? 'bg-amber-500/20 text-amber-300'
-                  : autoSaveStatus === 'error'
-                    ? 'bg-rose-500/20 text-rose-300'
-                    : 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                ? 'bg-amber-500/20 text-amber-300'
+                : autoSaveStatus === 'error'
+                  ? 'bg-rose-500/20 text-rose-300'
+                  : 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
                 }`}
             >
               {autoSaveStatus === 'saving' ? 'Saving...' : 'Saved'}
@@ -1714,8 +1954,8 @@ export default function StudioPage() {
               aria-label={transport.isPlaying ? 'Pause' : 'Play'}
               title="Play / Pause (Space)"
               className={`flex h-6 w-7 items-center justify-center rounded transition ${transport.isPlaying
-                  ? 'bg-emerald-500 text-slate-950'
-                  : 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                ? 'bg-emerald-500 text-slate-950'
+                : 'bg-amber-500 text-slate-950 hover:bg-amber-400'
                 }`}
             >
               {transport.isPlaying ? (
@@ -1739,8 +1979,8 @@ export default function StudioPage() {
               aria-label={isOverdubbing ? 'Dừng thu Mic' : 'Thu âm Mic Overdub'}
               title={isOverdubbing ? 'Dừng thu Mic' : 'Record Mic Overdub'}
               className={`flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-bold transition ${isOverdubbing
-                  ? 'animate-pulse bg-rose-600 text-white'
-                  : 'text-rose-400 hover:bg-rose-500/20'
+                ? 'animate-pulse bg-rose-600 text-white'
+                : 'text-rose-400 hover:bg-rose-500/20'
                 }`}
             >
               <Circle className="h-2.5 w-2.5 fill-current" />
@@ -1752,8 +1992,8 @@ export default function StudioPage() {
               title="Loop Region"
               aria-label="Bật/Tắt lặp vùng"
               className={`rounded p-1 transition ${transport.loopEnabled
-                  ? 'bg-amber-500/25 text-amber-300'
-                  : 'text-slate-400 hover:bg-white/10 hover:text-white'
+                ? 'bg-amber-500/25 text-amber-300'
+                : 'text-slate-400 hover:bg-white/10 hover:text-white'
                 }`}
             >
               <Repeat className="h-3.5 w-3.5" />
@@ -1764,8 +2004,8 @@ export default function StudioPage() {
               title="Metronome Click (Đếm nhịp - phím M)"
               aria-label="Bật/Tắt Metronome"
               className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold transition ${transport.metronomeEnabled
-                  ? 'bg-sky-500 text-slate-950'
-                  : 'text-slate-400 hover:bg-white/10 hover:text-white'
+                ? 'bg-sky-500 text-slate-950'
+                : 'text-slate-400 hover:bg-white/10 hover:text-white'
                 }`}
             >
               CLICK
@@ -2080,8 +2320,8 @@ export default function StudioPage() {
             onClick={() => setCopilotOpen((o) => !o)}
             title="Bật/Tắt AI Music Copilot"
             className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${copilotOpen
-                ? 'border-amber-400/50 bg-amber-500/20 text-amber-200'
-                : 'border-white/15 bg-[#232730] text-slate-300 hover:bg-white/10'
+              ? 'border-amber-400/50 bg-amber-500/20 text-amber-200'
+              : 'border-white/15 bg-[#232730] text-slate-300 hover:bg-white/10'
               }`}
           >
             <Bot className="h-3.5 w-3.5" />
@@ -2143,8 +2383,8 @@ export default function StudioPage() {
                       type="button"
                       onClick={() => setBrowserTab(id)}
                       className={`rounded py-1 transition ${browserTab === id
-                          ? 'bg-amber-500 text-slate-950'
-                          : 'text-slate-400 hover:text-white'
+                        ? 'bg-amber-500 text-slate-950'
+                        : 'text-slate-400 hover:text-white'
                         }`}
                     >
                       {label}
@@ -2175,8 +2415,8 @@ export default function StudioPage() {
                             type="button"
                             onClick={() => handleApplyTotalBars(bars)}
                             className={`rounded border py-1 font-mono text-[11px] font-bold ${project.song_structure.total_bars === bars
-                                ? 'border-amber-400 bg-amber-500/20 text-amber-200'
-                                : 'border-white/10 bg-[#111317] text-slate-300 hover:bg-white/10'
+                              ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                              : 'border-white/10 bg-[#111317] text-slate-300 hover:bg-white/10'
                               }`}
                           >
                             {bars}b
@@ -2514,8 +2754,8 @@ export default function StudioPage() {
                         setDockOpen(true);
                       }}
                       className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-[11px] font-bold transition ${activeTab === tab.id && dockOpen
-                          ? 'bg-amber-500 text-slate-950'
-                          : 'text-slate-400 hover:bg-white/[0.06] hover:text-white'
+                        ? 'bg-amber-500 text-slate-950'
+                        : 'text-slate-400 hover:bg-white/[0.06] hover:text-white'
                         }`}
                     >
                       {'icon' in tab && tab.icon && <tab.icon className="h-3 w-3" />}
@@ -2902,8 +3142,8 @@ export default function StudioPage() {
                             <div
                               key={i}
                               className={`flex flex-wrap items-center gap-1.5 rounded-lg p-1 text-xs transition ${isActiveLine
-                                  ? 'border border-emerald-400/60 bg-emerald-500/15 ring-1 ring-emerald-400/30'
-                                  : 'border border-white/[0.04] bg-white/[0.015]'
+                                ? 'border border-emerald-400/60 bg-emerald-500/15 ring-1 ring-emerald-400/30'
+                                : 'border border-white/[0.04] bg-white/[0.015]'
                                 }`}
                             >
                               <button
@@ -2911,8 +3151,8 @@ export default function StudioPage() {
                                 onClick={() => engine.seekToBar(line.bar)}
                                 title={`Nhảy tới Bar ${line.bar}`}
                                 className={`shrink-0 rounded px-2 py-1 font-mono text-[10px] font-bold transition ${isActiveLine
-                                    ? 'bg-emerald-400 text-slate-950'
-                                    : 'bg-white/10 text-amber-200 hover:bg-white/20'
+                                  ? 'bg-emerald-400 text-slate-950'
+                                  : 'bg-white/10 text-amber-200 hover:bg-white/20'
                                   }`}
                               >
                                 ▶ b{line.bar}
@@ -2970,8 +3210,8 @@ export default function StudioPage() {
                                   })
                                 }
                                 className={`min-w-[180px] flex-1 rounded-lg border px-2.5 py-1 ${isActiveLine
-                                    ? 'border-emerald-400/50 bg-[#0d151c] font-semibold text-emerald-100'
-                                    : 'border-white/10 bg-[#0b0d11] text-slate-200'
+                                  ? 'border-emerald-400/50 bg-[#0d151c] font-semibold text-emerald-100'
+                                  : 'border-white/10 bg-[#0b0d11] text-slate-200'
                                   }`}
                               />
                               {isActiveLine && (

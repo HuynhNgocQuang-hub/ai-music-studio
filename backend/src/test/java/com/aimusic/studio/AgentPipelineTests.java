@@ -705,6 +705,33 @@ class AgentPipelineTests {
         );
         assertTrue(audioResp.getReply().contains("dBFS"), audioResp.getReply());
         assertFalse(audioResp.getSuggestedActions().isEmpty());
+
+        // 3. Holistic "đề xuất mọi thứ / bạn có thể làm gì" returns comprehensive project audit + multi-category tools
+        ProjectState sparseState = sampleProjectState("enhance", "short");
+        sparseState.setLyrics(new com.aimusic.studio.model.ProjectLyrics("vi", List.of()));
+        CoachChatResponse everythingResp = coach.chatCoach(
+                sparseState,
+                "AI làm được gì và đề xuất mọi thứ cho bài này giúp tôi",
+                List.of(),
+                "producer",
+                "/studio/" + sparseState.getProjectId(),
+                Map.of(),
+                null,
+                null
+        );
+        assertTrue(everythingResp.getSuggestedActions().size() >= 6, "Expected >= 6 holistic actions, got " + everythingResp.getSuggestedActions().size());
+        assertTrue(everythingResp.getSuggestedActions().stream().anyMatch(a -> "suggest_lyrics".equals(a.getAction())));
+        assertTrue(everythingResp.getSuggestedActions().stream().anyMatch(a -> "auto_mix".equals(a.getAction())));
+        assertTrue(everythingResp.getSuggestedActions().stream().anyMatch(a -> "export_project".equals(a.getAction())));
+
+        // 4. Universal command routing: grooves, transport, navigation, mastering, instrument swap
+        CoachChatResponse grooveResp = coach.chatCoach(state, "Nạp điệu trống Trap và tắt tiếng Bass", List.of(), "arrangement", "/studio/p1", Map.of(), null, null);
+        assertTrue(grooveResp.getSuggestedActions().stream().anyMatch(a -> "apply_drum_groove".equals(a.getAction()) && "trap".equals(a.getPayload().get("style"))));
+        assertTrue(grooveResp.getSuggestedActions().stream().anyMatch(a -> "set_track_mix".equals(a.getAction()) && Boolean.TRUE.equals(a.getPayload().get("mute"))));
+
+        CoachChatResponse sysResp = coach.chatCoach(state, "Phát nhạc rồi mở Settings", List.of(), "producer", "/studio/p1", Map.of(), null, null);
+        assertTrue(sysResp.getSuggestedActions().stream().anyMatch(a -> "transport_control".equals(a.getAction()) && "play".equals(a.getPayload().get("command"))));
+        assertTrue(sysResp.getSuggestedActions().stream().anyMatch(a -> "navigate_route".equals(a.getAction()) && "/settings".equals(a.getPayload().get("route"))));
     }
 
     private static byte[] synthMonoWav(double durationSec, int sampleRate, double amplitude) {

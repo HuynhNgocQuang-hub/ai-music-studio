@@ -34,41 +34,53 @@ const CHAT_MODES: Array<{
   desc: string;
   prompts: string[];
 }> = [
-  {
-    id: 'producer',
-    label: 'Producer',
-    desc: 'Toàn diện • Cấu trúc & Vận hành',
-    prompts: ['Góp ý cấu trúc bài', 'Đẩy năng lượng Chorus lên 95%', 'Xuất file MP3 320kbps'],
-  },
-  {
-    id: 'arrangement',
-    label: 'Hòa âm',
-    desc: 'Chords, Nhịp & MIDI Tracks',
-    prompts: ['Đổi hợp âm vi - IV - I - V', 'Chuyển sang nhịp 6/8', 'Tạo lại track Drums'],
-  },
-  {
-    id: 'lyricist',
-    label: 'Viết lời',
-    desc: 'Lyrics, Hook & Vần điệu',
-    prompts: ['Gợi ý lời cho điệp khúc', 'Viết lại câu Chorus bắt tai'],
-  },
-  {
-    id: 'mix',
-    label: 'Mix / Tune',
-    desc: 'EQ 3 băng, FX & Auto-Tune',
-    prompts: ['Vocal hơi chói và khô', 'Cân bằng Mix chống vỡ tiếng', 'Bật Auto-Tune mức Vừa'],
-  },
-];
+    {
+      id: 'producer',
+      label: 'Producer',
+      desc: 'Toàn diện • Cấu trúc & Vận hành',
+      prompts: [
+        'AI làm được gì & Đề xuất mọi thứ',
+        'Đẩy năng lượng Chorus lên 95%',
+        'Xuất file MP3 320kbps',
+      ],
+    },
+    {
+      id: 'arrangement',
+      label: 'Hòa âm',
+      desc: 'Chords, Nhịp & MIDI Tracks',
+      prompts: ['Đổi hợp âm vi - IV - I - V', 'Chuyển sang nhịp 6/8', 'Tạo lại track Drums'],
+    },
+    {
+      id: 'lyricist',
+      label: 'Viết lời',
+      desc: 'Lyrics, Hook & Vần điệu',
+      prompts: ['Gợi ý lời cho điệp khúc', 'Viết lại câu Chorus bắt tai'],
+    },
+    {
+      id: 'mix',
+      label: 'Mix / Tune',
+      desc: 'EQ 3 băng, FX & Auto-Tune',
+      prompts: ['Vocal hơi chói và khô', 'Cân bằng Mix chống vỡ tiếng', 'Bật Auto-Tune mức Vừa'],
+    },
+  ];
 
 function getRouteQuickPrompts(pathname: string, modeSpec: (typeof CHAT_MODES)[number]): string[] {
   if (pathname === '/' || pathname.startsWith('/library')) {
-    return ['Tạo beat Lo-fi nhẹ', 'Tạo beat Trap / 808', 'Cách Import .aimusic an toàn'];
+    return [
+      'AI làm được gì & Đề xuất mọi thứ',
+      'Tạo beat Lo-fi nhẹ',
+      'Tạo beat Trap / 808',
+    ];
   }
   if (pathname.startsWith('/create')) {
-    return ['Làm sao thu Mic không bị ồn?', 'Nên chọn Preserve hay Enhance?', 'Auto-Tune Vừa là gì?'];
+    return [
+      'AI làm được gì & Đề xuất mọi thứ',
+      'Làm sao thu Mic không bị ồn?',
+      'Nên chọn Preserve hay Enhance?',
+    ];
   }
   if (pathname.startsWith('/settings')) {
-    return ['Kiểm tra API Key & Hệ thống', 'Lỗi Gemini 404 hoặc 503 là gì?'];
+    return ['Kiểm tra API Key & Hệ thống', 'Lỗi Gemini 404 hoặc 503 là gì?', 'Vào Studio DAW'];
   }
   return modeSpec.prompts;
 }
@@ -133,8 +145,8 @@ export default function AiCoachChatDrawer() {
   );
   const hasProjectVocal = Boolean(
     project.audio_assets.tuned_vocal_ref ||
-      project.audio_assets.dry_denoised_ref ||
-      project.audio_assets.raw_input_ref
+    project.audio_assets.dry_denoised_ref ||
+    project.audio_assets.raw_input_ref
   );
 
   // Load saved chat thread from IndexedDB when switching projects / global scope
@@ -169,7 +181,7 @@ export default function AiCoachChatDrawer() {
   // Persist messages smoothly once thread hydration completed
   useEffect(() => {
     if (loadedThreadRef.current !== threadId || loading) return;
-    void saveChatThread(threadId, assistantMode, messages).catch(() => {});
+    void saveChatThread(threadId, assistantMode, messages).catch(() => { });
   }, [messages, assistantMode, threadId, loading]);
 
   useEffect(() => {
@@ -206,7 +218,7 @@ export default function AiCoachChatDrawer() {
       },
     ];
     setMessages(resetMsgs);
-    void deleteChatThread(threadId).catch(() => {});
+    void deleteChatThread(threadId).catch(() => { });
   };
 
   const handleVoiceToggle = async () => {
@@ -323,8 +335,8 @@ export default function AiCoachChatDrawer() {
     const userDisplay = attachedAudioFile
       ? `${text} [Đính kèm: ${attachedAudioFile.name}]`
       : attachProjectVocal
-      ? `${text} [Kèm Vocal bài hiện tại]`
-      : text;
+        ? `${text} [Kèm Vocal bài hiện tại]`
+        : text;
 
     const nextHistory: CoachMessage[] = [
       ...messages,
@@ -357,12 +369,12 @@ export default function AiCoachChatDrawer() {
           prev.map((m, i) =>
             i === assistantIndex
               ? {
-                  ...m,
-                  content: res.reply,
-                  provider: res.provider,
-                  timestamp: new Date().toISOString(),
-                  suggested_actions: res.suggested_actions,
-                }
+                ...m,
+                content: res.reply,
+                provider: res.provider,
+                timestamp: new Date().toISOString(),
+                suggested_actions: res.suggested_actions,
+              }
               : m
           )
         );
@@ -405,12 +417,12 @@ export default function AiCoachChatDrawer() {
               prev.map((m, i) =>
                 i === assistantIndex
                   ? {
-                      role: 'assistant',
-                      content: res.reply || m.content,
-                      provider: res.provider || m.provider,
-                      timestamp: new Date().toISOString(),
-                      suggested_actions: res.suggested_actions ?? m.suggested_actions,
-                    }
+                    role: 'assistant',
+                    content: res.reply || m.content,
+                    provider: res.provider || m.provider,
+                    timestamp: new Date().toISOString(),
+                    suggested_actions: res.suggested_actions ?? m.suggested_actions,
+                  }
                   : m
               )
             );
@@ -461,7 +473,7 @@ export default function AiCoachChatDrawer() {
     const snap = revertSnapshots[key];
     if (!snap) return;
     loadProjectIntoSession(snap, { dirty: true });
-    await engine.syncFromProject(snap).catch(() => {});
+    await engine.syncFromProject(snap).catch(() => { });
     setAppliedMap((prev) => ({ ...prev, [key]: false }));
     setRevertSnapshots((prev) => {
       const next = { ...prev };
@@ -522,11 +534,10 @@ export default function AiCoachChatDrawer() {
             key={m.id}
             type="button"
             onClick={() => setAssistantMode(m.id)}
-            className={`rounded px-1.5 py-1 text-[10px] font-semibold transition ${
-              assistantMode === m.id
-                ? 'bg-amber-500 text-slate-950'
-                : 'bg-white/[0.04] text-slate-300 hover:bg-white/10 hover:text-white'
-            }`}
+            className={`rounded px-1.5 py-1 text-[10px] font-semibold transition ${assistantMode === m.id
+              ? 'bg-amber-500 text-slate-950'
+              : 'bg-white/[0.04] text-slate-300 hover:bg-white/10 hover:text-white'
+              }`}
           >
             {m.label}
           </button>
@@ -558,9 +569,8 @@ export default function AiCoachChatDrawer() {
                       payload: { fix },
                     })
                   }
-                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white ${
-                    applied ? 'cursor-default bg-emerald-600/60' : 'bg-sky-600 hover:bg-sky-500'
-                  }`}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white ${applied ? 'cursor-default bg-emerald-600/60' : 'bg-sky-600 hover:bg-sky-500'
+                    }`}
                 >
                   {applied ? `✓ ${fix.label}` : fix.label}
                 </button>
@@ -593,11 +603,10 @@ export default function AiCoachChatDrawer() {
           return (
             <div
               key={idx}
-              className={`space-y-2 rounded-2xl p-2.5 leading-relaxed ${
-                m.role === 'user'
-                  ? 'ml-6 border border-amber-500/25 bg-amber-500/15 text-amber-100'
-                  : 'mr-2 border border-white/[0.08] bg-[#1b1e25] text-slate-200'
-              }`}
+              className={`space-y-2 rounded-2xl p-2.5 leading-relaxed ${m.role === 'user'
+                ? 'ml-6 border border-amber-500/25 bg-amber-500/15 text-amber-100'
+                : 'mr-2 border border-white/[0.08] bg-[#1b1e25] text-slate-200'
+                }`}
             >
               {m.role === 'assistant' && m.provider && (
                 <div className="flex items-center justify-between text-[9px] font-bold uppercase tracking-wider text-slate-400">
@@ -635,11 +644,10 @@ export default function AiCoachChatDrawer() {
                             type="button"
                             disabled={applied || busy}
                             onClick={() => void handleApplyAction(idx, act)}
-                            className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white transition ${
-                              applied
-                                ? 'cursor-default bg-emerald-600/60'
-                                : 'bg-sky-600 hover:bg-sky-500 disabled:opacity-50'
-                            }`}
+                            className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white transition ${applied
+                              ? 'cursor-default bg-emerald-600/60'
+                              : 'bg-sky-600 hover:bg-sky-500 disabled:opacity-50'
+                              }`}
                           >
                             {busy ? 'Đang xử lý...' : applied ? `✓ ${act.label}` : act.label}
                           </button>
@@ -698,11 +706,10 @@ export default function AiCoachChatDrawer() {
                 <button
                   type="button"
                   onClick={() => setAttachProjectVocal((v) => !v)}
-                  className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 transition ${
-                    attachProjectVocal
-                      ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
-                      : 'border-white/15 bg-white/[0.04] text-slate-300 hover:border-emerald-400/40'
-                  }`}
+                  className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 transition ${attachProjectVocal
+                    ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
+                    : 'border-white/15 bg-white/[0.04] text-slate-300 hover:border-emerald-400/40'
+                    }`}
                 >
                   <Volume2 className="h-3 w-3" />
                   <span>{attachProjectVocal ? '✓ Kèm Vocal để AI nghe' : 'Gửi kèm Vocal để AI nghe'}</span>
@@ -727,11 +734,10 @@ export default function AiCoachChatDrawer() {
             title={isListeningVoice ? 'Dừng nói / thu âm' : 'Nói câu hỏi bằng giọng nói (Mic)'}
             aria-label="Nhập câu hỏi bằng giọng nói"
             onClick={() => void handleVoiceToggle()}
-            className={`rounded-md border p-1.5 transition ${
-              isListeningVoice
-                ? 'animate-pulse border-rose-400 bg-rose-500/25 text-rose-200'
-                : 'border-white/15 bg-[#1b1e25] text-slate-300 hover:border-amber-400/50 hover:text-amber-200'
-            }`}
+            className={`rounded-md border p-1.5 transition ${isListeningVoice
+              ? 'animate-pulse border-rose-400 bg-rose-500/25 text-rose-200'
+              : 'border-white/15 bg-[#1b1e25] text-slate-300 hover:border-amber-400/50 hover:text-amber-200'
+              }`}
           >
             {isListeningVoice ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
           </button>

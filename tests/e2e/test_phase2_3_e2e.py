@@ -1104,7 +1104,22 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
     assert "dBFS" in audio_resp.json().get("reply", "")
     assert len(audio_resp.json().get("suggested_actions", [])) >= 1
 
-    # 4. Oversized audio (> 10 MB) returns 413
+    # 4. Holistic audit prompt ("AI làm được gì & Đề xuất mọi thứ") proposes >= 6 multi-domain actions
+    audit_chat = api_client.post(
+        "/api/coach/chat",
+        headers={"X-LLM-Provider": "mock"},
+        json={
+            "project_id": pid,
+            "route": f"/studio/{pid}",
+            "mode": "producer",
+            "message": "AI làm được gì và đề xuất mọi thứ cho bài này",
+            "history": [],
+        },
+    )
+    assert audit_chat.status_code == 200, audit_chat.text
+    assert len(audit_chat.json().get("suggested_actions", [])) >= 6
+
+    # 5. Oversized audio (> 10 MB) returns 413
     too_big = api_client.post(
         "/api/coach/chat/audio",
         data={"project_id": pid, "message": "Too big"},

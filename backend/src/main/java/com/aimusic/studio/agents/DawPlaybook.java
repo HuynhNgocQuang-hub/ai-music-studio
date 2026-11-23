@@ -54,8 +54,14 @@ public final class DawPlaybook {
             new Entry(
                     "settings_diagnostics",
                     "/settings",
-                    List.of("api", "key", "gemini", "openai", "mock", "404", "503", "401", "loi", "redis", "worker", "fluidsynth", "settings", "test"),
+                    List.of("api", "key", "gemini", "openai", "mock", "404", "503", "401", "loi", "redis", "worker", "fluidsynth", "settings", "test", "cache"),
                     "[Settings & Xu ly Su co] Vao /settings de nhap Gemini API Key (ho tro ca AQ... va AIza...) hoac OpenAI Key, phan vai tung Agent va bam Test API Key. Mac dinh dung gemini-3.8-flash (tu fallback tu gemini-2.5-flash neu bi Google 404). Neu gap 503 UNAVAILABLE la qua tai tam thoi tu Google Cloud, he thong tu giu luong voi Mock Fallback thong minh ma khong lam mat du lieu."
+            ),
+            new Entry(
+                    "shortcuts_and_copilot",
+                    "/studio",
+                    List.of("lam gi", "kha nang", "chuc nang", "moi thu", "tat ca", "de xuat", "phim tat", "shortcut", "space", "undo", "redo", "quick", "pro daw", "mastering", "lufs", "groove", "nhac cu", "dieu huong", "giup gi"),
+                    "[Toan bo Nang luc AI Copilot & Phim tat] AI co the dieu khien truc tiep moi tac vu qua nut bam an toan (kem Hoan tac 1 cham): (1) Khoi tao Template tu Home/Library; (2) Dieu huong giua 5 trang & Quick/Pro DAW + Play/Pause (Space), Loop, Metronome (M), Undo/Redo (Ctrl+Z/Y); (3) Chinh BPM/Key/Nhip 4-4/3-4/6-8, them/xoa Section, keo Dynamics Energy%, doi hop am & dieu trong (Pop/Trap/Lo-fi/EDM); (4) Them/xoa/khoa Track, doi nhac cu, Mix Volume/Pan/Mute/Solo/3-Band EQ/Reverb/Delay/Auto-Mix/Mastering LUFS; (5) Auto-Tune Pro, Auto-Trim, nghe audio WAV/Mic; (6) Viet/sua tung dong loi; (7) Xuat WAV/MP3/Stems/MIDI/.aimusic va test API/don cache."
             )
     );
 
@@ -71,6 +77,7 @@ public final class DawPlaybook {
         String r = normalizeVietnamese(route);
         String q = normalizeVietnamese(query);
         String m = mode != null ? mode.toLowerCase(Locale.ROOT) : "producer";
+        boolean broadRequest = q.contains("moi thu") || q.contains("tat ca") || q.contains("lam gi") || q.contains("tong the") || q.contains("help") || q.contains("toan bo");
 
         Map<Entry, Integer> scores = new LinkedHashMap<>();
         for (Entry entry : ENTRIES) {
@@ -88,6 +95,9 @@ public final class DawPlaybook {
             } else if ("arrangement".equals(m) && ("sequencer_pianoroll".equals(entry.id()) || "playlist_clips".equals(entry.id()))) {
                 score += 2;
             }
+            if (broadRequest && "shortcuts_and_copilot".equals(entry.id())) {
+                score += 6;
+            }
             if (score > 0) {
                 scores.put(entry, score);
             }
@@ -95,12 +105,13 @@ public final class DawPlaybook {
 
         List<Entry> selected = scores.entrySet().stream()
                 .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
-                .limit(2)
+                .limit(broadRequest ? 4 : 3)
                 .map(Map.Entry::getKey)
                 .toList();
 
         if (selected.isEmpty()) {
             selected = new ArrayList<>();
+            selected.add(ENTRIES.get(7));
             selected.add(r.contains("/create") ? ENTRIES.get(0) : r.contains("/settings") ? ENTRIES.get(6) : ENTRIES.get(1));
         }
 

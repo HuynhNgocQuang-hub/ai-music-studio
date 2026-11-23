@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
   AUTO_SAVE_INTERVAL_MS,
+  clearAllDrafts,
   deleteDraft,
   getDraft,
   getLatestRestorableDraft,
@@ -8,8 +9,14 @@ import {
   saveDraft,
   type StoredDraft,
 } from '@/lib/storage/indexeddb';
-import { checkHealth, syncProject, testLlmConnection } from '@/lib/api/client';
-import { DAW_TEMPLATES, buildProjectFromTemplate } from '@/lib/music/presets';
+import { checkHealth, clearBackendCache, syncProject, testLlmConnection } from '@/lib/api/client';
+import {
+  DAW_TEMPLATES,
+  buildProjectFromTemplate,
+  generateDrumPattern,
+  getBeatsPerBar,
+  type DrumGrooveStyle,
+} from '@/lib/music/presets';
 import {
   createDefaultProjectState,
   type CoachSuggestedAction,
@@ -260,6 +267,26 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         return { notice: msg };
       }
 
+      if (act.action === 'clear_cache') {
+        const scope = String(payload.scope || 'backend').toLowerCase();
+        if (scope === 'local') {
+          await clearAllDrafts().catch(() => { });
+          return { notice: 'Đã dọn bộ nhớ nháp cục bộ (IndexedDB).' };
+        }
+        const cleared = await clearBackendCache().catch(() => null);
+        return { notice: `Đã dọn cache Backend (${cleared?.cleared_assets ?? 0} asset).` };
+      }
+
+      if (act.action === 'navigate_route') {
+        const target = String(payload.route || '/');
+        const safePath =
+          target === '/studio'
+            ? `/studio/${encodeURIComponent(prevSnapshot.project_id)}`
+            : target;
+        navigate(safePath);
+        return { notice: `Đang chuyển sang trang ${safePath}.` };
+      }
+
       if (coachExecutorRef.current) {
         const res = await coachExecutorRef.current(act);
         return {
@@ -268,30 +295,161 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         };
       }
 
-      // Non-studio fallback: open Studio cleanly or update basic config
+      // Non-studio fallback: execute navigation, mix/track/structure/lyrics/mastering mutations directly cleanly
+      if (act.action === 'switch_studio_mode') {
+        const nextMode = payload.studio_mode === 'quick' ? 'quick' : 'pro';
+        setStudioUiMeta((prev) => ({ ...prev, studioMode: nextMode }));
+        navigate(`/studio/${encodeURIComponent(prevSnapshot.project_id)}`);
+        return { notice: `Mở Studio ở chế độ ${nextMode.toUpperCase()}.` };
+      }
+
       if (act.action === 'navigate_tab') {
         if (typeof payload.tab === 'string') {
-          setStudioUiMeta((prev) => ({ ...prev, activeTab: payload.tab as string }));
+          setStudioUiMeta((prev) => ({ ...prev, activeTab: payload.tab as string, studioMode: 'pro' }));
         }
         navigate(`/studio/${encodeURIComponent(prevSnapshot.project_id)}`);
         return { notice: `Đang mở Phòng thu DAW (${prevSnapshot.title || prevSnapshot.project_id}).` };
       }
 
-      const next = updateProject((prev) => ({
-        ...prev,
-        config: {
-          ...prev.config,
-          ...(typeof payload.genre === 'string' ? { genre: payload.genre } : {}),
-          ...(typeof payload.mood === 'string' ? { mood: payload.mood } : {}),
-        },
-        analysis: {
-          ...prev.analysis,
-          ...(typeof payload.bpm === 'number'
-            ? { bpm: Math.max(40, Math.min(220, Math.round(payload.bpm))), bpm_locked: true }
-            : {}),
-        },
-      }));
-      await saveNow(true, next).catch(() => {});
+      if (
+        act.action === 'transport_control' ||
+        act.action === 'auto_mix' ||
+        act.action === 'auto_trim_vocal' ||
+        act.action === 'regenerate_track' ||
+        act.action === 'regenerate_song' ||
+        act.action === 'export_project'
+      ) {
+        navigate(`/studio/${encodeURIComponent(prevSnapshot.project_id)}`);
+        return { notice: `Đã mở Studio cho "${prevSnapshot.title || prevSnapshot.project_id}" — hãy bấm lại nút này hoặc nút tương ứng trên Studio để thực thi Audio trực tiếp.` };
+      }
+
+      const next = updateProject((prev) => {
+        if (act.action === 'set_mastering') {
+          const ceiling =
+            typeof payload.limiter_ceiling_db === 'number'
+              ? Math.min(-1.0, Math.max(-3.0, payload.limiter_ceiling_db))
+              : prev.mastering.limiter_ceiling_db;
+          const targetLufs =
+            typeof payload.target_lufs === 'number'
+              ? Math.max(-20, Math.min(-8, payload.target_lufs))
+              : prev.mastering.target_lufs;
+          return {
+            ...prev,
+            mastering: {
+              auto_mix_enabled:
+                typeof payload.auto_mix_enabled === 'boolean'
+                  ? payload.auto_mix_enabled
+                  : prev.mastering.auto_mix_enabled,
+              limiter_ceiling_db: ceiling,
+              target_lufs: targetLufs,
+            },
+          };
+        }
+
+        if (act.action === 'apply_drum_groove') {
+          const styleRaw = String(payload.style || 'pop').toLowerCase();
+          const style: DrumGrooveStyle =
+            styleRaw === 'trap' || styleRaw === 'lofi' || styleRaw === 'edm' || styleRaw === 'clear'
+              ? styleRaw
+              : 'pop';
+          const bars = Math.max(4, prev.song_structure.total_bars || 8);
+          const beats = getBeatsPerBar(prev.analysis.time_signature);
+          const notes = generateDrumPattern(style, bars, beats);
+          const drums = prev.tracks.drums;
+          return {
+            ...prev,
+            tracks: {
+              ...prev.tracks,
+              drums: drums
+                ? { ...drums, notes }
+                : {
+                  type: 'midi',
+                  locked: false,
+                  mute: false,
+                  solo: false,
+                  volume: 0.85,
+                  pan: 0,
+                  low_db: 0,
+                  mid_db: 0,
+                  high_db: 0,
+                  reverb_send: 0,
+                  delay_send: 0,
+                  instrument: style === 'trap' ? 'electronic_808' : style === 'lofi' ? 'lofi_kit' : 'acoustic_kit',
+                  notes,
+                },
+            },
+          };
+        }
+
+        if (act.action === 'set_track_mix') {
+          const tid = String(payload.track_id || 'vocal');
+          const currTrack = prev.tracks[tid];
+          if (!currTrack) return prev;
+          return {
+            ...prev,
+            tracks: {
+              ...prev.tracks,
+              [tid]: {
+                ...currTrack,
+                volume: typeof payload.volume === 'number' ? Math.max(0, Math.min(1.2, payload.volume)) : currTrack.volume,
+                pan: typeof payload.pan === 'number' ? Math.max(-1, Math.min(1, payload.pan)) : currTrack.pan,
+                low_db: typeof payload.low_db === 'number' ? Math.max(-12, Math.min(12, payload.low_db)) : currTrack.low_db ?? 0,
+                mid_db: typeof payload.mid_db === 'number' ? Math.max(-12, Math.min(12, payload.mid_db)) : currTrack.mid_db ?? 0,
+                high_db: typeof payload.high_db === 'number' ? Math.max(-12, Math.min(12, payload.high_db)) : currTrack.high_db ?? 0,
+                reverb_send: typeof payload.reverb_send === 'number' ? Math.max(0, Math.min(1, payload.reverb_send)) : currTrack.reverb_send ?? 0,
+                delay_send: typeof payload.delay_send === 'number' ? Math.max(0, Math.min(1, payload.delay_send)) : currTrack.delay_send ?? 0,
+                mute: typeof payload.mute === 'boolean' ? payload.mute : currTrack.mute,
+                solo: typeof payload.solo === 'boolean' ? payload.solo : currTrack.solo,
+                locked: typeof payload.locked === 'boolean' ? payload.locked : currTrack.locked,
+              },
+            },
+          };
+        }
+
+        if (act.action === 'edit_structure_and_dynamics') {
+          let nextTs = prev.analysis.time_signature;
+          if (payload.time_signature === '4/4' || payload.time_signature === '3/4' || payload.time_signature === '6/8') {
+            nextTs = payload.time_signature;
+          }
+          let sections = [...prev.song_structure.sections];
+          if (typeof payload.target_section === 'string' && typeof payload.section_energy === 'number') {
+            const target = payload.target_section.toLowerCase();
+            const val = Math.max(0.1, Math.min(1, payload.section_energy));
+            sections = sections.map((s) => (s.name.toLowerCase().includes(target) ? { ...s, energy: val } : s));
+          }
+          let totalBars = prev.song_structure.total_bars;
+          if (typeof payload.add_section_name === 'string' && payload.add_section_name.trim()) {
+            const bars = Math.max(1, Math.min(16, Number(payload.section_bars) || 4));
+            const last = sections[sections.length - 1];
+            const startBar = last ? last.start_bar + last.bars : 1;
+            sections.push({ name: payload.add_section_name.trim(), start_bar: startBar, bars, energy: 0.85 });
+            totalBars = Math.max(4, startBar + bars - 1);
+          }
+          return {
+            ...prev,
+            analysis: { ...prev.analysis, time_signature: nextTs },
+            song_structure: { ...prev.song_structure, total_bars: totalBars, sections },
+          };
+        }
+
+        return {
+          ...prev,
+          config: {
+            ...prev.config,
+            ...(typeof payload.genre === 'string' ? { genre: payload.genre } : {}),
+            ...(typeof payload.mood === 'string' ? { mood: payload.mood } : {}),
+          },
+          analysis: {
+            ...prev.analysis,
+            ...(typeof payload.bpm === 'number'
+              ? { bpm: Math.max(40, Math.min(220, Math.round(payload.bpm))), bpm_locked: true }
+              : {}),
+            ...(typeof payload.key === 'string' ? { detected_key: payload.key, key_locked: true } : {}),
+            ...(typeof payload.scale === 'string' ? { detected_scale: payload.scale, key_locked: true } : {}),
+          },
+        };
+      });
+      await saveNow(true, next).catch(() => { });
       return { notice: `Đã cập nhật: ${act.label}`, snapshot: prevSnapshot };
     },
     [loadProjectIntoSession, saveNow, updateProject]
