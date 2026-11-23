@@ -25,7 +25,7 @@ public class AppProperties {
     private String geminiApiKey = "";
     private String openaiApiKey = "";
     private String defaultLlmProvider = "gemini";
-    private String geminiModel = "gemini-2.5-flash";
+    private String geminiModel = "gemini-3.8-flash";
     private String openaiModel = "gpt-4o-mini";
     private String corsOrigins = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173";
     private double jobTimeoutSeconds = 60.0;

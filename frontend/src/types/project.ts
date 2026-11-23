@@ -3,7 +3,6 @@ export type OutputMode = 'accompaniment' | 'full_song';
 export type MotifPosition = 'chorus' | 'verse' | 'auto';
 export type StructurePreset = 'short' | 'standard';
 export type AutoTunePreset = 'off' | 'natural' | 'balanced' | 'modern';
-export type PreviewLayer = 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance';
 export type LLMProvider = 'gemini' | 'openai' | 'mock';
 
 export interface MidiNote {
@@ -145,8 +144,6 @@ export interface ProjectTracks {
   lead: MidiTrackState;
   [key: string]: AudioTrackState | MidiTrackState | undefined;
 }
-
-export type TrackMap = ProjectTracks;
 
 export interface MasteringSettings {
   auto_mix_enabled: boolean;
@@ -339,10 +336,13 @@ export interface LyricsSuggestResponse {
   lines: LyricLine[];
 }
 
+export type CoachAssistantMode = 'producer' | 'arrangement' | 'lyricist' | 'mix';
+
 export interface CoachMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp?: string;
+  provider?: string;
   suggested_actions?: CoachSuggestedAction[];
 }
 
@@ -356,11 +356,13 @@ export interface CoachSuggestedAction {
 export interface CoachChatRequest {
   project_id: string;
   message: string;
+  mode?: CoachAssistantMode;
   history: CoachMessage[];
 }
 
 export interface CoachChatResponse {
   reply: string;
+  provider?: string;
   suggested_actions: CoachSuggestedAction[];
 }
 

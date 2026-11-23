@@ -211,6 +211,12 @@ class AgentPipelineTests {
         CoachChatResponse advice = coach.chatCoach(result, "Nên đặt câu ngân nga ở Chorus hay Verse?", List.of());
         assertNotNull(advice.getReply());
         assertFalse(advice.getReply().isBlank());
+
+        CoachChatResponse lyricAdvice = coach.chatCoach(result, "Gợi ý lời cho điệp khúc", List.of(), "lyricist");
+        assertTrue(lyricAdvice.getSuggestedActions().stream().anyMatch(a -> "suggest_lyrics".equals(a.getAction())));
+
+        CoachChatResponse mixAdvice = coach.chatCoach(result, "Cân bằng tiếng bị vỡ", List.of(), "mix");
+        assertTrue(mixAdvice.getSuggestedActions().stream().anyMatch(a -> "auto_mix".equals(a.getAction())));
         assertEquals(beforeJson, objectMapper.writeValueAsString(result));
     }
 

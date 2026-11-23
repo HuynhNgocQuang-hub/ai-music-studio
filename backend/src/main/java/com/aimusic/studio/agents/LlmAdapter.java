@@ -288,12 +288,8 @@ public class LlmAdapter {
 
     private LlmResponse callGemini(String prompt, String systemPrompt, boolean asJson) throws Exception {
         String apiKey = effectiveGeminiKey();
-        String model = properties.getGeminiModel() != null && !properties.getGeminiModel().isBlank()
-                ? properties.getGeminiModel() : "gemini-2.5-flash";
-
-        String url = "https://generativelanguage.googleapis.com/v1beta/models/"
-                + URLEncoder.encode(model, StandardCharsets.UTF_8)
-                + ":generateContent";
+        String configuredModel = properties.getGeminiModel() != null && !properties.getGeminiModel().isBlank()
+                ? properties.getGeminiModel().trim() : "gemini-3.8-flash";
 
         Map<String, Object> genConfig = new LinkedHashMap<>();
         genConfig.put("temperature", asJson ? 0.3 : 0.5);
@@ -305,16 +301,15 @@ public class LlmAdapter {
             body.put("systemInstruction", Map.of("parts", List.of(Map.of("text", systemPrompt))));
         }
         body.put("generationConfig", genConfig);
+        String jsonBody = objectMapper.writeValueAsString(body);
 
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(25))
-                .header("Content-Type", "application/json")
-                .header("x-goog-api-key", apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
-                .build();
-
-        HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+        String model = configuredModel;
+        HttpResponse<String> resp = sendGeminiRequest(model, apiKey, jsonBody);
+        if (resp.statusCode() == 404 && !"gemini-3.8-flash".equalsIgnoreCase(model)) {
+            log.warn("Gemini model '{}' returned HTTP 404; retrying with 'gemini-3.8-flash'.", model);
+            model = "gemini-3.8-flash";
+            resp = sendGeminiRequest(model, apiKey, jsonBody);
+        }
         if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
             throw new IllegalStateException("Gemini HTTP " + resp.statusCode() + extractHttpErrorDetail(resp.body()));
         }
@@ -322,6 +317,20 @@ public class LlmAdapter {
         JsonNode root = objectMapper.readTree(resp.body());
         String text = root.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
         return new LlmResponse(Provider.GEMINI, model, text, null, false);
+    }
+
+    private HttpResponse<String> sendGeminiRequest(String model, String apiKey, String jsonBody) throws Exception {
+        String url = "https://generativelanguage.googleapis.com/v1beta/models/"
+                + URLEncoder.encode(model, StandardCharsets.UTF_8)
+                + ":generateContent";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(25))
+                .header("Content-Type", "application/json")
+                .header("x-goog-api-key", apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                .build();
+        return httpClient.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     private LlmResponse callOpenai(String prompt, String systemPrompt, boolean asJson) throws Exception {

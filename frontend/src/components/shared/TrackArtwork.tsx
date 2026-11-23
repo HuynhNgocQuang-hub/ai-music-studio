@@ -211,32 +211,3 @@ export function TrackArtwork({
     </div>
   );
 }
-
-export function MiniSoundBars({
-  active = false,
-  bars = 4,
-  className = '',
-}: {
-  active?: boolean;
-  bars?: number;
-  className?: string;
-}) {
-  const heights = [0.45, 0.9, 0.65, 1.0, 0.55, 0.8];
-  const delays = ['0ms', '150ms', '300ms', '90ms', '220ms', '380ms'];
-  return (
-    <span className={`inline-flex h-3.5 items-end gap-[2px] ${className}`} aria-hidden="true">
-      {Array.from({ length: bars }, (_, idx) => (
-        <span
-          key={idx}
-          className={`w-[2.5px] rounded-full ${
-            active ? 'eq-bar bg-[#1ed760]' : 'bg-zinc-500/60'
-          }`}
-          style={{
-            height: `${Math.round(heights[idx % heights.length] * 100)}%`,
-            animationDelay: active ? delays[idx % delays.length] : undefined,
-          }}
-        />
-      ))}
-    </span>
-  );
-}

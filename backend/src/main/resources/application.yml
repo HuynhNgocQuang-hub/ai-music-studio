@@ -31,7 +31,7 @@ app:
   gemini-api-key: ${GEMINI_API_KEY:}
   openai-api-key: ${OPENAI_API_KEY:}
   default-llm-provider: ${DEFAULT_LLM_PROVIDER:gemini}
-  gemini-model: ${GEMINI_MODEL:gemini-2.5-flash}
+  gemini-model: ${GEMINI_MODEL:gemini-3.8-flash}
   openai-model: ${OPENAI_MODEL:gpt-4o-mini}
   cors-origins: ${CORS_ORIGINS:http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
   job-timeout-seconds: ${JOB_TIMEOUT_SECONDS:60.0}

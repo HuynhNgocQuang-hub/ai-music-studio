@@ -10,7 +10,6 @@ import {
   FolderTree,
   Grid3X3,
   Maximize2,
-  MessageSquare,
   Mic,
   Minimize2,
   Music,
@@ -21,7 +20,6 @@ import {
   Repeat,
   Save,
   Scissors,
-  Send,
   SkipBack,
   Sliders,
   Sparkles,
@@ -75,6 +73,7 @@ import {
 } from '@/lib/music/presets';
 import { getAudioBlob, getDraft, markDraftSaved, saveAudioBlob } from '@/lib/storage/indexeddb';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
+import AiCoachChatDrawer from '@/components/studio/AiCoachChatDrawer';
 import ConsoleMixerPanel from '@/components/studio/ConsoleMixerPanel';
 import PianoRollEditor from '@/components/studio/PianoRollEditor';
 import QuickStudioView from '@/components/studio/QuickStudioView';
@@ -85,6 +84,7 @@ import type {
   AutoTunePreset,
   AutotuneSettings,
   ChordEvent,
+  CoachAssistantMode,
   CoachMessage,
   CoachSuggestedAction,
   MelodyMode,
@@ -206,11 +206,12 @@ export default function StudioPage() {
   // Lyrics & AI Coach
   const [lyricTopic, setLyricTopic] = useState('Ký ức mùa hè');
   const [lyricLoading, setLyricLoading] = useState(false);
+  const [coachMode, setCoachMode] = useState<CoachAssistantMode>('producer');
   const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([
     {
       role: 'assistant',
       content:
-        'Xin chào! Tôi là AI Music Coach. Bạn có thể hỏi tôi cách sửa lời, đổi hợp âm cho cảm xúc hơn, hoặc thu đè Overdub để tôi kiểm tra nhịp & cao độ.',
+        'Xin chào! Tôi là AI Music Chatbot đa chế độ (Producer / Hòa âm / Viết lời / Mix & Tune). Chọn chế độ bên trên hoặc hỏi trực tiếp để nhận đề xuất áp dụng 1 chạm.',
     },
   ]);
   const [coachInput, setCoachInput] = useState('');
@@ -1039,15 +1040,28 @@ export default function StudioPage() {
     }
   };
 
-  const handleSendCoach = async () => {
-    const msg = coachInput.trim();
+  const handleClearCoachChat = () => {
+    setCoachMessages([
+      {
+        role: 'assistant',
+        content:
+          'Đã làm mới cuộc trò chuyện. Hãy chọn chế độ (Producer / Hòa âm / Viết lời / Mix) và đặt câu hỏi bất kỳ về dự án hiện tại!',
+      },
+    ]);
+    setAppliedCoachActions([]);
+  };
+
+  const handleSendCoach = async (overrideText?: string) => {
+    const msg = (overrideText ?? coachInput).trim();
     if (!msg) return;
     const nextHistory: CoachMessage[] = [
       ...coachMessages,
       { role: 'user', content: msg, timestamp: new Date().toISOString() },
     ];
     setCoachMessages(nextHistory);
-    setCoachInput('');
+    if (overrideText === undefined) {
+      setCoachInput('');
+    }
     setCoachLoading(true);
     try {
       try {
@@ -1058,6 +1072,7 @@ export default function StudioPage() {
       const res = await chatWithCoach({
         project_id: project.project_id,
         message: msg,
+        mode: coachMode,
         history: nextHistory,
       });
       setCoachMessages((prev) => [
@@ -1065,6 +1080,7 @@ export default function StudioPage() {
         {
           role: 'assistant',
           content: res.reply,
+          provider: res.provider,
           timestamp: new Date().toISOString(),
           suggested_actions: res.suggested_actions,
         },
@@ -1098,6 +1114,28 @@ export default function StudioPage() {
       if (act.action === 'auto_trim_vocal') {
         await handleAutoTrimVocal();
         setAppliedCoachActions((prev) => [...prev, actionKey]);
+        return;
+      }
+      if (act.action === 'suggest_lyrics') {
+        const res = await suggestLyrics({
+          project_id: current.project_id,
+          language: typeof payload.language === 'string' ? payload.language : current.lyrics.language || 'vi',
+          topic: typeof payload.topic === 'string' ? payload.topic : lyricTopic || 'Ký ức & Hy vọng',
+          section: typeof payload.section === 'string' ? payload.section : 'Chorus',
+        });
+        mutateWithUndo((prev) => ({
+          ...prev,
+          lyrics: { ...prev.lyrics, lines: res.lines },
+        }));
+        setAppliedCoachActions((prev) => [...prev, actionKey]);
+        setActiveTab('lyrics');
+        setStudioNotice(`AI Chatbot đã gợi ý lời (${res.lines.length} câu) & cập nhật vào tab Lyrics.`);
+        return;
+      }
+      if (act.action === 'regenerate_track') {
+        const targetTrack = typeof payload.target_track === 'string' ? payload.target_track : 'drums';
+        setAppliedCoachActions((prev) => [...prev, actionKey]);
+        await handleRegenerateTrack(targetTrack);
         return;
       }
 
@@ -2859,119 +2897,25 @@ export default function StudioPage() {
             </div>
           </div>
 
-          {/* 4. RIGHT DRAWER: AI MUSIC COACH & OVERDUB FIT CHECK */}
+          {/* 4. RIGHT DRAWER: AI MUSIC CHATBOT & OVERDUB FIT CHECK */}
           {coachOpen && (
-            <aside className="flex w-80 shrink-0 flex-col rounded-lg border border-white/[0.08] bg-[#16191f] shadow-xl shadow-black/40">
-              <div className="flex items-center justify-between border-b border-white/[0.08] px-3.5 py-2.5">
-                <div className="flex items-center gap-2">
-                  <MessageSquare className="h-4 w-4 text-amber-400" />
-                  <span className="font-display text-xs font-bold text-white">
-                    AI Music Coach &amp; Fit Check
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  aria-label="Đóng AI Coach"
-                  onClick={() => setCoachOpen(false)}
-                  className="text-xs text-slate-400 hover:text-white"
-                >
-                  ✕
-                </button>
-              </div>
-
-              {fitCheck && (
-                <div className="space-y-2 border-b border-white/[0.08] bg-amber-500/10 p-3 text-xs">
-                  <p className="font-semibold text-amber-200">Kết quả Overdub Fit Check</p>
-                  <p className="text-slate-300">
-                    Lệch nhịp: <strong>{fitCheck.timing_offset_ms} ms</strong> • {fitCheck.gain_suggestion}
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {fitCheck.one_click_fixes.map((fix) => {
-                      const applied = appliedFixIds.includes(fix.id);
-                      return (
-                        <button
-                          key={fix.id}
-                          type="button"
-                          disabled={applied}
-                          onClick={() => void handleApplyOneClickFix(fix)}
-                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white ${applied
-                              ? 'bg-emerald-600/60 cursor-default'
-                              : 'bg-sky-600 hover:bg-sky-500'
-                            }`}
-                        >
-                          {applied ? `✓ ${fix.label}` : fix.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              <div className="flex-1 space-y-2.5 overflow-y-auto p-3 text-xs">
-                {coachMessages.map((m, idx) => (
-                  <div
-                    key={idx}
-                    className={`space-y-2 rounded-2xl p-2.5 leading-relaxed ${m.role === 'user'
-                        ? 'ml-6 border border-amber-500/25 bg-amber-500/15 text-amber-100'
-                        : 'mr-4 border border-white/[0.08] bg-[#1b1e25] text-slate-200'
-                      }`}
-                  >
-                    <p>{m.content}</p>
-                    {m.role === 'assistant' && m.suggested_actions && m.suggested_actions.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 border-t border-white/[0.07] pt-1.5">
-                        {m.suggested_actions.map((act) => {
-                          const actionKey = `${idx}:${act.id}`;
-                          const applied = appliedCoachActions.includes(actionKey);
-                          const busy = applyingCoachActionKey === actionKey;
-                          return (
-                            <button
-                              key={act.id}
-                              type="button"
-                              disabled={applied || busy}
-                              onClick={() => void handleApplyCoachAction(idx, act)}
-                              className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white transition ${applied
-                                  ? 'bg-emerald-600/60 cursor-default'
-                                  : 'bg-sky-600 hover:bg-sky-500 disabled:opacity-50'
-                                }`}
-                            >
-                              {busy ? 'Đang áp dụng...' : applied ? `✓ ${act.label}` : act.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {coachLoading && <div className="text-xs text-slate-400">AI Coach đang suy nghĩ...</div>}
-              </div>
-
-              <div className="border-t border-white/[0.08] p-2.5">
-                <div className="flex gap-1.5">
-                  <input
-                    id="studio-coach-input"
-                    name="coachInput"
-                    aria-label="Hỏi AI Music Coach"
-                    type="text"
-                    value={coachInput}
-                    onChange={(e) => setCoachInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void handleSendCoach();
-                    }}
-                    placeholder="Hỏi AI Coach về hợp âm, lời..."
-                    className="flex-1 rounded-full border border-white/15 bg-[#0b0d11] px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-amber-400 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    aria-label="Gửi câu hỏi tới AI Coach"
-                    disabled={coachLoading || !coachInput.trim()}
-                    onClick={() => void handleSendCoach()}
-                    className="rounded-md bg-amber-500 px-3 py-1.5 text-black hover:bg-amber-400 disabled:opacity-40"
-                  >
-                    <Send className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-            </aside>
+            <AiCoachChatDrawer
+              assistantMode={coachMode}
+              onModeChange={setCoachMode}
+              messages={coachMessages}
+              inputValue={coachInput}
+              loading={coachLoading}
+              appliedActions={appliedCoachActions}
+              applyingActionKey={applyingCoachActionKey}
+              fitCheck={fitCheck}
+              appliedFixIds={appliedFixIds}
+              onClose={() => setCoachOpen(false)}
+              onInputChange={setCoachInput}
+              onSend={(overrideText) => void handleSendCoach(overrideText)}
+              onClearChat={handleClearCoachChat}
+              onApplyAction={(msgIdx, act) => void handleApplyCoachAction(msgIdx, act)}
+              onApplyFix={(fix) => void handleApplyOneClickFix(fix)}
+            />
           )}
         </div>
       )}

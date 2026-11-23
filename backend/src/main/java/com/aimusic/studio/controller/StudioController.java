@@ -87,7 +87,7 @@ public class StudioController {
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
         LlmContextHolder.set(LlmContextHolder.extractFromRequest(request));
         try {
-            return coachLyricistAgent.chatCoach(state, req.getMessage(), req.getHistory());
+            return coachLyricistAgent.chatCoach(state, req.getMessage(), req.getHistory(), req.getMode());
         } finally {
             LlmContextHolder.clear();
         }

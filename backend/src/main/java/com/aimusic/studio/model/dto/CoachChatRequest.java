@@ -17,6 +17,9 @@ public class CoachChatRequest {
     @JsonProperty("history")
     private List<Map<String, Object>> history = new ArrayList<>();
 
+    @JsonProperty("mode")
+    private String mode = "producer";
+
     @JsonProperty("project_state")
     private ProjectState projectState;
 
@@ -30,6 +33,9 @@ public class CoachChatRequest {
     public void setHistory(List<Map<String, Object>> history) {
         this.history = history != null ? history : new ArrayList<>();
     }
+
+    public String getMode() { return mode; }
+    public void setMode(String mode) { this.mode = (mode != null && !mode.isBlank()) ? mode : "producer"; }
 
     public ProjectState getProjectState() { return projectState; }
     public void setProjectState(ProjectState projectState) { this.projectState = projectState; }

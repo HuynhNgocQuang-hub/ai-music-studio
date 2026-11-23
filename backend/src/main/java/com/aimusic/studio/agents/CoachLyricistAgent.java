@@ -129,26 +129,61 @@ public class CoachLyricistAgent {
     }
 
     public CoachChatResponse chatCoach(ProjectState projectState, String message, List<Map<String, Object>> history) {
+        return chatCoach(projectState, message, history, "producer");
+    }
+
+    public CoachChatResponse chatCoach(ProjectState projectState, String message, List<Map<String, Object>> history, String rawMode) {
+        String mode = normalizeCoachMode(rawMode);
         ProjectAnalysis analysis = projectState.getAnalysis() != null ? projectState.getAnalysis() : new ProjectAnalysis();
         ProjectConfig cfg = projectState.getConfig() != null ? projectState.getConfig() : new ProjectConfig();
-        List<ChordEvent> chords = projectState.getSongStructure() != null && projectState.getSongStructure().getChords() != null
-                ? projectState.getSongStructure().getChords() : List.of();
+        SongStructure structure = projectState.getSongStructure() != null ? projectState.getSongStructure() : new SongStructure();
+        List<ChordEvent> chords = structure.getChords() != null ? structure.getChords() : List.of();
         List<String> chordSyms = chords.stream().limit(8).map(ChordEvent::getSymbol).toList();
+        List<String> sectionNames = structure.getSections() != null
+                ? structure.getSections().stream().map(SongSection::getName).toList() : List.of();
+        int lyricCount = projectState.getLyrics() != null && projectState.getLyrics().getLines() != null
+                ? projectState.getLyrics().getLines().size() : 0;
 
         String contextSummary = String.format(Locale.ROOT,
-                "BPM=%.1f, Key=%s %s, Mode=%s/%s, Genre=%s, Chords=%s.",
-                analysis.getBpm(), analysis.getDetectedKey(), analysis.getDetectedScale(),
-                cfg.getMelodyMode(), cfg.getOutputMode(), cfg.getGenre(), chordSyms);
+                "BPM=%.1f (%s), Key=%s %s, Mode=%s/%s, Genre=%s, Mood=%s, Sections=%s, Chords=%s, LyricLines=%d.",
+                analysis.getBpm(),
+                analysis.getTimeSignature() != null ? analysis.getTimeSignature() : "4/4",
+                analysis.getDetectedKey(), analysis.getDetectedScale(),
+                cfg.getMelodyMode(), cfg.getOutputMode(), cfg.getGenre(), cfg.getMood(),
+                sectionNames, chordSyms, lyricCount);
 
-        String prompt = "Project context: " + contextSummary + "\n"
-                + "Recent history count: " + (history != null ? history.size() : 0) + "\n"
+        StringBuilder historySnippet = new StringBuilder();
+        if (history != null && !history.isEmpty()) {
+            int start = Math.max(0, history.size() - 6);
+            for (int i = start; i < history.size(); i++) {
+                Map<String, Object> turn = history.get(i);
+                if (turn == null) continue;
+                String role = turn.get("role") != null ? turn.get("role").toString() : "user";
+                String content = turn.get("content") != null ? turn.get("content").toString().replaceAll("\\s+", " ").trim() : "";
+                if (content.length() > 220) content = content.substring(0, 220) + "...";
+                if (!content.isBlank()) {
+                    historySnippet.append("- ").append(role).append(": ").append(content).append('\n');
+                }
+            }
+        }
+
+        String roleGuidance = switch (mode) {
+            case "arrangement" -> "Focus on chord progressions, song structure sections, rhythm meter, and per-track instrumentation.";
+            case "lyricist" -> "Focus on Vietnamese/English lyric craft, rhyme, emotional storytelling, and matching syllable rhythm.";
+            case "mix" -> "Focus on 3-band EQ, reverb/delay send FX balance, vocal carve, Auto-Tune tuning, and -1.0 dBFS mastering.";
+            default -> "Act as holistic Music Producer guiding composition, structure, vocal overdubs, and finishing.";
+        };
+
+        String prompt = "Assistant mode: " + mode + " (" + roleGuidance + ")\n"
+                + "Project context: " + contextSummary + "\n"
+                + (historySnippet.length() > 0 ? "Recent conversation:\n" + historySnippet : "")
                 + "User question: " + message + "\n"
                 + "Give concise actionable advice in Vietnamese. Never mutate state directly. "
-                + "Return strict JSON: {\"reply\": str, \"suggested_actions\": [{\"id\": str, \"label\": str, \"action\": \"update_config|rearrange_chords|apply_autotune|auto_mix|auto_trim_vocal\", \"payload\": object}]}.";
+                + "Return strict JSON: {\"reply\": str, \"suggested_actions\": [{\"id\": str, \"label\": str, \"action\": \"update_config|rearrange_chords|apply_autotune|auto_mix|auto_trim_vocal|suggest_lyrics|regenerate_track\", \"payload\": object}]}.";
 
         boolean useJsonCoach = llm.resolveProvider("coach", null) != LlmAdapter.Provider.MOCK;
         LlmAdapter.LlmResponse resp = useJsonCoach
-                ? llm.generateJson(prompt, "You are an encouraging AI Music Coach. Return strict JSON without mutating project state.", "coach", null)
+                ? llm.generateJson(prompt, "You are an encouraging AI Music Coach (" + mode + "). Return strict JSON without mutating project state.", "coach", null)
                 : llm.generateText(prompt, "You are an encouraging AI Music Coach guiding songwriting and arrangement.", "coach", null);
 
         List<CoachSuggestedAction> actions = new ArrayList<>();
@@ -173,56 +208,156 @@ public class CoachLyricistAgent {
             }
         }
 
+        String lowerMsg = message != null ? message.toLowerCase(Locale.ROOT) : "";
         if (actions.isEmpty()) {
-            String lowerMsg = message != null ? message.toLowerCase(Locale.ROOT) : "";
-            if (lowerMsg.contains("chorus") || lowerMsg.contains("verse") || lowerMsg.contains("đoạn")) {
-                actions.add(new CoachSuggestedAction(
-                        "set_motif_chorus",
-                        "Đặt mô-típ làm Chorus",
-                        "update_config",
-                        Map.of("motif_position", "chorus", "output_mode", "full_song")
-                ));
-            }
-            if (lowerMsg.contains("buồn") || lowerMsg.contains("sad") || lowerMsg.contains("hợp âm") || lowerMsg.contains("chord")) {
-                actions.add(new CoachSuggestedAction(
-                        "try_minor_rearrange",
-                        "Thử hợp âm thứ (Minor feel)",
-                        "rearrange_chords",
-                        Map.of("suggestion", "Use vi - IV - I - V progression")
-                ));
-            }
-            if (lowerMsg.contains("auto-tune") || lowerMsg.contains("phô") || lowerMsg.contains("cao độ") || lowerMsg.contains("tune")) {
-                actions.add(new CoachSuggestedAction(
-                        "apply_balanced_tune",
-                        "Bật Auto-Tune mức Vừa",
-                        "apply_autotune",
-                        Map.of("preset", "balanced")
-                ));
-            }
-            if (lowerMsg.contains("mix") || lowerMsg.contains("vỡ") || lowerMsg.contains("cân bằng") || lowerMsg.contains("nhỏ") || lowerMsg.contains("to")) {
-                actions.add(new CoachSuggestedAction(
-                        "run_auto_mix",
-                        "Chạy AI Auto-Mix (-1.0 dBFS)",
-                        "auto_mix",
-                        Map.of()
-                ));
-            }
-            if (lowerMsg.contains("nhanh") || lowerMsg.contains("faster")) {
-                actions.add(new CoachSuggestedAction(
-                        "boost_bpm_8",
-                        "Tăng +8 BPM",
-                        "update_config",
-                        Map.of("bpm", Math.min(220.0, analysis.getBpm() + 8.0))
-                ));
-            }
+            buildHeuristicActions(actions, mode, lowerMsg, analysis, cfg);
         }
 
         if (resp.isMock()) {
-            reply = String.format(Locale.ROOT,
-                    "Dựa trên dự án hiện tại (%s %s, %.0f BPM): bạn nên giữ mô-típ chính ở Chorus để tạo cao trào rõ rệt, và dùng hợp âm mở rộng nhẹ ở Verse.",
-                    analysis.getDetectedKey(), analysis.getDetectedScale(), analysis.getBpm());
+            reply = buildContextAwareMockReply(mode, lowerMsg, analysis, cfg, lyricCount, chordSyms);
         }
         return new CoachChatResponse(reply, actions, resp.provider().value());
+    }
+
+    private static String normalizeCoachMode(String rawMode) {
+        if (rawMode == null || rawMode.isBlank()) return "producer";
+        return switch (rawMode.trim().toLowerCase(Locale.ROOT)) {
+            case "arrangement", "harmony", "chords" -> "arrangement";
+            case "lyricist", "lyrics" -> "lyricist";
+            case "mix", "mastering", "autotune" -> "mix";
+            default -> "producer";
+        };
+    }
+
+    private static void buildHeuristicActions(
+            List<CoachSuggestedAction> actions,
+            String mode,
+            String lowerMsg,
+            ProjectAnalysis analysis,
+            ProjectConfig cfg
+    ) {
+        if ("lyricist".equals(mode) || lowerMsg.contains("lời") || lowerMsg.contains("lyric") || lowerMsg.contains("viết")) {
+            actions.add(new CoachSuggestedAction(
+                    "suggest_lyrics_topic",
+                    "AI Gợi ý lời (" + (cfg.getMood() != null ? cfg.getMood() : "Cảm xúc") + ")",
+                    "suggest_lyrics",
+                    Map.of("language", "vi", "section", "Chorus", "topic", cfg.getMood() != null ? cfg.getMood() : "Ký ức")
+            ));
+        }
+        if (lowerMsg.contains("chorus") || lowerMsg.contains("verse") || lowerMsg.contains("đoạn") || lowerMsg.contains("cấu trúc")) {
+            actions.add(new CoachSuggestedAction(
+                    "set_motif_chorus",
+                    "Đặt mô-típ làm Chorus",
+                    "update_config",
+                    Map.of("motif_position", "chorus", "output_mode", "full_song")
+            ));
+        }
+        if ("arrangement".equals(mode) || lowerMsg.contains("buồn") || lowerMsg.contains("sad") || lowerMsg.contains("hợp âm") || lowerMsg.contains("chord")) {
+            actions.add(new CoachSuggestedAction(
+                    "try_minor_rearrange",
+                    "Đổi vòng hợp âm vi - IV - I - V",
+                    "rearrange_chords",
+                    Map.of("suggestion", "Use vi - IV - I - V progression")
+            ));
+        }
+        if ("mix".equals(mode) || lowerMsg.contains("auto-tune") || lowerMsg.contains("phô") || lowerMsg.contains("cao độ") || lowerMsg.contains("tune")) {
+            actions.add(new CoachSuggestedAction(
+                    "apply_balanced_tune",
+                    "Bật Auto-Tune mức Vừa",
+                    "apply_autotune",
+                    Map.of("preset", "balanced")
+            ));
+        }
+        if ("mix".equals(mode) || lowerMsg.contains("mix") || lowerMsg.contains("vỡ") || lowerMsg.contains("cân bằng") || lowerMsg.contains("nhỏ") || lowerMsg.contains("to") || lowerMsg.contains("eq")) {
+            actions.add(new CoachSuggestedAction(
+                    "run_auto_mix",
+                    "Chạy AI Auto-Mix (-1.0 dBFS)",
+                    "auto_mix",
+                    Map.of()
+            ));
+        }
+        if (lowerMsg.contains("trống") || lowerMsg.contains("drum")) {
+            actions.add(new CoachSuggestedAction(
+                    "regen_drums",
+                    "Tạo lại track Drums",
+                    "regenerate_track",
+                    Map.of("target_track", "drums")
+            ));
+        } else if (lowerMsg.contains("bass")) {
+            actions.add(new CoachSuggestedAction(
+                    "regen_bass",
+                    "Tạo lại track Bass",
+                    "regenerate_track",
+                    Map.of("target_track", "bass")
+            ));
+        }
+        if (lowerMsg.contains("nhanh") || lowerMsg.contains("faster")) {
+            actions.add(new CoachSuggestedAction(
+                    "boost_bpm_8",
+                    "Tăng +8 BPM",
+                    "update_config",
+                    Map.of("bpm", Math.min(220.0, analysis.getBpm() + 8.0))
+            ));
+        } else if (lowerMsg.contains("chậm") || lowerMsg.contains("slow")) {
+            actions.add(new CoachSuggestedAction(
+                    "slow_bpm_8",
+                    "Giảm -8 BPM",
+                    "update_config",
+                    Map.of("bpm", Math.max(40.0, analysis.getBpm() - 8.0))
+            ));
+        }
+        if (actions.isEmpty()) {
+            actions.add(new CoachSuggestedAction(
+                    "run_auto_mix_default",
+                    "Chạy AI Auto-Mix",
+                    "auto_mix",
+                    Map.of()
+            ));
+            actions.add(new CoachSuggestedAction(
+                    "suggest_lyrics_default",
+                    "Gợi ý lời nhanh",
+                    "suggest_lyrics",
+                    Map.of("language", "vi", "section", "Chorus")
+            ));
+        }
+    }
+
+    private static String buildContextAwareMockReply(
+            String mode,
+            String lowerMsg,
+            ProjectAnalysis analysis,
+            ProjectConfig cfg,
+            int lyricCount,
+            List<String> chordSyms
+    ) {
+        String keyScale = analysis.getDetectedKey() + " " + analysis.getDetectedScale();
+        String chordsStr = chordSyms.isEmpty() ? "chưa có hợp âm" : String.join(" - ", chordSyms.subList(0, Math.min(4, chordSyms.size())));
+        return switch (mode) {
+            case "lyricist" -> String.format(Locale.ROOT,
+                    "[Lyricist • %s %.0f BPM] Bài hiện có %d câu lời (%s, %s). Bạn nên giữ câu hook ngắn 6–10 âm tiết lặp lại ở đầu Chorus để dễ nhớ; bấm nút bên dưới để AI sinh thử lời khớp tiết tấu ngay.",
+                    keyScale, analysis.getBpm(), lyricCount, cfg.getGenre(), chordsStr);
+            case "arrangement" -> String.format(Locale.ROOT,
+                    "[Arrangement • %s %.0f BPM] Vòng hợp âm hiện tại (%s) phù hợp %s. Để tăng độ cao trào, thử vòng vi - IV - I - V ở Chorus hoặc kéo năng lượng (Energy) ở làn Dynamics trên Timeline.",
+                    keyScale, analysis.getBpm(), chordsStr, cfg.getGenre());
+            case "mix" -> String.format(Locale.ROOT,
+                    "[Mix & Mastering • %.0f BPM] Với tông %s, nên giảm nhẹ High -1.5 dB nếu giọng bị chói, đẩy Reverb Send Vocal ~20–30%% và bật Auto-Mix để tự lách tần số 2.2 kHz + giữ Master đỉnh <= -1.0 dBFS.",
+                    analysis.getBpm(), keyScale);
+            default -> {
+                if (lowerMsg.contains("lời") || lowerMsg.contains("lyric")) {
+                    yield String.format(Locale.ROOT,
+                            "Bài %s (%s %.0f BPM) đang có %d câu lời. Bạn có thể bấm 'AI Gợi ý lời' bên dưới hoặc mở tab Lyrics để đồng bộ Karaoke theo từng ô nhịp.",
+                            cfg.getGenre(), keyScale, analysis.getBpm(), lyricCount);
+                }
+                if (lowerMsg.contains("mix") || lowerMsg.contains("auto-tune") || lowerMsg.contains("phô")) {
+                    yield String.format(Locale.ROOT,
+                            "Để giọng hòa vào nền (%s, %.0f BPM) mượt nhất: bật Auto-Tune mức Vừa theo đúng %s và dùng Auto-Mix để tự giữ Limiter <= -1.0 dBFS.",
+                            cfg.getGenre(), analysis.getBpm(), keyScale);
+                }
+                yield String.format(Locale.ROOT,
+                        "Dự án %s (%s, %.0f BPM, hợp âm %s): bạn nên giữ mô-típ chính ở Chorus, tinh chỉnh đường Dynamics Envelope theo từng đoạn và chạy Auto-Mix trước khi xuất WAV/MP3.",
+                        cfg.getGenre(), keyScale, analysis.getBpm(), chordsStr);
+            }
+        };
     }
 
     private Map<String, Object> convertPayload(Map<?, ?> raw) {
