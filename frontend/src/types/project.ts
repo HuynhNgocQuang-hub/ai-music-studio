@@ -174,6 +174,10 @@ export interface ProjectState {
   created_at?: string;
   updated_at?: string;
   source?: 'draft' | 'saved';
+  owner_id?: string;
+  visibility?: 'private' | 'public';
+  share_slug?: string | null;
+  published_at?: string | null;
   config: ProjectConfig;
   audio_assets: AudioAssets;
   analysis: ProjectAnalysis;
@@ -387,6 +391,10 @@ export interface ProjectSummary {
   key?: string;
   scale?: string;
   source?: 'draft' | 'saved';
+  owner_id?: string;
+  visibility?: 'private' | 'public';
+  share_slug?: string | null;
+  published_at?: string | null;
   updated_at?: string;
   total_bars?: number;
   version?: number;
@@ -399,6 +407,17 @@ export interface PaginatedProjectsResponse {
   page: number;
   limit?: number;
   total_pages: number;
+}
+
+export interface CloudInfraStatus {
+  database_backend?: string;
+  database_ready?: boolean;
+  postgres_connected?: boolean;
+  object_storage_backend?: string;
+  object_storage_connected?: boolean;
+  bucket?: string;
+  auth_mode?: string;
+  https_proxy_ready?: boolean;
 }
 
 export interface HealthResponse {
@@ -419,6 +438,93 @@ export interface HealthResponse {
     openai_configured?: boolean;
     default?: string;
   };
+  cloud?: CloudInfraStatus;
+}
+
+export interface AuthUser {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: string;
+}
+
+export interface AuthQuota {
+  actor: string;
+  tier: 'guest' | 'cloud';
+  date_utc: string;
+  generate_used: number;
+  generate_limit: number;
+  generate_remaining: number;
+  export_used: number;
+  export_limit: number;
+  export_remaining: number;
+  storage_used_bytes: number;
+  storage_limit_bytes: number;
+}
+
+export interface AuthSessionResponse {
+  authenticated: boolean;
+  token?: string;
+  oauth_provider?: string;
+  user: AuthUser;
+  quota: AuthQuota;
+  cloud?: CloudInfraStatus;
+}
+
+export interface PublishReleaseRequest {
+  format?: 'mp3' | 'flac' | 'wav';
+  bitrate?: '192k' | '320k';
+  title?: string;
+  artist?: string;
+  genre?: string;
+  apply_mastering?: boolean;
+}
+
+export interface PublishReleaseResponse {
+  status: string;
+  project_id: string;
+  share_slug: string;
+  share_url: string;
+  stream_url: string;
+  format: string;
+  title: string;
+  artist: string;
+  genre: string;
+  lufs_target: number;
+  published_at: string;
+  object_storage_backend?: string;
+  project_state?: ProjectState;
+}
+
+export interface PublishedRelease {
+  share_slug: string;
+  project_id: string;
+  owner_id?: string;
+  title: string;
+  artist: string;
+  genre: string;
+  bpm: number;
+  key: string;
+  scale: string;
+  total_bars: number;
+  master_format: string;
+  lufs_target: number;
+  plays_count: number;
+  created_at: string;
+  share_url: string;
+  stream_url: string;
+  lyrics_summary?: string;
+  sections?: SongSection[];
+  chords?: ChordEvent[];
+  lyrics?: LyricLine[];
+}
+
+export interface PaginatedReleasesResponse {
+  items: PublishedRelease[];
+  total: number;
+  page: number;
+  limit: number;
+  total_pages: number;
 }
 
 export interface LlmTestResponse {

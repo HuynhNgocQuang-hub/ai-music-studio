@@ -19,7 +19,9 @@ backend/__pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Heavy Audio / SoundFonts / Temp Storage
+# Heavy Audio / SoundFonts / Temp Storage / Local Cloud Data
+data/
+backend/data/
 storage/
 temp/
 *.wav

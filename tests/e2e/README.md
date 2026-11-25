@@ -1,6 +1,6 @@
 # E2E & Contract Verification (`tests/e2e/`)
 
-Automated integration, security, and contract verification suite for **AI Music Studio (Phase 1–7)**, aligned with:
+Automated integration, security, and contract verification suite for **AI Music Studio (Phase 1–8)**, aligned with:
 - [`docs/SRS.md`](../../docs/SRS.md)
 - [`docs/MULTI_AGENT_ARCHITECTURE.md`](../../docs/MULTI_AGENT_ARCHITECTURE.md)
 - [`docs/API_AND_UI_SPEC.md`](../../docs/API_AND_UI_SPEC.md)
@@ -32,7 +32,11 @@ Automated integration, security, and contract verification suite for **AI Music 
 - `test_phase4_crud_eq_send_fx_and_delete`
 - `test_security_headers_validation_and_dos_guards` (`nosniff`/`DENY`/`no-referrer`, Zip Bomb/path traversal, collision-safe `.aimusic` import, `total_bars > 256` -> `400`)
 - `test_end_to_end_full_lifecycle_workflow` (Upload -> Denoise -> Analyze -> AutoTune -> Generate SSE -> Overdub -> Export/Import)
-- `test_full_spectrum_copilot_stream_and_audio` (Global `/api/coach/chat` on `/`, SSE `/api/coach/chat/stream`, WAV `/api/coach/chat/audio` DSP telemetry & 10 MB `413` guard + Phase 6B/7 `/api/studio/separate-stems`, `TrackState.automation` sync, `/api/audio/soundfont` invalid guard)
+- `test_full_spectrum_copilot_stream_and_audio` (Global `/api/coach/chat` on `/`, SSE `/api/coach/chat/stream`, WAV `/api/coach/chat/audio` DSP telemetry & 10 MB `413` guard + Phase 6B/7 `/api/studio/separate-stems`, `TrackState.automation` sync, `/api/audio/soundfont` + Phase 8 `/api/health` cloud block, `/api/auth/me`, `/api/projects/{id}/publish`, `/api/share/{slug}`)
+
+### Backend & Worker Phase 8 Unit / MockMvc Additions
+- `backend/src/test/java/com/aimusic/studio/CloudPhase8Tests.java`: JWT tamper & PBKDF2 hashing, register/login, `403` cross-user isolation, CloudDB auto-rehydration when Redis cache drops, `/api/projects/{id}/publish` -> `/api/share/{slug}` -> `/api/share/{slug}/audio` -> unpublish `404`, and daily quota `429` enforcement.
+- `audio-worker/tests/test_worker.py::test_flac_master_export_and_metadata_tags`: Lossless FLAC (`fLaC` header) export with `-1.0 dBFS` limiter & ID3/Vorbis tag fields.
 
 ## Running the Suite
 

@@ -152,6 +152,22 @@ public class AudioWorkerClient {
             int sampleRate,
             String bitrate
     ) {
+        return exportAudio(project, audioAssets, format, mode, applyMastering, sampleRate, bitrate, null, null, null, null);
+    }
+
+    public Optional<byte[]> exportAudio(
+            ProjectState project,
+            Map<String, byte[]> audioAssets,
+            String format,
+            String mode,
+            boolean applyMastering,
+            int sampleRate,
+            String bitrate,
+            String title,
+            String artist,
+            String album,
+            String genre
+    ) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("project", project);
         body.put("audio_assets_base64", encodeAssetsBase64(audioAssets));
@@ -160,6 +176,10 @@ public class AudioWorkerClient {
         body.put("apply_mastering", applyMastering);
         body.put("sample_rate", sampleRate);
         body.put("bitrate", (bitrate != null && bitrate.trim().startsWith("192")) ? "192k" : "320k");
+        if (title != null && !title.isBlank()) body.put("title", title.trim());
+        if (artist != null && !artist.isBlank()) body.put("artist", artist.trim());
+        if (album != null && !album.isBlank()) body.put("album", album.trim());
+        if (genre != null && !genre.isBlank()) body.put("genre", genre.trim());
         return postJsonForBytes("/internal/audio/export", body, Duration.ofSeconds(60));
     }
 

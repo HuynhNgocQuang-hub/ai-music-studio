@@ -3,6 +3,7 @@ package com.aimusic.studio.controller;
 import com.aimusic.studio.audio.AudioValidationException;
 import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
+import com.aimusic.studio.cloud.AuthContextHolder;
 import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.AutotuneSettings;
@@ -129,6 +130,11 @@ public class AudioController {
         ProjectState project = (projectId != null && !projectId.isBlank())
                 ? store.getProject(projectId).orElseGet(() -> ProjectState.createDefault(projectId, resolvedTitle))
                 : ProjectState.createDefault(null, resolvedTitle);
+        String callerOwner = AuthContextHolder.getOwnerId();
+        if (project.getOwnerId() == null || project.getOwnerId().isBlank()
+                || ("guest".equals(project.getOwnerId()) && callerOwner.startsWith("u_"))) {
+            project.setOwnerId(callerOwner);
+        }
 
         String rawRef = "mem://raw/" + project.getProjectId() + ".wav";
         store.saveAudioBytes(rawRef, meta.wavBytes());

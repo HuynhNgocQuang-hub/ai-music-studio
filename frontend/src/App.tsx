@@ -1,6 +1,7 @@
 import { Suspense, lazy } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from '@/components/layout/AppShell';
+import { AuthProvider } from '@/components/providers/AuthProvider';
 import { ProjectProvider } from '@/components/providers/ProjectProvider';
 
 const HomePage = lazy(() => import('@/pages/HomePage'));
@@ -8,6 +9,7 @@ const CreatePage = lazy(() => import('@/pages/CreatePage'));
 const StudioPage = lazy(() => import('@/pages/StudioPage'));
 const LibraryPage = lazy(() => import('@/pages/LibraryPage'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
+const SharePage = lazy(() => import('@/pages/SharePage'));
 
 function RouteLoadingFallback() {
   return (
@@ -20,21 +22,25 @@ function RouteLoadingFallback() {
 export default function App() {
   return (
     <BrowserRouter>
-      <ProjectProvider>
-        <AppShell>
-          <Suspense fallback={<RouteLoadingFallback />}>
-            <Routes>
-              <Route path="/" element={<HomePage />} />
-              <Route path="/create" element={<CreatePage />} />
-              <Route path="/studio" element={<StudioPage />} />
-              <Route path="/studio/:id" element={<StudioPage />} />
-              <Route path="/library" element={<LibraryPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Suspense>
-        </AppShell>
-      </ProjectProvider>
+      <AuthProvider>
+        <ProjectProvider>
+          <AppShell>
+            <Suspense fallback={<RouteLoadingFallback />}>
+              <Routes>
+                <Route path="/" element={<HomePage />} />
+                <Route path="/create" element={<CreatePage />} />
+                <Route path="/studio" element={<StudioPage />} />
+                <Route path="/studio/:id" element={<StudioPage />} />
+                <Route path="/library" element={<LibraryPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/share" element={<SharePage />} />
+                <Route path="/share/:slug" element={<SharePage />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Suspense>
+          </AppShell>
+        </ProjectProvider>
+      </AuthProvider>
     </BrowserRouter>
   );
 }

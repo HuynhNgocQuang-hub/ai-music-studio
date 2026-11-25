@@ -283,8 +283,20 @@ def internal_export(req: ExportRequest) -> Response:
             },
         )
     if req.format == "mp3":
+        tags = {
+            k: v
+            for k, v in {
+                "title": req.title or pid,
+                "artist": req.artist or "AI Music Studio",
+                "album": req.album or "AI Music Studio Session",
+                "genre": req.genre or "Pop",
+            }.items()
+            if v
+        }
         try:
-            data = export_mp3(mix, sample_rate=sr, bitrate=req.bitrate)
+            from app.services.exporter import export_mp3
+
+            data = export_mp3(mix, sample_rate=sr, bitrate=req.bitrate, metadata=tags)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return Response(
@@ -292,6 +304,28 @@ def internal_export(req: ExportRequest) -> Response:
             media_type="audio/mpeg",
             headers={
                 "Content-Disposition": f'attachment; filename="{pid}.mp3"',
+                "X-Peak-Dbfs": str(peak),
+            },
+        )
+    if req.format == "flac":
+        tags = {
+            k: v
+            for k, v in {
+                "title": req.title or pid,
+                "artist": req.artist or "AI Music Studio",
+                "album": req.album or "AI Music Studio Session",
+                "genre": req.genre or "Pop",
+            }.items()
+            if v
+        }
+        from app.services.exporter import export_flac
+
+        data = export_flac(mix, sample_rate=sr, metadata=tags)
+        return Response(
+            content=data,
+            media_type="audio/flac",
+            headers={
+                "Content-Disposition": f'attachment; filename="{pid}.flac"',
                 "X-Peak-Dbfs": str(peak),
             },
         )

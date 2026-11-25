@@ -5,10 +5,12 @@ import {
   ChevronRight,
   Copy,
   Database,
+  ExternalLink,
   FolderOpen,
   HardDrive,
   Loader2,
   Plus,
+  Radio,
   Search,
   SlidersHorizontal,
   Trash2,
@@ -423,9 +425,25 @@ export default function LibraryPage() {
               >
                 <div>
                   <div className="flex items-center justify-between gap-2">
-                    <span className="rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-300">
-                      Saved
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-300">
+                        Saved
+                      </span>
+                      {item.visibility === 'public' && item.share_slug && (
+                        <a
+                          href={`/share/${encodeURIComponent(item.share_slug)}`}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            navigate(`/share/${encodeURIComponent(item.share_slug!)}`);
+                          }}
+                          className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/25"
+                          title="Mở trang Demo công khai"
+                        >
+                          <Radio className="h-2.5 w-2.5" /> Public
+                          <ExternalLink className="h-2.5 w-2.5" />
+                        </a>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   CheckCircle2,
+  Cloud,
   Cpu,
   Database,
   Eye,
@@ -15,6 +16,7 @@ import {
   Upload,
   XCircle,
 } from 'lucide-react';
+import { useAuth } from '@/components/providers/AuthProvider';
 import {
   checkHealth,
   clearBackendCache,
@@ -28,6 +30,7 @@ import { clearAllDrafts, getStorageUsageBytes } from '@/lib/storage/indexeddb';
 import type { HealthResponse, LLMProvider, LlmTestResponse, StudioLLMSettings } from '@/types/project';
 
 export default function SettingsPage() {
+  const { setAuthModalOpen } = useAuth();
   const [settings, setSettings] = useState<StudioLLMSettings>(DEFAULT_LLM_SETTINGS);
   const [showGemini, setShowGemini] = useState(false);
   const [showOpenai, setShowOpenai] = useState(false);
@@ -263,6 +266,37 @@ export default function SettingsPage() {
                 : 'Mock Fallback Mode'}
             </p>
           </div>
+        </div>
+
+        {/* Phase 8 Cloud & Storage Row */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-[#1b1e25] px-4 py-3 text-xs">
+          <div className="flex flex-wrap items-center gap-4 text-slate-300">
+            <span className="inline-flex items-center gap-1.5">
+              <Cloud className="h-3.5 w-3.5 text-amber-400" />
+              Cloud DB:{' '}
+              <strong className="text-white">
+                {health?.cloud?.postgres_connected
+                  ? 'PostgreSQL Online'
+                  : health?.cloud?.database_backend || 'H2 Local Fallback'}
+              </strong>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <HardDrive className="h-3.5 w-3.5 text-emerald-400" />
+              Object Storage:{' '}
+              <strong className="text-white">
+                {health?.cloud?.object_storage_connected
+                  ? `MinIO S3 (${health.cloud.bucket || 'aimusic-cloud'})`
+                  : health?.cloud?.object_storage_backend || 'Local S3 Fallback'}
+              </strong>
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAuthModalOpen(true)}
+            className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-1.5 text-[11px] font-bold text-amber-200 transition hover:bg-amber-500/25"
+          >
+            Quản lý Tài khoản Cloud &amp; Quota
+          </button>
         </div>
       </section>
 

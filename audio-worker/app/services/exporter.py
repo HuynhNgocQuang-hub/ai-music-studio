@@ -86,16 +86,49 @@ def export_wav(audio: np.ndarray, sample_rate: int = 44100) -> bytes:
     return buf.getvalue()
 
 
-def export_mp3(audio: np.ndarray, sample_rate: int = 44100, bitrate: str = "320k") -> bytes:
-    """Encode float32 audio into MP3 bytes using pydub + ffmpeg (192k or 320k)."""
+def export_mp3(
+    audio: np.ndarray,
+    sample_rate: int = 44100,
+    bitrate: str = "320k",
+    metadata: dict[str, str] | None = None,
+) -> bytes:
+    """Encode float32 audio into MP3 bytes using pydub + ffmpeg (192k or 320k) with optional ID3 tags."""
     if AudioSegment is None or shutil.which("ffmpeg") is None:
         raise RuntimeError("MP3 export requires pydub and ffmpeg to be installed.")
     norm_bitrate = "192k" if str(bitrate).strip().startswith("192") else "320k"
     wav_bytes = export_wav(audio, sample_rate=sample_rate)
     seg = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
     out = io.BytesIO()
-    seg.export(out, format="mp3", bitrate=norm_bitrate)
+    tags = {k: str(v).strip() for k, v in (metadata or {}).items() if v and str(v).strip()}
+    if tags:
+        seg.export(out, format="mp3", bitrate=norm_bitrate, tags=tags)
+    else:
+        seg.export(out, format="mp3", bitrate=norm_bitrate)
     return out.getvalue()
+
+
+def export_flac(
+    audio: np.ndarray,
+    sample_rate: int = 44100,
+    metadata: dict[str, str] | None = None,
+) -> bytes:
+    """Encode float32 audio into lossless 16-bit FLAC bytes (with optional Vorbis/ID3 tags via ffmpeg)."""
+    clipped = np.clip(audio, -1.0, 1.0)
+    tags = {k: str(v).strip() for k, v in (metadata or {}).items() if v and str(v).strip()}
+    if tags and AudioSegment is not None and shutil.which("ffmpeg") is not None:
+        try:
+            wav_bytes = export_wav(clipped, sample_rate=sample_rate)
+            seg = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+            out = io.BytesIO()
+            seg.export(out, format="flac", tags=tags)
+            val = out.getvalue()
+            if len(val) > 0:
+                return val
+        except Exception:
+            pass
+    buf = io.BytesIO()
+    sf.write(buf, clipped, sample_rate, format="FLAC", subtype="PCM_16")
+    return buf.getvalue()
 
 
 def export_stems_zip(stems: dict[str, np.ndarray], sample_rate: int = 44100) -> bytes:

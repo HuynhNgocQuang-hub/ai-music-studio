@@ -1,45 +1,53 @@
 # Tài liệu Thiết kế Kiến trúc & Giao diện Hệ thống (`DESIGN_SPEC`)
 ## Dự án: AI Music Studio (Hybrid Multi-Agent DAW)
 
-- **Phiên bản:** 2.2 (Phase 1–7 Complete: Stem Separation, Multi-Param Automation, Pitch Curve, WebMIDI & Custom `.sf2`)
+- **Phiên bản:** 2.3 (Phase 1–8 Complete: Hybrid Multi-User Cloud Workspace, S3/MinIO, PostgreSQL/H2, Caddy HTTPS & Public Demo Share)
 - **Cập nhật lần cuối:** 2026-11-25
-- **Liên kết tài liệu:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md)
+- **Liên kết tài liệu:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [PHASES_OVERVIEW.md](./PHASES_OVERVIEW.md)
 
 ---
 
-## 1. Kiến trúc Hệ thống Tổng thể (Option B — 4 Tiers)
+## 1. Kiến trúc Hệ thống Tổng thể (Option B — Hybrid Cloud SaaS)
 
 ```mermaid
 flowchart LR
+    subgraph Edge["TLS & Proxy (:8443 Caddy HTTPS)"]
+        CAD["Caddy Reverse Proxy (local internal TLS + SSE flush)"]
+    end
+
     subgraph Browser["Browser Client (:3000 React 19 + Vite)"]
-        UI["Pages: Home / Create / Studio / Library / Settings"]
-        WA["Web Audio Engine (player.ts: Multi-Track + EQ + FX Bus + Automation)"]
-        IDB[("IndexedDB Draft & Audio Blob Store")]
+        UI["Pages: Home / Create / Studio / Library / Share / Settings"]
+        WA["Web Audio + WebMIDI (player.ts + webmidi.ts)"]
+        IDB[("IndexedDB Draft, Audio Blob & Chat Threads")]
     end
 
     subgraph Core["Core Backend (:8000 Java 21 Spring Boot 3.4)"]
-        SEC["SecurityHeadersFilter + CorsConfig"]
-        CTRL["REST & SSE Controllers (/api/*)"]
+        SEC["SecurityHeadersFilter + AuthInterceptor (Hybrid JWT) + QuotaRateLimitService"]
+        CTRL["REST & SSE Controllers (/api/*, /api/auth/*, /api/share/*)"]
         ORCH["AgentOrchestrator (60s timeout, QA <= 2, 15m Eviction)"]
         LLM["LlmAdapter (Gemini 3.8 Flash + OpenAI + Mock)"]
-        FB["JavaAudioFallbackService (WAV/MIDI/EQ/Limiter/Stems/.aimusic)"]
+        FB["JavaAudioFallbackService (WAV/MIDI/EQ/Limiter/Stems/FLAC/ID3)"]
+    end
+
+    subgraph Cloud["Cloud & State Tier"]
+        RED[("Redis 7-alpine (:16379, Undo x50)")]
+        PG[("PostgreSQL 16 (:15432) / H2 Local Fallback")]
+        S3[("MinIO S3 (:19000 AWS SigV4) / Local S3 Fallback")]
     end
 
     subgraph Worker["Audio DSP Service (:8001 Docker Python FastAPI)"]
         DSP["Denoise / Pitch Analyzer / Cepstral Auto-Tune / Stem Separation"]
-        REN["FluidSynth (Default / Custom .sf2) + Pedalboard Renderer & Exporter"]
+        REN["FluidSynth (Default / Custom .sf2) + Pedalboard Renderer & FLAC/MP3/WAV Exporter"]
     end
 
-    subgraph Cache["State Store (:16379 Docker Redis 7)"]
-        RED[("Redis 7-alpine (256MB LRU, Project/Audio TTL, Undo x50)")]
-    end
-
-    subgraph Cloud["External Cloud LLM APIs"]
+    subgraph External["External Cloud LLM APIs"]
         GEM["Google Gemini API"]
         OAI["OpenAI API"]
     end
 
-    UI <-->|"REST + SSE (/api proxy)"| SEC --> CTRL
+    CAD --> UI
+    CAD --> SEC
+    UI <-->|"REST + SSE + Bearer JWT (/api proxy)"| SEC --> CTRL
     UI <--> IDB
     UI --> WA
     CTRL --> ORCH
@@ -47,6 +55,8 @@ flowchart LR
     LLM -.-> GEM
     LLM -.-> OAI
     CTRL <--> RED
+    CTRL <--> PG
+    CTRL <--> S3
     CTRL -->|"HTTP/1.1 Internal DSP"| DSP
     CTRL -->|"Render / Export"| REN
     CTRL -.->|"Worker offline fallback"| FB
@@ -112,17 +122,19 @@ erDiagram
 ## 4. Thiết kế Giao diện & Hệ thống Component Frontend
 
 ### 4.1. Code-Splitting & Cấu trúc Module React
-- **`App.tsx`:** Nạp lười (`React.lazy` + `Suspense`) toàn bộ 5 route (`HomePage`, `CreatePage`, `StudioPage`, `LibraryPage`, `SettingsPage`), giữ main chunk `index` gọn quanh ~304 kB.
-- **`ProjectProvider.tsx`:** Quản lý trạng thái dự án thống nhất, bộ bảo vệ bất đồng bộ **`saveSeqRef`** (chống stale save ghi đè), và đồng bộ 2 tầng `IndexedDB` + `/api/projects/{id}/sync`.
-- **`StudioPage.tsx` & các Module con:**
+- **`App.tsx` & `AuthProvider.tsx`:** Nạp lười (`React.lazy` + `Suspense`) toàn bộ các route (`HomePage`, `CreatePage`, `StudioPage`, `LibraryPage`, `SharePage`, `SettingsPage`), quản lý **Hybrid Guest + JWT Session** (`AuthModal.tsx`), `Authorization: Bearer` headers và hiển thị **Quota Workspace** trên `AppShell.tsx`.
+- **`ProjectProvider.tsx`:** Quản lý trạng thái dự án thống nhất, bộ bảo vệ bất đồng bộ **`saveSeqRef`** (chống stale save ghi đè), và đồng bộ 2 tầng `IndexedDB` + `/api/projects/{id}/sync` (sao lưu bền vững vào `CloudDatabaseService`).
+- **`StudioPage.tsx`, `SharePage.tsx` & các Module con:**
   - `QuickStudioView.tsx`: Chế độ nghe thử gọn, đổi Genre/Mood/BPM, **A/B Nghe thử hợp âm** (`auditionChordProgression`) và Regenerate 1 chạm; hỗ trợ **50 bước Undo** (`slice(-49)`).
   - `TimelineEditor.tsx` + `WaveformClipCanvas.tsx`: Playlist đa làn chuẩn **FL Studio 12 Clip Frame**, kèm bộ chuyển tham số Automation **`DYN | VOL | PAN | FILT | REVERB`** (phát realtime qua Web Audio `linearRampToValueAtTime`) và nút tách **Stem Vocal/Beat**.
   - `StepSequencer.tsx`: Lưới trống hỗ trợ `4/4` (16 bước) và `3/4` / `6/8` (12 bước).
   - `PianoRollEditor.tsx` + `webmidi.ts`: Bộ soạn nốt C1–C7, Scale highlight, Quantize, Velocity lane, Copy/Paste nốt và kết nối bàn phím **Hardware WebMIDI** (`useWebMidi`).
   - `PitchCurveEditor.tsx`: Bộ chỉnh cao độ trực quan (**Visual Pitch Curve Editor** — semitone nudge & scale snap) gắn trong tab **`Auto-Tune DSP`**.
   - `ConsoleMixerPanel.tsx`: Kênh trộn dọc 3-Band EQ, FX Send (`BUS A Reverb` + `BUS B Delay`), LED Meter và Master Bus.
-  - `SettingsPage.tsx`: Cấu hình Dual LLM, Test API Key và upload **Custom `.sf2` SoundFont** (`<= 50 MB`).
-  - `AiCoachChatDrawer.tsx`: Ngăn kéo **AI Music Copilot** toàn cục trên cả 5 trang (`AppShell.tsx` + `ProjectProvider.tsx`), hỗ trợ SSE Stream, Mic WAV / Speech & đính kèm Audio (`<= 10 MB`), **A/B Nghe thử hợp âm**, **Áp dụng tất cả**, **Hoàn tác 1 chạm (`Revert`)** và lưu hội thoại trong `IndexedDB` (`chat_threads`).
+  - `StudioPage.tsx` (**Publish & FLAC Export**): Xuất **FLAC Lossless** / **MP3 ID3**, và modal xuất bản Master công khai lên S3/MinIO kèm đường dẫn `/share/:slug`.
+  - `SharePage.tsx`: Trình phát Showcase công khai (`/share` & `/share/:slug`), hiển thị cấu trúc/hợp âm/lời, đếm lượt nghe và nút **Remix trong Studio**.
+  - `SettingsPage.tsx`: Cấu hình Dual LLM, Test API Key, upload **Custom `.sf2` SoundFont** (`<= 50 MB`), và theo dõi sức khỏe **PostgreSQL/H2** + **MinIO S3/Local Fallback**.
+  - `AiCoachChatDrawer.tsx`: Ngăn kéo **AI Music Copilot** toàn cục trên ứng dụng (`AppShell.tsx` + `ProjectProvider.tsx`), hỗ trợ SSE Stream, Mic WAV / Speech & đính kèm Audio (`<= 10 MB`), **A/B Nghe thử hợp âm**, **Áp dụng tất cả**, **Hoàn tác 1 chạm (`Revert`)** và lưu hội thoại trong `IndexedDB` (`chat_threads`).
 
 ### 4.2. Quy chuẩn Thẩm mỹ DAW & Khung Clip FL Studio 12
 - **Bảng màu nền Hardware Dark:**

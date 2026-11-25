@@ -1,7 +1,7 @@
 # Tài liệu Kiến trúc Multi-Agent & Thiết kế Kỹ thuật
 ## Dự án: AI Music Studio (Hum-to-Music + Auto-Tune + DAW-lite)
 
-- **Phiên bản:** 2.2 (Phase 1–7 Complete: 24-Tool Copilot, Stem Separation, Multi-Param Automation, Pitch Curve, WebMIDI, Custom `.sf2` + Roadmap Phase 8)
+- **Phiên bản:** 2.3 (Phase 1–8 Complete: Pro DAW, 24-Tool Copilot, Stem Separation, Automation, Pitch Curve, WebMIDI, Custom `.sf2`, Hybrid Cloud SaaS)
 - **Liên kết:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 - **Phạm vi:** Ứng dụng **Single-User Local App** (cá nhân, không phân quyền), tối ưu lưu trữ nhẹ ổ đĩa bằng Redis + MIDI JSON.
 - **Mục tiêu tài liệu:** Định nghĩa cách các AI Agent phối hợp với nhau, cấu trúc dữ liệu dùng chung (`Shared State`), cơ chế kết hợp **MIDI + Audio Clips**, kiến trúc tách lớp Java Spring Boot + Python DSP Worker, kiến trúc lưu trữ nhẹ đĩa, và lộ trình triển khai từ MVP đến bản hoàn chỉnh.
@@ -292,13 +292,14 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
   * **Hardware WebMIDI Keyboard (`webmidi.ts`):** Hook `useWebMidi` kết nối bàn phím MIDI vật lý qua `navigator.requestMIDIAccess`, hiển thị badge **`WebMIDI`** và cho phép ghi nốt trực tiếp trong `PianoRollEditor.tsx`.
   * **Custom `.sf2` SoundFont Upload:** Hỗ trợ nạp SoundFont `.sf2` (`<= 50 MB`, xác thực header `RIFF`/`sfbk`) qua `SettingsPage.tsx` -> `POST /api/audio/soundfont` -> `POST /internal/audio/soundfont` (`renderer.py`), đồng thời phản ánh trạng thái `custom_soundfont_active` qua `/api/health`.
   * **Undo 50 Bước (`ProjectStateStore.java` & `StudioPage.tsx`):** Tăng giới hạn Undo stack lên **`DEFAULT_MAX_UNDO = 50`** trên backend và `slice(-49)` trên Studio frontend.
+* **Phase 8 — Multi-User Cloud Workspace & Publishing (Hybrid Web SaaS — `DONE`):**
+  * **Hybrid Guest + HS256 JWT Auth (`JwtService.java`, `AuthInterceptor.java`, `AuthController.java`):** Vào sử dụng tức thì ở chế độ Guest hoặc đăng ký/đăng nhập JWT (`PBKDF2WithHmacSHA256` + `Authorization: Bearer`) và Local OAuth Sandbox (`Google` / `GitHub`) để sở hữu workspace cloud & cách ly dự án riêng tư (`HTTP 403`).
+  * **PostgreSQL + Embedded H2 Fallback (`CloudDatabaseService.java`) & MinIO S3 + Local Fallback (`ObjectStorageService.java`):** Lưu bền vững metadata người dùng, `cloud_projects` (tự động rehydrate vào Redis nếu TTL hết hạn), `published_releases`, cùng `.aimusic`/Master audio qua AWS SigV4 tới MinIO hoặc thư mục/RAM local khi Docker tắt.
+  * **Quản trị Quota (`QuotaRateLimitService.java`) & Caddy HTTPS Edge (`infra/Caddyfile`):** Giới hạn lượt AI Generate/Export/Publish theo ngày (`HTTP 429`), burst rate-limiter, và bổ sung `postgres`, `minio`, `caddy` (`:8443`) vào `docker-compose.yml`.
+  * **Chia sẻ Demo Công khai & Xuất bản Master (`PublishShareController.java`, `SharePage.tsx`):** Xuất bản Master (`-14 LUFS`, **`MP3 320k/192k + ID3 tags`**, **`FLAC Lossless`**, `WAV`), tạo link công khai `/share/:slug` kèm trình phát, đếm lượt nghe và nút **Remix trong Studio**.
 
 ---
 
-## 9. Định hướng Phase Tiếp Theo (Roadmap Phase 8 — Cloud Multi-User SaaS)
+## 9. Trạng thái Hoàn thiện & Định hướng Mở rộng Tương lai (Phase 1–8 Complete)
 
-Sau khi hoàn thiện trọn vẹn Phase 1–7 cho ứng dụng Single-User Local Pro DAW + Copilot, lộ trình triển khai mở rộng lên Cloud SaaS tập trung vào **Phase 8**:
-
-* **Phase 8 — Multi-User Cloud Workspace & Publishing (Web SaaS):**
-  * **Auth & Cloud Storage:** Bổ sung OAuth2/JWT, PostgreSQL cho metadata dự án, và Object Storage (S3/MinIO) lưu `.aimusic` + stems bền vững đa thiết bị.
-  * **Quản trị Quota & Chia sẻ Cộng đồng:** Rate limiting theo người dùng, HTTPS reverse proxy, chia sẻ link demo hoặc xuất bản Master (`-14 LUFS`, WAV/MP3/FLAC kèm ID3 tags).
+Hệ thống đã hoàn thành trọn vẹn lộ trình từ MVP Local Studio (Phase 1) đến Hybrid Cloud Multi-User DAW (Phase 8). Các nâng cấp Enterprise mở rộng tiếp theo nếu triển khai thương mại đa vùng gồm kết nối OAuth2 Client Secret thực tế trên domain production, CDN phân phối audio toàn cầu, và cộng tác realtime nhiều người qua WebRTC/CRDT.

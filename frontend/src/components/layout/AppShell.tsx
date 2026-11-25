@@ -2,16 +2,21 @@ import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bot,
+  Cloud,
   Disc3,
   FolderKanban,
   FolderOpen,
   Plus,
+  Radio,
   RotateCcw,
   Settings,
   SlidersHorizontal,
   Sparkles,
+  UserCheck,
   X,
 } from 'lucide-react';
+import AuthModal from '@/components/auth/AuthModal';
+import { useAuth } from '@/components/providers/AuthProvider';
 import AiCoachChatDrawer from '@/components/studio/AiCoachChatDrawer';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import { DAW_TEMPLATES, buildProjectFromTemplate } from '@/lib/music/presets';
@@ -19,6 +24,7 @@ import { DAW_TEMPLATES, buildProjectFromTemplate } from '@/lib/music/presets';
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
+  const { authenticated, user, quota, setAuthModalOpen } = useAuth();
   const {
     project,
     loadProjectIntoSession,
@@ -55,6 +61,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       href: '/library',
       active: pathname.startsWith('/library'),
       icon: FolderOpen,
+    },
+    {
+      label: 'Cộng đồng Demo Showcase',
+      href: '/share',
+      active: pathname.startsWith('/share'),
+      icon: Radio,
     },
     {
       label: 'Audio Engine & API',
@@ -118,6 +130,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="flex flex-col items-center gap-1.5">
           <button
             type="button"
+            onClick={() => setAuthModalOpen(true)}
+            title={
+              authenticated
+                ? `${user.display_name} (${quota ? `${quota.generate_used}/${quota.generate_limit} jobs` : 'Cloud'})`
+                : 'Đăng nhập Cloud SaaS / Xem Quota'
+            }
+            aria-label="Tài khoản Cloud & Quota"
+            className={`flex h-9 w-9 items-center justify-center rounded-md border transition ${
+              authenticated
+                ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-300'
+                : 'border-white/10 bg-[#1d212a] text-slate-300 hover:border-amber-400/40 hover:text-amber-200'
+            }`}
+          >
+            {authenticated ? <UserCheck className="h-4.5 w-4.5" /> : <Cloud className="h-4.5 w-4.5" />}
+          </button>
+
+          <button
+            type="button"
             onClick={() => setCopilotOpen((o) => !o)}
             title="Bật/Tắt AI Music Copilot"
             aria-label="Bật/Tắt AI Music Copilot"
@@ -159,11 +189,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   ? 'AI Hum-to-Music Generator'
                   : pathname.startsWith('/library')
                   ? 'Session Vault'
+                  : pathname.startsWith('/share')
+                  ? 'Demo Showcase & Master Releases'
                   : 'Audio Engine & API Settings'}
               </span>
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(true)}
+                className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-xs font-semibold transition ${
+                  authenticated
+                    ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
+                    : 'border-white/15 bg-[#232730] text-slate-200 hover:border-amber-400/50 hover:text-amber-200'
+                }`}
+              >
+                {authenticated ? <UserCheck className="h-3.5 w-3.5" /> : <Cloud className="h-3.5 w-3.5" />}
+                <span>
+                  {authenticated
+                    ? `${user.display_name}${quota ? ` (${quota.generate_used}/${quota.generate_limit})` : ''}`
+                    : 'Cloud / Đăng nhập'}
+                </span>
+              </button>
               <button
                 type="button"
                 onClick={() => setCopilotOpen((o) => !o)}
@@ -238,6 +286,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <AiCoachChatDrawer />
         </div>
       </div>
+      <AuthModal />
     </div>
   );
 }

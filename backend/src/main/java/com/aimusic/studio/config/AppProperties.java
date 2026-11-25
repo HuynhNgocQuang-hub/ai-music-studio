@@ -27,9 +27,21 @@ public class AppProperties {
     private String defaultLlmProvider = "gemini";
     private String geminiModel = "gemini-3.8-flash";
     private String openaiModel = "gpt-4o-mini";
-    private String corsOrigins = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173";
+    private String corsOrigins = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://localhost:8443";
     private double jobTimeoutSeconds = 60.0;
     private int maxQaIterations = 2;
+    private String databaseUrl = "";
+    private String databaseUser = "aimusic";
+    private String databasePass = "aimusic_dev_pass";
+    private String s3Endpoint = "";
+    private String s3Bucket = "aimusic-cloud";
+    private String s3AccessKey = "minioadmin";
+    private String s3SecretKey = "minioadmin";
+    private String jwtSecret = "";
+    private long jwtExpirationSeconds = 604800L;
+    private int quotaDailyGenerate = 30;
+    private int quotaDailyExport = 50;
+    private String cloudDataDir = "./data";
 
     public static final Set<String> ALLOWED_AUDIO_EXTENSIONS = Set.of("wav", "mp3", "m4a", "ogg", "flac");
 
@@ -109,4 +121,40 @@ public class AppProperties {
 
     public int getMaxQaIterations() { return maxQaIterations; }
     public void setMaxQaIterations(int maxQaIterations) { this.maxQaIterations = maxQaIterations; }
+
+    public String getDatabaseUrl() { return databaseUrl; }
+    public void setDatabaseUrl(String databaseUrl) { this.databaseUrl = databaseUrl; }
+
+    public String getDatabaseUser() { return databaseUser; }
+    public void setDatabaseUser(String databaseUser) { this.databaseUser = databaseUser; }
+
+    public String getDatabasePass() { return databasePass; }
+    public void setDatabasePass(String databasePass) { this.databasePass = databasePass; }
+
+    public String getS3Endpoint() { return s3Endpoint; }
+    public void setS3Endpoint(String s3Endpoint) { this.s3Endpoint = s3Endpoint; }
+
+    public String getS3Bucket() { return s3Bucket; }
+    public void setS3Bucket(String s3Bucket) { this.s3Bucket = s3Bucket; }
+
+    public String getS3AccessKey() { return s3AccessKey; }
+    public void setS3AccessKey(String s3AccessKey) { this.s3AccessKey = s3AccessKey; }
+
+    public String getS3SecretKey() { return s3SecretKey; }
+    public void setS3SecretKey(String s3SecretKey) { this.s3SecretKey = s3SecretKey; }
+
+    public String getJwtSecret() { return jwtSecret; }
+    public void setJwtSecret(String jwtSecret) { this.jwtSecret = jwtSecret; }
+
+    public long getJwtExpirationSeconds() { return jwtExpirationSeconds; }
+    public void setJwtExpirationSeconds(long jwtExpirationSeconds) { this.jwtExpirationSeconds = jwtExpirationSeconds; }
+
+    public int getQuotaDailyGenerate() { return quotaDailyGenerate; }
+    public void setQuotaDailyGenerate(int quotaDailyGenerate) { this.quotaDailyGenerate = quotaDailyGenerate; }
+
+    public int getQuotaDailyExport() { return quotaDailyExport; }
+    public void setQuotaDailyExport(int quotaDailyExport) { this.quotaDailyExport = quotaDailyExport; }
+
+    public String getCloudDataDir() { return cloudDataDir; }
+    public void setCloudDataDir(String cloudDataDir) { this.cloudDataDir = cloudDataDir; }
 }

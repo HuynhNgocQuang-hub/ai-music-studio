@@ -16,10 +16,12 @@ import {
   Pause,
   Play,
   Plus,
+  Radio,
   Redo2,
   Repeat,
   Save,
   Scissors,
+  Share2,
   SkipBack,
   Sliders,
   Sparkles,
@@ -42,6 +44,7 @@ import {
   exportMidi,
   getProject,
   overdubFitCheck,
+  publishProject,
   rearrangeChordsJob,
   regenerateTrackJob,
   separateStems,
@@ -50,9 +53,11 @@ import {
   suggestLyrics,
   syncProject,
   triggerBlobDownload,
+  unpublishProject,
   uploadAudio,
   uploadTrackClip,
 } from '@/lib/api/client';
+import { useAuth } from '@/components/providers/AuthProvider';
 import {
   encodeBlobToWav,
   getAudioEngine,
@@ -186,9 +191,14 @@ export default function StudioPage() {
   const [regenProgress, setRegenProgress] = useState<number>(0);
   const [autoTrimBusy, setAutoTrimBusy] = useState(false);
   const [autoMixBusy, setAutoMixBusy] = useState(false);
+  const { authenticated, user, refreshAuth, setAuthModalOpen } = useAuth();
   const [stemsBusy, setStemsBusy] = useState(false);
   const [clipUploadBusy, setClipUploadBusy] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [publishBusy, setPublishBusy] = useState(false);
+  const [publishArtist, setPublishArtist] = useState('');
+  const [publishFormat, setPublishFormat] = useState<'mp3' | 'flac' | 'wav'>('mp3');
   const [bpmDraft, setBpmDraft] = useState<string | null>(null);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const autoFollowTimerRef = useRef<number | null>(null);
@@ -1785,7 +1795,10 @@ export default function StudioPage() {
     }
   };
 
-  const handleExport = async (kind: 'wav' | 'mp3' | 'stems' | 'midi', bitrate: '192k' | '320k' = '320k') => {
+  const handleExport = async (
+    kind: 'wav' | 'mp3' | 'flac' | 'stems' | 'midi',
+    bitrate: '192k' | '320k' = '320k'
+  ) => {
     setExportMenuOpen(false);
     if (allTracksMuted) {
       setStudioNotice('Cảnh báo: Tất cả các track đang bị Mute. Hãy bỏ Mute ít nhất 1 track trước khi Export!');
@@ -1798,17 +1811,87 @@ export default function StudioPage() {
         const blob = await exportMidi(project.project_id);
         triggerBlobDownload(blob, `${safeName}.mid`);
       } else {
-        const blob = await exportAudio(project.project_id, kind, project.mastering.auto_mix_enabled, 'ai_mix', bitrate);
+        const blob = await exportAudio(
+          project.project_id,
+          kind,
+          project.mastering.auto_mix_enabled,
+          'ai_mix',
+          bitrate,
+          {
+            title: project.title,
+            artist: authenticated ? user.display_name : 'AI Music Studio',
+            genre: project.config.genre,
+          }
+        );
         const ext = kind === 'stems' ? 'zip' : kind;
         triggerBlobDownload(blob, `${safeName}.${ext}`);
+        void refreshAuth();
       }
       setStudioNotice(
         kind === 'mp3'
-          ? `Đã xuất file MP3 (${bitrate === '192k' ? '192kbps' : '320kbps'}) thành công.`
+          ? `Đã xuất file MP3 (${bitrate === '192k' ? '192kbps' : '320kbps'}) kèm ID3 tags.`
+          : kind === 'flac'
+          ? 'Đã xuất file Master Lossless FLAC (-14 LUFS).'
           : `Đã xuất file ${kind.toUpperCase()} thành công.`
       );
     } catch (err) {
       setStudioNotice(err instanceof ApiError ? err.detail : `Lỗi xuất ${kind.toUpperCase()}.`);
+    }
+  };
+
+  const handlePublishDemo = async () => {
+    const current = latestProjectRef.current;
+    if (allTracksMuted) {
+      setStudioNotice('Cảnh báo: Bỏ Mute ít nhất 1 track trước khi xuất bản Demo!');
+      return;
+    }
+    setPublishBusy(true);
+    try {
+      await saveNow(true);
+      const res = await publishProject(current.project_id, {
+        format: publishFormat,
+        bitrate: '320k',
+        title: current.title || current.project_id,
+        artist: publishArtist.trim() || (authenticated ? user.display_name : 'AI Music Studio'),
+        genre: current.config.genre,
+        apply_mastering: current.mastering.auto_mix_enabled,
+      });
+      if (res.project_state) {
+        updateProject(() => res.project_state!);
+      } else {
+        updateProject((p) => ({
+          ...p,
+          visibility: 'public',
+          share_slug: res.share_slug,
+          published_at: res.published_at,
+        }));
+      }
+      setStudioNotice(`Đã xuất bản Demo công khai: /share/${res.share_slug}`);
+      void refreshAuth();
+    } catch (err) {
+      setStudioNotice(err instanceof ApiError ? err.detail : 'Không thể xuất bản Demo công khai.');
+    } finally {
+      setPublishBusy(false);
+    }
+  };
+
+  const handleUnpublishDemo = async () => {
+    const current = latestProjectRef.current;
+    setPublishBusy(true);
+    try {
+      await unpublishProject(current.project_id);
+      updateProject((p) => ({
+        ...p,
+        visibility: 'private',
+        share_slug: null,
+        published_at: null,
+      }));
+      setPublishModalOpen(false);
+      setStudioNotice('Đã thu hồi liên kết Demo công khai.');
+    } catch (err) {
+      setStudioNotice(err instanceof ApiError ? err.detail : 'Lỗi thu hồi liên kết chia sẻ.');
+    } finally {
+      setPublishBusy(false);
     }
   };
 
@@ -2364,6 +2447,13 @@ export default function StudioPage() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => void handleExport('flac')}
+                  className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs text-slate-200 hover:bg-white/10"
+                >
+                  <Music className="h-3.5 w-3.5 text-fuchsia-400" /> FLAC (Lossless Master)
+                </button>
+                <button
+                  type="button"
                   onClick={() => void handleExport('stems')}
                   className="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs text-slate-200 hover:bg-white/10"
                 >
@@ -2379,6 +2469,31 @@ export default function StudioPage() {
               </div>
             )}
           </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (!publishArtist && authenticated) {
+                setPublishArtist(user.display_name);
+              }
+              setPublishModalOpen(true);
+            }}
+            title="Xuất bản & Chia sẻ link Demo công khai"
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${
+              project.visibility === 'public' && project.share_slug
+                ? 'border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
+                : 'border-white/15 bg-[#232730] text-slate-200 hover:border-amber-400/50 hover:text-amber-200'
+            }`}
+          >
+            {project.visibility === 'public' && project.share_slug ? (
+              <Radio className="h-3.5 w-3.5 text-emerald-400" />
+            ) : (
+              <Share2 className="h-3.5 w-3.5 text-amber-400" />
+            )}
+            <span className="hidden xl:inline">
+              {project.visibility === 'public' && project.share_slug ? 'Đã Share' : 'Publish'}
+            </span>
+          </button>
 
           <button
             type="button"
@@ -3356,6 +3471,119 @@ export default function StudioPage() {
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {publishModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Xuất bản & Chia sẻ Demo"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-white/15 bg-[#16191f] p-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Share2 className="h-4 w-4 text-amber-400" />
+                <h3 className="font-display text-sm font-bold text-white">
+                  Xuất bản Master &amp; Chia sẻ Demo
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPublishModalOpen(false)}
+                aria-label="Đóng"
+                className="rounded p-1 text-slate-400 hover:bg-white/10 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="mb-1 block text-[11px] font-medium text-slate-300">
+                  Tên nghệ sĩ / Producer (ID3 Tag)
+                </label>
+                <input
+                  type="text"
+                  value={publishArtist}
+                  onChange={(e) => setPublishArtist(e.target.value)}
+                  placeholder={authenticated ? user.display_name : 'AI Music Studio Creator'}
+                  className="w-full rounded-lg border border-white/15 bg-[#0b0d11] px-3 py-2 text-xs text-white focus:border-amber-400 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11px] font-medium text-slate-300">
+                  Định dạng Master (-14 LUFS / Peak &lt;= -1.0 dBFS)
+                </label>
+                <select
+                  value={publishFormat}
+                  onChange={(e) => setPublishFormat(e.target.value as 'mp3' | 'flac' | 'wav')}
+                  className="w-full rounded-lg border border-white/15 bg-[#0b0d11] px-3 py-2 text-xs text-white"
+                >
+                  <option value="mp3">MP3 320kbps + ID3 Tags (Nhẹ &amp; Streaming)</option>
+                  <option value="flac">FLAC Lossless + Tags (Chất lượng gốc)</option>
+                  <option value="wav">WAV 44.1kHz PCM 16-bit</option>
+                </select>
+              </div>
+
+              {project.visibility === 'public' && project.share_slug && (
+                <div className="space-y-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 p-3">
+                  <div className="flex items-center justify-between text-emerald-200">
+                    <span className="font-semibold">Đang chia sẻ công khai</span>
+                    <Link
+                      to={`/share/${encodeURIComponent(project.share_slug)}`}
+                      onClick={() => setPublishModalOpen(false)}
+                      className="font-bold text-amber-300 underline hover:text-amber-200"
+                    >
+                      Mở trang Demo
+                    </Link>
+                  </div>
+                  <div className="truncate rounded bg-[#0b0d11] px-2.5 py-1.5 font-mono text-[11px] text-slate-300">
+                    {typeof window !== 'undefined'
+                      ? `${window.location.origin}/share/${project.share_slug}`
+                      : `/share/${project.share_slug}`}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAuthModalOpen(true)}
+                  className="text-[11px] text-sky-300 underline hover:text-sky-200"
+                >
+                  {authenticated ? `Cloud: ${user.display_name}` : 'Đăng nhập Cloud & Quota'}
+                </button>
+
+                <div className="flex items-center gap-2">
+                  {project.visibility === 'public' && project.share_slug && (
+                    <button
+                      type="button"
+                      disabled={publishBusy}
+                      onClick={() => void handleUnpublishDemo()}
+                      className="rounded-lg border border-rose-500/40 bg-rose-500/15 px-3 py-1.5 font-semibold text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+                    >
+                      Thu hồi Link
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={publishBusy}
+                    onClick={() => void handlePublishDemo()}
+                    className="rounded-lg bg-amber-500 px-4 py-1.5 font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50"
+                  >
+                    {publishBusy
+                      ? 'Đang Master & Upload...'
+                      : project.visibility === 'public'
+                      ? 'Cập nhật Bản Publish'
+                      : 'Publish & Lấy Link'}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

@@ -160,11 +160,15 @@ class ExportRequest(_WorkerBaseModel):
 
     project: ProjectState
     audio_assets_base64: dict[str, str] = Field(default_factory=dict)
-    format: Literal["wav", "mp3", "stems"] = "wav"
+    format: Literal["wav", "mp3", "flac", "stems"] = "wav"
     mode: PreviewMode = "ai_mix"
     apply_mastering: bool = True
     sample_rate: int = Field(default=44100, ge=8000, le=96000)
     bitrate: Literal["192k", "320k"] = "320k"
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    genre: Optional[str] = None
 
     @field_validator("mode", mode="before")
     @classmethod

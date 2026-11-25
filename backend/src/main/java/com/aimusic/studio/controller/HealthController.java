@@ -3,10 +3,13 @@ package com.aimusic.studio.controller;
 import com.aimusic.studio.agents.LlmAdapter;
 import com.aimusic.studio.agents.LlmContextHolder;
 import com.aimusic.studio.audio.AudioWorkerClient;
+import com.aimusic.studio.cloud.CloudDatabaseService;
+import com.aimusic.studio.cloud.ObjectStorageService;
 import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.dto.HealthResponse;
 import com.aimusic.studio.store.ProjectStateStore;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -22,17 +25,23 @@ public class HealthController {
     private final ProjectStateStore store;
     private final AudioWorkerClient audioWorkerClient;
     private final LlmAdapter llmAdapter;
+    private final CloudDatabaseService cloudDb;
+    private final ObjectStorageService objectStorage;
 
     public HealthController(
             AppProperties properties,
             ProjectStateStore store,
             AudioWorkerClient audioWorkerClient,
-            LlmAdapter llmAdapter
+            LlmAdapter llmAdapter,
+            @Autowired(required = false) CloudDatabaseService cloudDb,
+            @Autowired(required = false) ObjectStorageService objectStorage
     ) {
         this.properties = properties;
         this.store = store;
         this.audioWorkerClient = audioWorkerClient;
         this.llmAdapter = llmAdapter;
+        this.cloudDb = cloudDb;
+        this.objectStorage = objectStorage;
     }
 
     @GetMapping("/")
@@ -74,13 +83,24 @@ public class HealthController {
             engines.put("java_fallback_available", true);
 
             Map<String, Object> llmStatus = llmAdapter.status();
+            Map<String, Object> cloudStatus = new LinkedHashMap<>();
+            if (cloudDb != null) {
+                cloudStatus.putAll(cloudDb.status());
+            }
+            if (objectStorage != null) {
+                cloudStatus.putAll(objectStorage.status());
+            }
+            cloudStatus.put("auth_mode", "hybrid_jwt");
+            cloudStatus.put("https_proxy_ready", true);
+
             return new HealthResponse(
                     "ok",
                     properties.getName(),
                     properties.getVersion(),
                     redisStatus,
                     engines,
-                    llmStatus
+                    llmStatus,
+                    cloudStatus
             );
         } finally {
             LlmContextHolder.clear();

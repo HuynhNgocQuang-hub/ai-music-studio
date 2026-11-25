@@ -33,6 +33,18 @@ app:
   default-llm-provider: ${DEFAULT_LLM_PROVIDER:gemini}
   gemini-model: ${GEMINI_MODEL:gemini-3.8-flash}
   openai-model: ${OPENAI_MODEL:gpt-4o-mini}
-  cors-origins: ${CORS_ORIGINS:http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
+  cors-origins: ${CORS_ORIGINS:http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://localhost:8443}
   job-timeout-seconds: ${JOB_TIMEOUT_SECONDS:60.0}
   max-qa-iterations: ${MAX_QA_ITERATIONS:2}
+  database-url: ${DATABASE_URL:}
+  database-user: ${DATABASE_USER:aimusic}
+  database-pass: ${DATABASE_PASS:aimusic_dev_pass}
+  s3-endpoint: ${S3_ENDPOINT:}
+  s3-bucket: ${S3_BUCKET:aimusic-cloud}
+  s3-access-key: ${S3_ACCESS_KEY:minioadmin}
+  s3-secret-key: ${S3_SECRET_KEY:minioadmin}
+  jwt-secret: ${JWT_SECRET:}
+  jwt-expiration-seconds: ${JWT_EXPIRATION_SECONDS:604800}
+  quota-daily-generate: ${QUOTA_DAILY_GENERATE:30}
+  quota-daily-export: ${QUOTA_DAILY_EXPORT:50}
+  cloud-data-dir: ${CLOUD_DATA_DIR:./data}

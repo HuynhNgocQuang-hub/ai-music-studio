@@ -1,20 +1,20 @@
 # Tài liệu Thiết kế Giao diện, Điều hướng & API Contract
 ## Dự án: AI Music Studio (Hybrid Multi-Agent)
 
-- **Phiên bản:** 2.1 (Pro DAW + Phase 6B Stem/Automation + Phase 7 Pitch Curve/WebMIDI/Custom `.sf2` + 24-Tool Copilot)
-- **Liên kết:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
-- **Mục tiêu:** Đặc tả kiến trúc điều hướng (Menu, Chuyển trang, Phân trang), bố cục tối ưu cho từng màn hình, hợp đồng API giữa Frontend (`React + Vite`) – Core Backend (`Java 21 + Spring Boot 3.x`) – Audio DSP Microservice (`audio-worker`) – Redis, và cấu trúc file dự án `.aimusic`.
+- **Phiên bản:** 2.2 (Pro DAW + Phase 6B–7 Pro DSP + Phase 8 Hybrid Cloud SaaS, Quota, FLAC/ID3 & Public Share)
+- **Liên kết:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md) | [PHASES_OVERVIEW.md](./PHASES_OVERVIEW.md)
+- **Mục tiêu:** Đặc tả kiến trúc điều hướng (Menu, Chuyển trang, Phân trang), bố cục tối ưu cho từng màn hình, hợp đồng API giữa Frontend (`React + Vite`) – Core Backend (`Java 21 + Spring Boot 3.x`) – Audio DSP Microservice (`audio-worker`) – Redis/PostgreSQL/MinIO/Caddy, và cấu trúc file dự án `.aimusic`.
 
 ---
 
-## 1. Kiến trúc Hạ tầng Tối ưu cho Máy Cá nhân (Node + Java 21 + Docker)
+## 1. Kiến trúc Hạ tầng Tối ưu cho Máy Cá nhân & Hybrid Cloud (Node + Java 21 + Docker)
 
-Dựa trên cấu hình thực tế (**Node.js v24**, **Java 21 + Maven 3.9+**, **Docker**):
+Dựa trên cấu hình thực tế (**Node.js v24**, **Java 21 + Maven 3.9+**, **Docker Compose**):
 
-* **Frontend (`React 19 + Vite`):** Chạy bằng **Node.js v24** (cổng `3000`, hot-reload tức thì), cấu hình `vite.config.ts` proxy `/api` $\rightarrow$ `http://localhost:8000` (hoặc cấu hình `VITE_API_BASE_URL`); sử dụng `IndexedDB` trình duyệt để tự động lưu ngầm.
-* **Core Backend (`Java 21 + Spring Boot 3.x`, cổng `8000`):** Xử lý toàn bộ API `/api/*`, SSE (`SseEmitter`), `Spring Data Redis` (kèm In-Memory TTL fallback), Multi-Agent Orchestrator, Dual LLM Adapter (`Gemini` + `OpenAI` + Mock), xuất/nhập `.mid` & `.aimusic`, và cung cấp `JavaAudioFallbackService` khi `audio-worker` không chạy.
-* **Audio DSP Microservice (`audio-worker/`, Python FastAPI cổng `8001`) & `Redis` (`redis:7-alpine`):** Đóng gói gọn trong **Docker Compose** (chứa `redis:7-alpine` giới hạn `maxmemory 256mb` + `allkeys-lru`, `audio-worker` xử lý DSP với `FFmpeg`, `FluidSynth`, `noisereduce`, `librosa`, `pedalboard` — không cài PyTorch/TensorFlow nặng máy, và container `backend` kết nối qua `AUDIO_WORKER_URL=http://audio-worker:8001`).
-* **SoundFont gọn nhẹ:** Nhúng 1 bộ SoundFont General MIDI nhẹ (`GeneralUser-GS.sf2` hoặc tương đương) bên trong `audio-worker` thay vì các thư viện VST hàng GB.
+* **Frontend (`React 19 + Vite`):** Chạy bằng **Node.js v24** (cổng `3000`, hot-reload tức thì), cấu hình `vite.config.ts` proxy `/api` $\rightarrow$ `http://localhost:8000` (hoặc cấu hình `VITE_API_BASE_URL`); sử dụng `IndexedDB` trình duyệt để tự động lưu ngầm và `localStorage` cho JWT token (tùy chọn).
+* **Core Backend (`Java 21 + Spring Boot 3.x`, cổng `8000`):** Xử lý toàn bộ API `/api/*`, SSE (`SseEmitter`), **Hybrid JWT Auth + Daily Quota Rate-Limiter**, `Spring Data Redis` (kèm In-Memory TTL fallback), **PostgreSQL + H2 Local Fallback** (`CloudDatabaseService`), **MinIO S3 AWS SigV4 + Local Fallback** (`ObjectStorageService`), Multi-Agent Orchestrator, Dual LLM Adapter (`Gemini` + `OpenAI` + Mock), xuất/nhập `.mid` & `.aimusic`, Public Demo Share `/api/share/*`, và cung cấp `JavaAudioFallbackService` khi `audio-worker` không chạy.
+* **Audio DSP Microservice (`audio-worker/`, Python FastAPI cổng `8001`), State & Cloud Stack:** Đóng gói gọn trong **Docker Compose** (`redis:7-alpine`, `postgres:16-alpine`, `minio/minio`, `audio-worker` xử lý DSP với `FFmpeg`, `FluidSynth`, `noisereduce`, `librosa`, `pedalboard`, `backend`, và `caddy:2-alpine` HTTPS reverse proxy `:8443`). Khi Docker tắt, Spring Boot vẫn chạy độc lập hoàn chỉnh trên Windows với H2 + Local S3 fallback.
+* **SoundFont gọn nhẹ:** Nhúng 1 bộ SoundFont General MIDI nhẹ (`GeneralUser-GS.sf2` hoặc tương đương) bên trong `audio-worker` kèm khả năng nạp Custom `.sf2`.
 * **LLM Cloud API:** Toàn bộ Agent trí tuệ gọi qua **Gemini API** hoặc **OpenAI API** (0 GB trọng số model trên đĩa).
 
 ---
@@ -22,15 +22,16 @@ Dựa trên cấu hình thực tế (**Node.js v24**, **Java 21 + Maven 3.9+**, 
 ## 2. Kiến trúc Điều hướng, Menu & Bố cục Màn hình (UI/UX Navigation)
 
 ### 2.1. Thanh Activity Rail & Khung Ứng dụng (App Shell)
-Giao diện dùng `react-router-dom` (`BrowserRouter`, `Routes`, `Route`) với **Pro DAW Activity Rail** gọn bên trái (ẩn bớt header phụ khi vào `/studio/:id` để nhường trọn 100% chiều cao cho Timeline + Production Dock), kèm nút tạo nhanh **Blank DAW** (`+`) và banner khôi phục bản nháp `IndexedDB`:
+Giao diện dùng `react-router-dom` (`BrowserRouter`, `Routes`, `Route`) với **Pro DAW Activity Rail** gọn bên trái (ẩn bớt header phụ khi vào `/studio/:id` để nhường trọn 100% chiều cao cho Timeline + Production Dock), nút tài khoản **Cloud / Đăng nhập** (`AuthModal.tsx`), nút tạo nhanh **Blank DAW** (`+`) và banner khôi phục bản nháp `IndexedDB`:
 
 | Menu Item | Route | Chức năng chính |
 | :--- | :--- | :--- |
 | **Trang chủ (Project Hub)** | `/` | Khởi tạo 1-click từ Starter DAW Templates (`Pop`, `Lo-fi`, `Trap 808`, `House`, `Ballad`, `Blank Studio`) & Recent Sessions (mở/xóa). |
 | **1. AI Hum-to-Music** | `/create` | Luồng từng bước (Wizard 4 bước) ghi âm/upload vocal để AI phối khí & tạo bài hoàn chỉnh. |
-| **2. Phòng thu DAW** | `/studio/:id` | Không gian Pro DAW đầy đủ (Arrangement, Step Sequencer, Piano Roll, Console Mixer EQ/FX Bus, Auto-Tune DSP, Lyrics CRUD, AI Coach). |
-| **3. Kho Session (`.aimusic`)** | `/library` | Quản lý Local Draft (`IndexedDB`) & Server Saved Sessions (tạo mới, nhân bản, xóa máy chủ, tìm kiếm, phân trang `12/24/48`, import `.aimusic`). |
-| **4. Audio Engine & API** | `/settings` | Cấu hình Gemini (`AQ...`/`AIza...`) / OpenAI API Key, phân vai Agent, nút **Test API Key**, kiểm tra trạng thái Spring Boot / Redis / FluidSynth & dọn cache. |
+| **2. Phòng thu DAW** | `/studio/:id` | Không gian Pro DAW đầy đủ (Arrangement, Multi-Param Automation, Stem Separation, Pitch Curve, Step Sequencer, Piano Roll + WebMIDI, Console Mixer EQ/FX Bus, Lyrics CRUD, AI Coach, **Publish & FLAC Export**). |
+| **3. Kho Session (`.aimusic`)** | `/library` | Quản lý Local Draft (`IndexedDB`) & Server/Cloud Sessions (tạo mới, nhân bản, xóa, badge `Public`, phân trang `12/24/48`, import `.aimusic`). |
+| **4. Cộng đồng Demo** | `/share` & `/share/:slug` | Trang Showcase & Trình phát **Master Release** công khai (`-14 LUFS`, MP3/FLAC/WAV), hiển thị hợp âm, lời, lượt nghe, tải Master & nút **Remix trong Studio**. |
+| **5. Audio Engine & API** | `/settings` | Cấu hình Gemini/OpenAI Key, phân vai Agent, Test API Key, nạp **Custom `.sf2` SoundFont**, kiểm tra Cloud DB/S3/Redis/FluidSynth & quản lý tài khoản Quota. |
 
 > **Chuyển trang thông minh (Seamless Handoff):** Từ trang `/create` sau khi AI tạo xong bản nghe thử (Bước 4), người dùng bấm **"Mở trong Studio"** $\rightarrow$ điều hướng sang `/studio/:id` bằng `useNavigate()` mà giữ nguyên toàn bộ State trong `ProjectProvider`.
 
@@ -128,17 +129,21 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 | `POST /api/coach/chat/stream` | **SSE Streaming** phản hồi Chatbot theo chunk từ trên mọi màn hình + push `suggested_actions` cuối luồng | `{ project_id, route, mode, message, context, project_state, history }` $\rightarrow$ `text/event-stream` (`chunk`, `actions`, `done`, `error`) |
 | `POST /api/coach/chat/audio` | Tiếp nhận file/mic WAV đính kèm (`<= 10 MB`, > 10 MB trả `413`) cho Gemini Multimodal hoặc Java DSP Telemetry | Multipart (`project_id`, `message`, `mode`, `route`, `file`) $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
 
-### 3.4. Nhóm Persistence, CRUD, Sync & Export
+### 3.4. Nhóm Persistence, Auth, Cloud Quota, Share & Export
 | Method & Endpoint | Mục đích | Payload / Output chính |
 | :--- | :--- | :--- |
-| `GET /api/projects` | Lấy danh sách dự án từ Redis có **phân trang & lọc** | Query: `?page=1&limit=12&search=&genre=` $\rightarrow$ `{ items, total, page, total_pages }` |
-| `GET /api/projects/{id}` | Lấy chi tiết 1 `ProjectState` theo ID | `ProjectState JSON` |
-| `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` (gồm `low_db`, `mid_db`, `high_db`, `reverb_send`, `delay_send`, `automation` trên từng track) | Body: `ProjectState JSON` |
+| `POST /api/auth/register` / `/login` | Đăng ký & đăng nhập tài khoản Cloud (PBKDF2 + HS256 JWT) | `{ email, password, display_name }` $\rightarrow$ `{ authenticated, token, user, quota, cloud }` |
+| `POST /api/auth/oauth/dev` / `GET /api/auth/me` | Đăng nhập Local OAuth Sandbox (`google`/`github`) & đọc thông tin phiên + Quota | `{ authenticated, user, quota, cloud }` (hoặc `Guest` nếu chưa đăng nhập) |
+| `GET /api/projects` | Lấy danh sách dự án (Redis + `CloudDatabaseService`) có **phân trang, lọc & scope (`all\|mine\|public`)** | Query: `?page=1&limit=12&search=&genre=&scope=` $\rightarrow$ `{ items, total, page, total_pages }` |
+| `GET /api/projects/{id}` | Lấy chi tiết 1 `ProjectState` theo ID (tự rehydrate từ CloudDB nếu hết TTL; `403` nếu private của user khác) | `ProjectState JSON` |
+| `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` (`owner_id`, `automation`, EQ, FX) lên Redis + CloudDB (`403` nếu không sở hữu) | Body: `ProjectState JSON` |
 | `POST /api/projects/{id}/undo` | Khôi phục snapshot trước đó từ Undo stack (**50 bước**) | `ProjectState JSON` |
-| `DELETE /api/projects/{id}` | Xóa hẳn Project khỏi Redis/In-Memory Store | `{ status: "deleted", project_id }` |
+| `DELETE /api/projects/{id}` | Xóa Project khỏi Redis, CloudDB & Object Storage (`403` nếu không phải chủ sở hữu) | `{ status: "deleted", project_id }` |
+| `POST/DELETE /api/projects/{id}/publish` | Xuất bản Master (`-14 LUFS`, `mp3`/`flac`/`wav` kèm ID3 tags) lên S3/MinIO + tạo/thu hồi link `/share/{slug}` | `{ share_slug, share_url, stream_url, format, lufs_target, object_storage_backend }` |
+| `GET /api/share` / `/{slug}` / `/{slug}/audio` | Liệt kê Showcase cộng đồng, đọc metadata + tăng `plays_count` & stream Master audio công khai | JSON / Binary audio stream (`audio/mpeg`, `audio/flac`, `audio/wav`) |
 | `POST /api/projects/{id}/export/aimusic` | Đóng gói dự án thành file nhẹ `.aimusic` | Trả về binary stream `.aimusic` |
-| `POST /api/projects/import` | Nạp file `.aimusic` vào Redis & Studio (mặc định UI `overwrite=false` chống ghi đè, kiểm tra Zip Bomb & path traversal) | Form-data `.aimusic` + `overwrite` $\rightarrow$ `ProjectState` |
-| `POST /api/projects/{id}/export/audio` | Render & Auto-Master (áp dụng EQ + Vocal Carve 2.2 kHz + Send FX Bus + Limiter; chặn `total_bars > 256` -> `400`) xuất `wav` / `mp3` (`192k` \| `320k`) / `stems` (`.zip`) | `{ format: "wav" | "mp3" | "stems", bitrate: "320k" | "192k", apply_mastering: true, mode }` |
+| `POST /api/projects/import` | Nạp file `.aimusic` vào Redis, CloudDB & Studio (mặc định UI `overwrite=false`, kiểm tra Zip Bomb & path traversal) | Form-data `.aimusic` + `overwrite` $\rightarrow$ `ProjectState` |
+| `POST /api/projects/{id}/export/audio` | Render & Auto-Master (tiêu thụ daily Quota `429`; chặn `total_bars > 256` -> `400`) xuất `wav` / `mp3` (`192k` \| `320k` + ID3) / `flac` / `stems` (`.zip`) | `{ format: "wav" \| "mp3" \| "flac" \| "stems", bitrate, title?, artist?, genre?, apply_mastering, mode }` |
 | `POST /api/projects/{id}/export/midi` | Xuất file `.mid` đa track kèm Meta Events | Trả về binary `.mid` |
 
 ### 3.5. Hợp đồng Nội bộ Spring Boot $\leftrightarrow$ `audio-worker` (Cổng `8001`)
@@ -151,7 +156,7 @@ Spring Boot (`AudioWorkerClient.java`) gọi các endpoint nội bộ sau trên 
 | `POST /internal/audio/analyze` | Trích xuất BPM (`40–220`), Key/Scale, chuỗi `raw_melody_midi` |
 | `POST /internal/audio/autotune` | Chỉnh phô theo `key`, `scale`, `retune_speed_ms`, `humanize`, `mix_percent` |
 | `POST /internal/audio/render` | Tổng hợp MIDI + Vocal thành audio mix qua `FluidSynth` (Default / Custom `.sf2`) / built-in synth |
-| `POST /internal/audio/export` | Render `wav` / `mp3` / `stems` (`.zip`) với **Master Limiter $\le -1.0\text{ dBFS}$** |
+| `POST /internal/audio/export` | Render `wav` / `mp3` (ID3 tags) / `flac` (Vorbis/FFmpeg tags) / `stems` (`.zip`) với **Master Limiter $\le -1.0\text{ dBFS}$** |
 | `POST /internal/audio/overdub-fit-check` | Phân tích `timing_offset_ms`, `pitch_issues`, `gain_suggestion` cho clip thu đè |
 | `POST /internal/audio/separate-stems` | Tách stem `vocal.wav` + `beat.wav` qua `librosa` HPSS / Mid-Side / Bandpass |
 | `POST /internal/audio/soundfont` | Nạp & xác thực SoundFont `.sf2` (`RIFF`/`sfbk`, `<= 50 MB`) cho `FluidSynth` |

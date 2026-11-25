@@ -1533,17 +1533,58 @@ public class JavaAudioFallbackService {
     }
 
     public byte[] exportMp3ViaFfmpeg(float[][] stereo, int sampleRate) {
-        return exportMp3ViaFfmpeg(stereo, sampleRate, "320k");
+        return exportMp3ViaFfmpeg(stereo, sampleRate, "320k", null, null, null);
     }
 
     public byte[] exportMp3ViaFfmpeg(float[][] stereo, int sampleRate, String bitrate) {
+        return exportMp3ViaFfmpeg(stereo, sampleRate, bitrate, null, null, null);
+    }
+
+    public byte[] exportMp3ViaFfmpeg(float[][] stereo, int sampleRate, String bitrate,
+                                      String title, String artist, String genre) {
         String normBitrate = (bitrate != null && bitrate.trim().startsWith("192")) ? "192k" : "320k";
-        byte[] wav = encodeWavStereo(stereo, sampleRate);
+        List<String> cmd = new ArrayList<>(List.of(
+                "ffmpeg", "-y", "-f", "wav", "-i", "pipe:0",
+                "-codec:a", "libmp3lame", "-b:a", normBitrate
+        ));
+        appendFfmpegMetadataArgs(cmd, title, artist, genre);
+        cmd.addAll(List.of("-f", "mp3", "pipe:1"));
+        return runFfmpegPipe(encodeWavStereo(stereo, sampleRate), cmd,
+                "MP3 export requires audio-worker or ffmpeg to be available.");
+    }
+
+    public byte[] exportFlacViaFfmpeg(float[][] stereo, int sampleRate,
+                                       String title, String artist, String genre) {
+        List<String> cmd = new ArrayList<>(List.of(
+                "ffmpeg", "-y", "-f", "wav", "-i", "pipe:0",
+                "-codec:a", "flac"
+        ));
+        appendFfmpegMetadataArgs(cmd, title, artist, genre);
+        cmd.addAll(List.of("-f", "flac", "pipe:1"));
+        return runFfmpegPipe(encodeWavStereo(stereo, sampleRate), cmd,
+                "FLAC export requires audio-worker or ffmpeg to be available.");
+    }
+
+    private static void appendFfmpegMetadataArgs(List<String> cmd, String title, String artist, String genre) {
+        if (title != null && !title.isBlank()) {
+            cmd.add("-metadata");
+            cmd.add("title=" + title.trim());
+        }
+        if (artist != null && !artist.isBlank()) {
+            cmd.add("-metadata");
+            cmd.add("artist=" + artist.trim());
+        }
+        if (genre != null && !genre.isBlank()) {
+            cmd.add("-metadata");
+            cmd.add("genre=" + genre.trim());
+        }
+    }
+
+    private byte[] runFfmpegPipe(byte[] wavInput, List<String> command, String unavailableMessage) {
         Process p = null;
         Thread timeoutWatcher = null;
         try {
-            p = new ProcessBuilder("ffmpeg", "-y", "-f", "wav", "-i", "pipe:0",
-                    "-codec:a", "libmp3lame", "-b:a", normBitrate, "-f", "mp3", "pipe:1")
+            p = new ProcessBuilder(command)
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start();
             final Process proc = p;
@@ -1555,21 +1596,20 @@ public class JavaAudioFallbackService {
                 } catch (InterruptedException ignored) {
                 }
             });
-            p.getOutputStream().write(wav);
+            p.getOutputStream().write(wavInput);
             p.getOutputStream().close();
-            byte[] mp3 = p.getInputStream().readAllBytes();
+            byte[] encoded = p.getInputStream().readAllBytes();
             boolean finished = p.waitFor(5, TimeUnit.SECONDS);
             int code = finished ? p.exitValue() : -1;
-            if (finished && code == 0 && mp3.length > 0) {
-                return mp3;
+            if (finished && code == 0 && encoded.length > 0) {
+                return encoded;
             }
         } catch (Exception ignored) {
         } finally {
             if (timeoutWatcher != null) timeoutWatcher.interrupt();
             if (p != null && p.isAlive()) p.destroyForcibly();
         }
-        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
-                "MP3 export requires audio-worker or ffmpeg to be available.");
+        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, unavailableMessage);
     }
 
     public byte[] exportMidi(ProjectState project) {

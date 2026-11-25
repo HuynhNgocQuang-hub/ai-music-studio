@@ -23,17 +23,27 @@ public class HealthResponse {
     @JsonProperty("llm_providers")
     private Map<String, Object> llmProviders;
 
+    @JsonProperty("cloud")
+    private Map<String, Object> cloud;
+
     public HealthResponse() {}
 
     public HealthResponse(String status, String app, String version,
                           Map<String, Object> redis, Map<String, Object> engines,
                           Map<String, Object> llmProviders) {
+        this(status, app, version, redis, engines, llmProviders, null);
+    }
+
+    public HealthResponse(String status, String app, String version,
+                          Map<String, Object> redis, Map<String, Object> engines,
+                          Map<String, Object> llmProviders, Map<String, Object> cloud) {
         this.status = status;
         this.app = app;
         this.version = version;
         this.redis = redis;
         this.engines = engines;
         this.llmProviders = llmProviders;
+        this.cloud = cloud;
     }
 
     public String getStatus() { return status; }
@@ -53,4 +63,7 @@ public class HealthResponse {
 
     public Map<String, Object> getLlmProviders() { return llmProviders; }
     public void setLlmProviders(Map<String, Object> llmProviders) { this.llmProviders = llmProviders; }
+
+    public Map<String, Object> getCloud() { return cloud; }
+    public void setCloud(Map<String, Object> cloud) { this.cloud = cloud; }
 }

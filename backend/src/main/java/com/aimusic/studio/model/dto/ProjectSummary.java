@@ -40,6 +40,18 @@ public class ProjectSummary {
     @JsonProperty("source")
     private String source = "draft";
 
+    @JsonProperty("owner_id")
+    private String ownerId;
+
+    @JsonProperty("visibility")
+    private String visibility;
+
+    @JsonProperty("share_slug")
+    private String shareSlug;
+
+    @JsonProperty("published_at")
+    private String publishedAt;
+
     public ProjectSummary() {}
 
     public ProjectSummary(String projectId, String title, String genre, String mood,
@@ -94,4 +106,16 @@ public class ProjectSummary {
 
     public String getSource() { return source; }
     public void setSource(String source) { this.source = source; }
+
+    public String getOwnerId() { return ownerId; }
+    public void setOwnerId(String ownerId) { this.ownerId = ownerId; }
+
+    public String getVisibility() { return visibility; }
+    public void setVisibility(String visibility) { this.visibility = visibility; }
+
+    public String getShareSlug() { return shareSlug; }
+    public void setShareSlug(String shareSlug) { this.shareSlug = shareSlug; }
+
+    public String getPublishedAt() { return publishedAt; }
+    public void setPublishedAt(String publishedAt) { this.publishedAt = publishedAt; }
 }

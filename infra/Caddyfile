@@ -1,0 +1,22 @@
+{
+	local_certs
+}
+
+:443 {
+	tls internal
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy backend:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy {$FRONTEND_UPSTREAM:host.docker.internal:3000}
+	}
+}
+
+:80 {
+	redir https://{host}:{env.HTTPS_PORT:8443}{uri} permanent
+}

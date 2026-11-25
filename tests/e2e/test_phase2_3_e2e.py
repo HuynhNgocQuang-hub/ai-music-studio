@@ -1147,4 +1147,26 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
     )
     assert bad_sf2.status_code == 400, bad_sf2.text
 
+    # 7. Phase 8: Hybrid Auth + Cloud Publish/Share + Showcase stream + Health cloud section
+    health_res = api_client.get("/api/health")
+    assert health_res.status_code == 200
+    assert health_res.json().get("cloud", {}).get("database_ready") is True
+
+    me_guest = api_client.get("/api/auth/me")
+    assert me_guest.status_code == 200
+    assert me_guest.json()["authenticated"] is False
+
+    pub_res = api_client.post(
+        f"/api/projects/{pid}/publish",
+        json={"format": "wav", "artist": "E2E Producer"},
+    )
+    assert pub_res.status_code == 200, pub_res.text
+    slug = pub_res.json()["share_slug"]
+    assert slug
+    assert api_client.get(f"/api/share/{slug}").status_code == 200
+    stream_res = api_client.get(f"/api/share/{slug}/audio")
+    assert stream_res.status_code == 200 and stream_res.content[:4] == b"RIFF"
+    assert api_client.delete(f"/api/projects/{pid}/publish").status_code == 200
+    assert api_client.get(f"/api/share/{slug}").status_code == 404
+
     api_client.delete(f"/api/projects/{pid}")

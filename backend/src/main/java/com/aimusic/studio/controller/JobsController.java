@@ -2,6 +2,8 @@ package com.aimusic.studio.controller;
 
 import com.aimusic.studio.agents.AgentOrchestrator;
 import com.aimusic.studio.agents.LlmContextHolder;
+import com.aimusic.studio.cloud.AuthContextHolder;
+import com.aimusic.studio.cloud.QuotaRateLimitService;
 import com.aimusic.studio.model.ProjectState;
 import com.aimusic.studio.model.dto.JobGenerateRequest;
 import com.aimusic.studio.model.dto.JobRearrangeRequest;
@@ -10,6 +12,7 @@ import com.aimusic.studio.model.dto.JobStartResponse;
 import com.aimusic.studio.store.ProjectStateStore;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -33,10 +36,16 @@ public class JobsController {
 
     private final AgentOrchestrator orchestrator;
     private final ProjectStateStore store;
+    private final QuotaRateLimitService quotaService;
 
-    public JobsController(AgentOrchestrator orchestrator, ProjectStateStore store) {
+    public JobsController(
+            AgentOrchestrator orchestrator,
+            ProjectStateStore store,
+            @Autowired(required = false) QuotaRateLimitService quotaService
+    ) {
         this.orchestrator = orchestrator;
         this.store = store;
+        this.quotaService = quotaService;
     }
 
     @PostMapping("/generate")
@@ -44,6 +53,7 @@ public class JobsController {
         if (req.getProjectId() == null || req.getProjectId().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
         }
+        consumeGenerateQuotaIfEnabled();
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
         LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
         AgentOrchestrator.JobRuntime job = orchestrator.startGenerateJob(state, req.getConfig(), overrides);
@@ -60,6 +70,7 @@ public class JobsController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "target_track must be one of [bass, drums, harmony, lead]");
         }
+        consumeGenerateQuotaIfEnabled();
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
         LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
         AgentOrchestrator.JobRuntime job = orchestrator.startRegenerateTrackJob(state, target, req.getInstrument(), overrides);
@@ -71,11 +82,18 @@ public class JobsController {
         if (req.getProjectId() == null || req.getProjectId().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
         }
+        consumeGenerateQuotaIfEnabled();
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
         LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
         AgentOrchestrator.JobRuntime job = orchestrator.startRearrangeJob(
                 state, req.getChords(), req.getSections(), req.getTotalBars(), req.getLockedTracks(), overrides);
         return new JobStartResponse(job.getJobId(), job.getProjectId(), job.getStatus());
+    }
+
+    private void consumeGenerateQuotaIfEnabled() {
+        if (quotaService != null) {
+            quotaService.consumeGenerateQuota(AuthContextHolder.get(), AuthContextHolder.getActorQuotaKey());
+        }
     }
 
     @GetMapping(value = "/{jobId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

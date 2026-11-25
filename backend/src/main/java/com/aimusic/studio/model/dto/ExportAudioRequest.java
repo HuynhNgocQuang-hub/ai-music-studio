@@ -16,6 +16,18 @@ public class ExportAudioRequest {
     @JsonProperty("bitrate")
     private String bitrate = "320k";
 
+    @JsonProperty("title")
+    private String title;
+
+    @JsonProperty("artist")
+    private String artist;
+
+    @JsonProperty("album")
+    private String album;
+
+    @JsonProperty("genre")
+    private String genre;
+
     public String getFormat() { return format; }
     public void setFormat(String format) { this.format = format != null ? format : "wav"; }
 
@@ -33,4 +45,16 @@ public class ExportAudioRequest {
             this.bitrate = "320k";
         }
     }
+
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
+
+    public String getArtist() { return artist; }
+    public void setArtist(String artist) { this.artist = artist; }
+
+    public String getAlbum() { return album; }
+    public void setAlbum(String album) { this.album = album; }
+
+    public String getGenre() { return genre; }
+    public void setGenre(String genre) { this.genre = genre; }
 }

@@ -735,3 +735,40 @@ def test_stem_separation_and_custom_soundfont_validation(client: TestClient) -> 
         files={"file": ("fake.sf2", b"NOPE" + b"\x00" * 100, "application/octet-stream")},
     )
     assert bad_hdr.status_code == 400
+
+
+def test_flac_master_export_and_metadata_tags(client: TestClient) -> None:
+    """Verify /internal/audio/export supports lossless FLAC (fLaC header) and accepts ID3/tag fields."""
+    project = {
+        "project_id": "proj_phase8_flac",
+        "analysis": {"bpm": 120.0, "time_signature": "4/4", "detected_key": "C", "detected_scale": "major", "bars": 2},
+        "song_structure": {"total_bars": 2},
+        "tracks": {
+            "lead": {
+                "type": "midi",
+                "volume": 0.9,
+                "pan": 0.0,
+                "instrument": "grand_piano",
+                "notes": [{"pitch": 60, "start_beat": 0.0, "duration": 1.0, "velocity": 100}],
+            }
+        },
+        "mastering": {"auto_mix_enabled": True, "limiter_ceiling_db": -1.0, "target_lufs": -14.0},
+    }
+    res = client.post(
+        "/internal/audio/export",
+        json={
+            "project": project,
+            "format": "flac",
+            "mode": "ai_mix",
+            "apply_mastering": True,
+            "sample_rate": 44100,
+            "title": "Cloud Demo Song",
+            "artist": "Studio Creator",
+            "album": "Phase 8 Releases",
+            "genre": "Pop",
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.headers.get("content-type", "").startswith("audio/flac")
+    assert res.content[:4] == b"fLaC"
+    assert float(res.headers["x-peak-dbfs"]) <= -1.0 + 1e-4

@@ -1,10 +1,10 @@
 # Tài liệu Đặc tả Yêu cầu Phần mềm (SRS)
 ## Dự án: AI Music Studio — Hệ thống Sáng tác & Phối khí Âm nhạc Multi-Agent
 
-- **Phiên bản:** 1.4 (SRS Aligned + Multi-Mode AI Chatbot + FL Playlist + Phase 6B/7 Pro DSP)
+- **Phiên bản:** 1.5 (Phase 1–8 Complete: Pro DAW, 24-Tool Copilot, Stem Separation, Pitch Curve, WebMIDI, Custom `.sf2`, Hybrid Cloud SaaS)
 - **Ngày cập nhật:** 2026-11-25
-- **Tài liệu liên quan:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md)
-- **Phạm vi triển khai:** Ứng dụng **cá nhân (Single-User Local App)** — không cần đăng nhập/phân quyền, tối ưu lưu trữ nhẹ ổ đĩa (dùng Redis/RAM cache kết hợp MIDI JSON và dọn file tạm tự động).
+- **Tài liệu liên quan:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [PHASES_OVERVIEW.md](./PHASES_OVERVIEW.md)
+- **Phạm vi triển khai:** Ứng dụng **Hybrid Guest + Multi-User Cloud SaaS** — cho phép mở dùng ngay ở chế độ Guest hoặc đăng nhập JWT (`PostgreSQL/H2`, `MinIO S3`, Quota & Public Demo Share `/share/:slug`), vẫn tối ưu nhẹ ổ đĩa nhờ Redis TTL + `.aimusic` MIDI JSON.
 - **Phạm vi chức năng:** Đặc tả chi tiết các yêu cầu chức năng (FR), thành phần bắt buộc, ràng buộc kỹ thuật, luồng nghiệp vụ cho **Hum-to-Music**, **AI Denoise & Auto-Tune**, **Lyricist & AI Coach**, **Hybrid MIDI + Audio Clips** và **AI Music Studio (DAW-lite)**.
 
 ---
@@ -181,6 +181,7 @@ Không gian nghe thử, phối lại và chỉnh sửa đa lớp kết hợp gi�
 * `FR-STU-16`: **Multi-Param Web Audio Automation & A/B Chord Audition:** Hỗ trợ chuyển đổi & vẽ đường tự động hóa **`DYN | VOL | PAN | FILT | REVERB`** (`TrackState.automation`) chạy realtime trên Web Audio (`AudioParam.linearRampToValueAtTime`), kèm nút **Nghe thử hợp âm** trước khi áp dụng.
 * `FR-STU-17`: **Visual Pitch Curve Editor & Hardware WebMIDI:** Chỉnh sửa độ lệch cao độ bán âm (semitone nudge / scale snap) trực quan trong tab **`Auto-Tune DSP`**, và kết nối bàn phím **WebMIDI** (`navigator.requestMIDIAccess`) để ghi nốt trực tiếp trên Piano Roll.
 * `FR-STU-18`: **Custom `.sf2` SoundFont Upload:** Nạp bộ tiếng `.sf2` tùy chọn (`<= 50 MB`, xác thực header `RIFF`/`sfbk`) tại `/settings` để FluidSynth render MIDI với âm sắc riêng.
+* `FR-STU-19`: **Cloud Workspace, Quota & Public Demo Publishing (Phase 8):** Hỗ trợ chế độ Hybrid **Guest + JWT Auth**, đồng bộ metadata/state lên **PostgreSQL / H2 Local**, lưu audio master & bundle `.aimusic` trên **MinIO S3 / Local Fallback**, kiểm soát hạn mức ngày (**Quota `HTTP 429`**), xuất **FLAC / MP3 kèm ID3 tags**, và chia sẻ trang Demo công khai `/share/:slug` (hỗ trợ phát audio, đếm lượt nghe & **Remix trong Studio**).
 
 * **Phải có gì (`FR-STUDIO`):**
   * **Header điều khiển chung:** Play/Pause, Stop, Loop Region, đồng hồ thời gian + vị trí ô nhịp (`Bar:Beat`), BPM hiện tại, Key hiện tại, nút **Undo / Redo**, công cụ **Select / Cut (Kéo cắt) / Snap Grid**, nút **Auto-Mix/Master**, nút **Export**.
@@ -234,8 +235,8 @@ flowchart TD
 
 | Hạng mục | Yêu cầu cụ thể |
 | :--- | :--- |
-| **Phạm vi sử dụng & Nguồn AI (Single-User + Dual LLM)** | Chạy cục bộ cho cá nhân (`Localhost`), **không cần đăng nhập hay phân quyền**. Hỗ trợ cấu hình song song cả **Gemini API** và **OpenAI API** qua file `.env` hoặc Settings UI (có thể chọn dùng 1 trong 2 hoặc phân vai mỗi Agent dùng 1 nhà cung cấp); **không** tải model LLM nặng về ổ đĩa. |
-| **Chống mất bài khi quên lưu & Nhẹ ổ đĩa** | Áp dụng cơ chế **Auto-Save 2 tầng**: (1) **Browser `IndexedDB`** tự động lưu ngầm mỗi 5–10 giây (JSON State + audio thu âm nén nhẹ, giữ tối đa 3–5 dự án gần nhất — mở lại web là khôi phục ngay cả khi tắt máy/quên lưu); (2) **Redis** giữ bản nháp nóng & Undo History trong RAM kèm TTL tự dọn. Hỗ trợ xuất/mở file dự án `.aimusic` (`1–3 MB`), giữ nhạc cụ ở dạng MIDI JSON và chỉ ghi file WAV/MP3 nặng khi bấm Export. |
+| **Phạm vi sử dụng, Auth & Nguồn AI (Hybrid SaaS + Dual LLM)** | Mặc định dùng ngay ở chế độ **Guest**, hoặc đăng ký/đăng nhập **HS256 JWT (`PBKDF2WithHmacSHA256` + Local OAuth Sandbox)** để cách ly dự án riêng tư (`HTTP 403`), theo dõi hạn mức **Quota (`429`)** và xuất bản công khai. Hỗ trợ cấu hình song song cả **Gemini API** và **OpenAI API** qua file `.env` hoặc Settings UI (**không** tải model LLM nặng về ổ đĩa). |
+| **Lưu trữ bền vững & Nhẹ ổ đĩa** | Áp dụng cơ chế lưu đa tầng: (1) **Browser `IndexedDB`** Auto-Save mỗi 7s; (2) **Redis** giữ hot state & Undo History (50 bước); (3) **PostgreSQL + Embedded H2 Fallback** (`CloudDatabaseService`) & **MinIO S3 + Local Fallback** (`ObjectStorageService`) lưu bền vững `.aimusic` + Master audio (`FLAC` / `MP3` ID3 / `WAV`). |
 | **Đồng bộ nhịp & thời gian (Audio-MIDI Sync)** | Mọi track audio (Vocal/Hum, bản thu đè Overdub, Audio Clip) và track MIDI sinh ra phải chung một mốc lưới nhịp (Tempo Grid) và mốc bắt đầu `t = 0`, sai số `< 10 ms`, có bù độ trễ mic khi thu đè lên beat. |
 | **Mastering & Bảo vệ tín hiệu** | Tích hợp Limiter trên Master Bus (`Peak <= -1.0 dBFS`) và AI cân bằng Gain để không vỡ tiếng khi trộn nhiều track hoặc xuất file. |
 | **Timeout, Hủy & Fallback** | Mỗi job Multi-Agent có timeout tối đa **60 giây**, hỗ trợ nút **Cancel** hủy ngang an toàn. Vòng lặp QA giới hạn tối đa **2 vòng**; nếu hết vòng vẫn chưa hoàn hảo thì trả về **Best-effort Fallback** kèm cảnh báo nhẹ. |

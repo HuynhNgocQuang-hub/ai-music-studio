@@ -1,6 +1,7 @@
 import type {
   AnalyzeRequest,
   AnalyzeResponse,
+  AuthSessionResponse,
   AutoMixResponse,
   AutoTrimVocalResponse,
   AutotuneRequest,
@@ -23,12 +24,34 @@ import type {
   LyricsSuggestResponse,
   OverdubFitCheckResponse,
   PaginatedProjectsResponse,
+  PaginatedReleasesResponse,
   ProjectState,
+  PublishedRelease,
+  PublishReleaseRequest,
+  PublishReleaseResponse,
   StudioLLMSettings,
   UploadAudioResponse,
 } from '@/types/project';
 
 const SETTINGS_STORAGE_KEY = 'ai_music_studio_settings_v1';
+const AUTH_TOKEN_STORAGE_KEY = 'ai_music_studio_auth_token_v1';
+
+export function getAuthToken(): string {
+  if (typeof window === 'undefined') return '';
+  return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+}
+
+export function setAuthToken(token: string): void {
+  if (typeof window === 'undefined') return;
+  if (token) {
+    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+  }
+}
+
+export function clearAuthToken(): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+}
 
 export const ALLOWED_AUDIO_EXTENSIONS = ['wav', 'mp3', 'm4a', 'ogg', 'flac'] as const;
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB (SRS FR-INP)
@@ -86,6 +109,8 @@ function buildLLMHeaders(): Record<string, string> {
   if (s.openaiApiKey) headers['X-OpenAI-Api-Key'] = s.openaiApiKey;
   if (s.defaultProvider) headers['X-LLM-Provider'] = s.defaultProvider;
   if (s.agentProviders) headers['X-Agent-Providers'] = JSON.stringify(s.agentProviders);
+  const token = getAuthToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
   return headers;
 }
 
@@ -636,12 +661,14 @@ export async function listProjects(params: {
   limit?: number;
   search?: string;
   genre?: string;
+  scope?: 'all' | 'mine' | 'public';
 }): Promise<PaginatedProjectsResponse> {
   const query = new URLSearchParams();
   query.set('page', String(params.page ?? 1));
   query.set('limit', String(params.limit ?? 12));
   if (params.search) query.set('search', params.search);
   if (params.genre) query.set('genre', params.genre);
+  if (params.scope) query.set('scope', params.scope);
   return requestJson<PaginatedProjectsResponse>(`/api/projects?${query.toString()}`, {
     method: 'GET',
   });
@@ -704,14 +731,21 @@ export async function importAimusic(file: File, overwrite = false): Promise<Proj
 
 export async function exportAudio(
   projectId: string,
-  format: 'wav' | 'mp3' | 'stems',
+  format: 'wav' | 'mp3' | 'flac' | 'stems',
   applyMastering = true,
   mode: 'ai_mix' | 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance' = 'ai_mix',
-  bitrate: '192k' | '320k' = '320k'
+  bitrate: '192k' | '320k' = '320k',
+  metadata?: { title?: string; artist?: string; album?: string; genre?: string }
 ): Promise<Blob> {
   return requestBlob(`/api/projects/${encodeURIComponent(projectId)}/export/audio`, {
     method: 'POST',
-    body: JSON.stringify({ format, apply_mastering: applyMastering, mode, bitrate }),
+    body: JSON.stringify({
+      format,
+      apply_mastering: applyMastering,
+      mode,
+      bitrate,
+      ...(metadata || {}),
+    }),
   });
 }
 
@@ -732,4 +766,88 @@ export function triggerBlobDownload(blob: Blob, filename: string): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ============================================================
+// 3.5 Phase 8: Multi-User JWT Auth, Cloud Quota & Public Share
+// ============================================================
+export async function registerAccount(payload: {
+  email: string;
+  password: string;
+  display_name: string;
+}): Promise<AuthSessionResponse> {
+  return requestJson<AuthSessionResponse>('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function loginAccount(payload: {
+  email: string;
+  password: string;
+}): Promise<AuthSessionResponse> {
+  return requestJson<AuthSessionResponse>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function oauthDevLogin(provider: 'google' | 'github'): Promise<AuthSessionResponse> {
+  return requestJson<AuthSessionResponse>('/api/auth/oauth/dev', {
+    method: 'POST',
+    body: JSON.stringify({ provider }),
+  });
+}
+
+export async function fetchAuthMe(): Promise<AuthSessionResponse> {
+  return requestJson<AuthSessionResponse>('/api/auth/me', {
+    method: 'GET',
+  });
+}
+
+export async function publishProject(
+  projectId: string,
+  payload: PublishReleaseRequest = {}
+): Promise<PublishReleaseResponse> {
+  return requestJson<PublishReleaseResponse>(`/api/projects/${encodeURIComponent(projectId)}/publish`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function unpublishProject(
+  projectId: string
+): Promise<{ status: string; project_id: string }> {
+  return requestJson<{ status: string; project_id: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/publish`,
+    {
+      method: 'DELETE',
+    }
+  );
+}
+
+export async function listPublicReleases(params: {
+  page?: number;
+  limit?: number;
+  search?: string;
+  genre?: string;
+} = {}): Promise<PaginatedReleasesResponse> {
+  const query = new URLSearchParams();
+  query.set('page', String(params.page ?? 1));
+  query.set('limit', String(params.limit ?? 12));
+  if (params.search) query.set('search', params.search);
+  if (params.genre) query.set('genre', params.genre);
+  return requestJson<PaginatedReleasesResponse>(`/api/share?${query.toString()}`, {
+    method: 'GET',
+  });
+}
+
+export async function getPublicShare(slug: string): Promise<PublishedRelease> {
+  return requestJson<PublishedRelease>(`/api/share/${encodeURIComponent(slug)}`, {
+    method: 'GET',
+  });
+}
+
+export function getPublicShareAudioUrl(slug: string): string {
+  return `${getApiBaseUrl()}/api/share/${encodeURIComponent(slug)}/audio`;
 }
