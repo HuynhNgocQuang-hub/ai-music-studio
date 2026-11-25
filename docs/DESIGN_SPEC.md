@@ -1,8 +1,8 @@
 # Tài liệu Thiết kế Kiến trúc & Giao diện Hệ thống (`DESIGN_SPEC`)
 ## Dự án: AI Music Studio (Hybrid Multi-Agent DAW)
 
-- **Phiên bản:** 2.1 (Option B Production + FL Playlist + Global Multimodal AI Copilot)
-- **Cập nhật lần cuối:** 2026-11-23
+- **Phiên bản:** 2.2 (Phase 1–7 Complete: Stem Separation, Multi-Param Automation, Pitch Curve, WebMIDI & Custom `.sf2`)
+- **Cập nhật lần cuối:** 2026-11-25
 - **Liên kết tài liệu:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md)
 
 ---
@@ -13,7 +13,7 @@
 flowchart LR
     subgraph Browser["Browser Client (:3000 React 19 + Vite)"]
         UI["Pages: Home / Create / Studio / Library / Settings"]
-        WA["Web Audio Engine (player.ts: Multi-Track + EQ + FX Bus)"]
+        WA["Web Audio Engine (player.ts: Multi-Track + EQ + FX Bus + Automation)"]
         IDB[("IndexedDB Draft & Audio Blob Store")]
     end
 
@@ -22,16 +22,16 @@ flowchart LR
         CTRL["REST & SSE Controllers (/api/*)"]
         ORCH["AgentOrchestrator (60s timeout, QA <= 2, 15m Eviction)"]
         LLM["LlmAdapter (Gemini 3.8 Flash + OpenAI + Mock)"]
-        FB["JavaAudioFallbackService (WAV/MIDI/EQ/Limiter/.aimusic)"]
+        FB["JavaAudioFallbackService (WAV/MIDI/EQ/Limiter/Stems/.aimusic)"]
     end
 
     subgraph Worker["Audio DSP Service (:8001 Docker Python FastAPI)"]
-        DSP["Denoise / Pitch Analyzer / Cepstral Auto-Tune"]
-        REN["FluidSynth + Pedalboard Renderer & MP3/WAV/Stems Exporter"]
+        DSP["Denoise / Pitch Analyzer / Cepstral Auto-Tune / Stem Separation"]
+        REN["FluidSynth (Default / Custom .sf2) + Pedalboard Renderer & Exporter"]
     end
 
     subgraph Cache["State Store (:16379 Docker Redis 7)"]
-        RED[("Redis 7-alpine (256MB LRU, Project/Audio TTL, Undo x20)")]
+        RED[("Redis 7-alpine (256MB LRU, Project/Audio TTL, Undo x50)")]
     end
 
     subgraph Cloud["External Cloud LLM APIs"]
@@ -104,7 +104,7 @@ erDiagram
 ```
 
 *Quy ước chính của Schema:*
-- **`TrackState`** hỗ trợ cả `"audio"` (`clips[]`) và `"midi"` (`instrument`, `notes[]`), cùng dùng chung bộ Mixer + DSP (`volume`, `pan`, `low_db`, `mid_db`, `high_db`, `reverb_send`, `delay_send`, `mute`, `solo`, `locked`).
+- **`TrackState`** hỗ trợ cả `"audio"` (`clips[]`) và `"midi"` (`instrument`, `notes[]`), cùng dùng chung bộ Mixer + DSP (`volume`, `pan`, `low_db`, `mid_db`, `high_db`, `reverb_send`, `delay_send`, `mute`, `solo`, `locked`) và trường tùy chọn **`automation`** (`volume`, `pan`, `filter`, `reverb` breakpoints).
 - **`SongSection`** (`name`, `start_bar`, `bars`, `energy`, `has_user_motif`) điều khiển cả bố cục phối khí của `ArrangerAgent`, phân khúc khung Pattern MIDI, lẫn làn **Dynamics Automation Envelope** kéo chỉnh trực tiếp trên Playlist.
 
 ---
@@ -115,19 +115,21 @@ erDiagram
 - **`App.tsx`:** Nạp lười (`React.lazy` + `Suspense`) toàn bộ 5 route (`HomePage`, `CreatePage`, `StudioPage`, `LibraryPage`, `SettingsPage`), giữ main chunk `index` gọn quanh ~304 kB.
 - **`ProjectProvider.tsx`:** Quản lý trạng thái dự án thống nhất, bộ bảo vệ bất đồng bộ **`saveSeqRef`** (chống stale save ghi đè), và đồng bộ 2 tầng `IndexedDB` + `/api/projects/{id}/sync`.
 - **`StudioPage.tsx` & các Module con:**
-  - `QuickStudioView.tsx`: Chế độ nghe thử gọn, đổi Genre/Mood/BPM và Regenerate 1 chạm.
-  - `TimelineEditor.tsx` + `WaveformClipCanvas.tsx`: Playlist đa làn chuẩn **FL Studio 12 Clip Frame**.
+  - `QuickStudioView.tsx`: Chế độ nghe thử gọn, đổi Genre/Mood/BPM, **A/B Nghe thử hợp âm** (`auditionChordProgression`) và Regenerate 1 chạm; hỗ trợ **50 bước Undo** (`slice(-49)`).
+  - `TimelineEditor.tsx` + `WaveformClipCanvas.tsx`: Playlist đa làn chuẩn **FL Studio 12 Clip Frame**, kèm bộ chuyển tham số Automation **`DYN | VOL | PAN | FILT | REVERB`** (phát realtime qua Web Audio `linearRampToValueAtTime`) và nút tách **Stem Vocal/Beat**.
   - `StepSequencer.tsx`: Lưới trống hỗ trợ `4/4` (16 bước) và `3/4` / `6/8` (12 bước).
-  - `PianoRollEditor.tsx`: Bộ soạn nốt C1–C7, Scale highlight, Quantize, Velocity lane, Copy/Paste nốt.
+  - `PianoRollEditor.tsx` + `webmidi.ts`: Bộ soạn nốt C1–C7, Scale highlight, Quantize, Velocity lane, Copy/Paste nốt và kết nối bàn phím **Hardware WebMIDI** (`useWebMidi`).
+  - `PitchCurveEditor.tsx`: Bộ chỉnh cao độ trực quan (**Visual Pitch Curve Editor** — semitone nudge & scale snap) gắn trong tab **`Auto-Tune DSP`**.
   - `ConsoleMixerPanel.tsx`: Kênh trộn dọc 3-Band EQ, FX Send (`BUS A Reverb` + `BUS B Delay`), LED Meter và Master Bus.
-  - `AiCoachChatDrawer.tsx`: Ngăn kéo **AI Music Copilot** toàn cục trên cả 5 trang (`AppShell.tsx` + `ProjectProvider.tsx`), hỗ trợ SSE Stream, Mic WAV / Speech & đính kèm Audio (`<= 10 MB`), **Áp dụng tất cả**, **Hoàn tác 1 chạm (`Revert`)** và lưu hội thoại trong `IndexedDB` (`chat_threads`).
+  - `SettingsPage.tsx`: Cấu hình Dual LLM, Test API Key và upload **Custom `.sf2` SoundFont** (`<= 50 MB`).
+  - `AiCoachChatDrawer.tsx`: Ngăn kéo **AI Music Copilot** toàn cục trên cả 5 trang (`AppShell.tsx` + `ProjectProvider.tsx`), hỗ trợ SSE Stream, Mic WAV / Speech & đính kèm Audio (`<= 10 MB`), **A/B Nghe thử hợp âm**, **Áp dụng tất cả**, **Hoàn tác 1 chạm (`Revert`)** và lưu hội thoại trong `IndexedDB` (`chat_threads`).
 
 ### 4.2. Quy chuẩn Thẩm mỹ DAW & Khung Clip FL Studio 12
 - **Bảng màu nền Hardware Dark:**
   - Studio Shell `#111317`, Sidebar `#16191f`, Panel `#1b1e25`, Lane nền phân cụm 4 ô nhịp `#1c2331` / `#131822`, đường chia Beat `rgba(255,255,255,0.045)`, Playhead xanh lá `#4ade80`.
 - **Cấu trúc 3 loại Khung Clip trên Playlist (`17px Header + Thân bán trong suốt thấy lưới nhịp`):**
   1. **Audio Waveform (`Vocal`, `Overdub`, `Texture`):** Header màu đặc (`#3c9678` / `#aa4562` / `#4f679e`) + biểu tượng sóng `∿`; thân vẽ **đa giác sóng đối xứng liên tục** (`WaveformClipCanvas`) tối đa `480` mẫu kèm Fade-In/Out chéo và progress xanh khi phát.
-  2. **Automation Envelope (`Dynamics`):** Header xanh thép (`#4a6592`) + icon spline `⟋`; thân vẽ đường cong SVG gradient thể hiện `section.energy` cùng chấm neo kéo trực tiếp (lưu qua Undo/Redo).
+  2. **Automation Envelope (`DYN | VOL | PAN | FILT | REVERB`):** Header xanh thép (`#4a6592`) + icon spline `⟋`; thân vẽ đường cong SVG gradient thể hiện `section.energy` (`DYN`) hoặc `TrackState.automation` (`volume`, `pan`, `filter` lowpass `380–20000 Hz`, `reverb`) cùng chấm neo kéo trực tiếp (lưu qua Undo/Redo).
   3. **MIDI Pattern (`Drums`, `Bass`, `Harmony`, `Lead`):** Tự động cắt khung theo từng `SongSection` hoặc cụm 4 ô nhịp (tự gắn biến thể `#2`, `#3` khi họa tiết nốt đổi); header đặc (`#9d6f2c` / `#6e56a4` / `#4c76a8` / `#388680`) + icon Pattern + Piano Roll thu gọn bên trong.
 
 ---
@@ -136,15 +138,15 @@ erDiagram
 
 ### 5.1. Kiến trúc Global AI Music Copilot (`4 Modes + Mini-RAG + Multimodal + Tool Calling`)
 - **4 chế độ chuyên biệt (`CoachAssistantMode`) gắn vào `AppShell` toàn app (`/`, `/create`, `/library`, `/settings`, `/studio/:id`):**
-  1. `producer`: Điều hướng trang, khởi tạo Starter Template từ Home, đánh giá cấu trúc, BPM, đặt mô-típ Chorus, Overdub & Fit Check.
-  2. `arrangement`: Gợi ý tiến trình hợp âm (`vi - IV - I - V`, ...), đổi nhịp `4/4|3/4|6/8`, thêm đoạn (`Bridge`), kéo **Dynamics Energy%**, tái tạo track trống/bass/đệm.
+  1. `producer`: Điều hướng trang, khởi tạo Starter Template từ Home, đánh giá cấu trúc, BPM, đặt mô-típ Chorus, Overdub & Fit Check, tách Stem Vocal/Beat.
+  2. `arrangement`: Gợi ý & **A/B Nghe thử tiến trình hợp âm** (`vi - IV - I - V`, ...), đổi nhịp `4/4|3/4|6/8`, thêm đoạn (`Bridge`), kéo **Dynamics Energy%**, tái tạo track trống/bass/đệm.
   3. `lyricist`: Viết hoặc sửa từng dòng lời Việt/Anh/Song ngữ khớp mật độ nốt/âm tiết (`update_lyrics_lines`, `suggest_lyrics`).
-  4. `mix`: Tư vấn & chỉnh trực tiếp **3-Band EQ (`low_db`, `mid_db`, `high_db`)**, `volume`, `pan`, **FX Sends (`reverb_send`, `delay_send`)**, Auto-Tune preset, Auto-Trim & Auto-Mix `-1.0 dBFS`.
+  4. `mix`: Tư vấn & chỉnh trực tiếp **3-Band EQ (`low_db`, `mid_db`, `high_db`)**, `volume`, `pan`, **FX Sends (`reverb_send`, `delay_send`)**, **Automation Curve (`set_automation`)**, Auto-Tune preset, Auto-Trim & Auto-Mix `-1.0 dBFS`.
 - **Mini-RAG & Native Tool Calling:**
-  - `DawPlaybook.java` chuẩn hóa tiếng Việt không dấu (NFD) để truy hồi playbook hỗn hợp (`route`, `query`, `mode`) và truyền cùng full snapshot (`tracks`, EQ, FX, lyrics, sections, `fit_check`) vào LLM.
-  - `LlmAdapter.generateWithTools` / `generateAudioWithTools` gọi native Gemini `functionDeclarations` (kèm `inlineData` audio `<= 6 MB`) hoặc OpenAI `tools` (tự chuyển JSON Schema `type` về lowercase) với **22 Action Tools** (từ EQ/FX, Mastering LUFS, Quản lý Track/Nhạc cụ/Điệu trống, Vận chuyển Play/Stop/Undo, Điều hướng 5 trang/Quick-Pro tới Export & Health Check) và **Holistic Project Audit** khi người dùng hỏi *"AI làm được gì / đề xuất mọi thứ"*.
+  - `DawPlaybook.java` chuẩn hóa tiếng Việt không dấu (NFD) để truy hồi playbook hỗn hợp (`route`, `query`, `mode`) và truyền cùng full snapshot (`tracks`, `automation`, EQ, FX, lyrics, sections, `fit_check`) vào LLM.
+  - `LlmAdapter.generateWithTools` / `generateAudioWithTools` gọi native Gemini `functionDeclarations` (kèm `inlineData` audio `<= 6 MB`) hoặc OpenAI `tools` (tự chuyển JSON Schema `type` về lowercase) với **24 Action Tools** (từ EQ/FX, Mastering LUFS, Stem Separation, Automation Curve, Quản lý Track/Nhạc cụ/Điệu trống, Vận chuyển Play/Stop/Undo, Điều hướng 5 trang/Quick-Pro tới Export & Health Check) và **Holistic Project Audit** khi người dùng hỏi *"AI làm được gì / đề xuất mọi thứ"*.
 - **Cơ chế An toàn (`Human-in-the-loop` + 1-Click Revert & IndexedDB Thread Memory):**
-  - AI chỉ đề xuất mảng `suggested_actions[]` (`set_track_mix`, `manage_track`, `apply_drum_groove`, `edit_structure_and_dynamics`, `update_lyrics_lines`, `suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `auto_trim_vocal`, `set_mastering`, `regenerate_track`, `regenerate_song`, `update_config`, `transport_control`, `navigate_tab`, `navigate_route`, `switch_studio_mode`, `create_template`, `export_project`, `test_health`, `clear_cache`).
+  - AI chỉ đề xuất mảng `suggested_actions[]` (`set_track_mix`, `manage_track`, `separate_stems`, `set_automation`, `apply_drum_groove`, `edit_structure_and_dynamics`, `update_lyrics_lines`, `suggest_lyrics`, `rearrange_chords`, `apply_autotune`, `auto_mix`, `auto_trim_vocal`, `set_mastering`, `regenerate_track`, `regenerate_song`, `update_config`, `transport_control`, `navigate_tab`, `navigate_route`, `switch_studio_mode`, `create_template`, `export_project`, `test_health`, `clear_cache`).
   - Không tự ý sửa `ProjectState`; người dùng bấm từng nút hoặc **Áp dụng tất cả**, đồng thời snapshot trước khi chạy được giữ lại cho nút **`Hoàn tác` (1-Click Revert)**. Lịch sử chat lưu bền vững trong store `chat_threads` (`IndexedDB v2`).
 - **Model & Fallback Resilience (`LlmAdapter.java`):**
   - Mặc định gọi **`gemini-3.8-flash`** qua header `x-goog-api-key` (hỗ trợ cả key `AQ...` lẫn `AIza...`); nếu model cấu hình trả `404` sẽ tự fallback sang `gemini-3.8-flash`, và nếu chưa cấu hình API Key hoặc quá tải cloud sẽ tự rơi mượt về bộ phân tích Heuristic + DSP Audio Telemetry cục bộ.

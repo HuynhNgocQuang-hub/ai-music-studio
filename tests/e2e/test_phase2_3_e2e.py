@@ -1127,4 +1127,24 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
     )
     assert too_big.status_code == 413, too_big.text
 
+    # 6. Phase 6B & 7: Separate Stems + Track Automation Sync + Invalid SoundFont guard
+    sep_res = api_client.post("/api/studio/separate-stems", json={"project_id": pid})
+    assert sep_res.status_code == 200, sep_res.text
+    sep_json = sep_res.json()
+    assert sep_json["vocal_ref"].startswith("mem://stems/")
+    assert sep_json["beat_ref"].startswith("mem://stems/")
+    synced_state = sep_json["project_state"]
+    synced_state["tracks"]["vocal"]["automation"] = {
+        "filter": [{"bar": 1.0, "value": 0.4}, {"bar": 4.0, "value": 1.0}]
+    }
+    sync_auto = api_client.put(f"/api/projects/{pid}/sync", json=synced_state)
+    assert sync_auto.status_code == 200, sync_auto.text
+    assert sync_auto.json()["tracks"]["vocal"]["automation"]["filter"][1]["value"] == 1.0
+
+    bad_sf2 = api_client.post(
+        "/api/audio/soundfont",
+        files={"file": ("invalid.sf2", b"BAD_SF2_HEADER", "application/octet-stream")},
+    )
+    assert bad_sf2.status_code == 400, bad_sf2.text
+
     api_client.delete(f"/api/projects/{pid}")

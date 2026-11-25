@@ -705,4 +705,32 @@ class AudioAndLimiterTests {
                 audioService.renderProjectMix(clamped, store, "ai_mix", true, 44100);
         assertEquals(2 * 4 * 1.5 * 44100, boundedMix.stereo().length, 4410);
     }
+
+    @Test
+    void phase6BStemSeparationAndPhase7Undo50Steps() {
+        byte[] mixWav = makeMelodyWav(1.5, 44100, false);
+        JavaAudioFallbackService.StemSeparationResult stems = audioService.separateStemsFallback(mixWav);
+        assertNotNull(stems.vocalWav());
+        assertNotNull(stems.beatWav());
+        assertTrue(stems.vocalWav().length > 44);
+        assertTrue(stems.beatWav().length > 44);
+
+        // Phase 7: Verify Undo stack keeps up to 50 steps cleanly
+        ProjectStateStore store = new ProjectStateStore(objectMapper, 3600, 3600, true);
+        for (int i = 1; i <= 55; i++) {
+            ProjectState snap = ProjectState.createDefault("undo50", "Step " + i);
+            snap.setVersion(i);
+            store.pushUndo("undo50", snap);
+        }
+        int popped = 0;
+        int latestVer = -1;
+        while (true) {
+            var opt = store.popUndo("undo50");
+            if (opt.isEmpty()) break;
+            if (popped == 0) latestVer = opt.get().getVersion();
+            popped++;
+        }
+        assertEquals(50, popped);
+        assertEquals(55, latestVer);
+    }
 }

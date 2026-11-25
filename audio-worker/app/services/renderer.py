@@ -18,6 +18,32 @@ from app.services.denoise import _resample_mono, decode_wav_bytes
 from app.services.exporter import apply_master_limiter
 
 SOUNDFONT_PATH = os.getenv("SOUNDFONT_PATH", "/usr/share/sounds/sf2/FluidR3_GM.sf2")
+CUSTOM_SOUNDFONT_PATH = os.getenv("CUSTOM_SOUNDFONT_PATH", "/tmp/aimusic_custom.sf2")
+
+
+def get_effective_soundfont_path() -> str:
+    """Return uploaded custom .sf2 SoundFont path when valid, otherwise default GM SoundFont."""
+    if CUSTOM_SOUNDFONT_PATH and os.path.exists(CUSTOM_SOUNDFONT_PATH) and os.path.getsize(CUSTOM_SOUNDFONT_PATH) > 1024:
+        return CUSTOM_SOUNDFONT_PATH
+    return SOUNDFONT_PATH
+
+
+def has_custom_soundfont() -> bool:
+    return bool(CUSTOM_SOUNDFONT_PATH and os.path.exists(CUSTOM_SOUNDFONT_PATH) and os.path.getsize(CUSTOM_SOUNDFONT_PATH) > 1024)
+
+
+def save_custom_soundfont(sf2_bytes: bytes) -> str:
+    """Validate RIFF/sfbk SoundFont bytes and persist atomically to CUSTOM_SOUNDFONT_PATH."""
+    if len(sf2_bytes) < 64 or sf2_bytes[:4] != b"RIFF" or sf2_bytes[8:12] != b"sfbk":
+        raise ValueError("Invalid SoundFont file (expected RIFF/sfbk .sf2 container).")
+    parent = os.path.dirname(CUSTOM_SOUNDFONT_PATH)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_path = f"{CUSTOM_SOUNDFONT_PATH}.tmp"
+    with open(tmp_path, "wb") as fh:
+        fh.write(sf2_bytes)
+    os.replace(tmp_path, CUSTOM_SOUNDFONT_PATH)
+    return CUSTOM_SOUNDFONT_PATH
 
 INSTRUMENT_PROGRAMS: dict[str, int] = {
     # Keys & Piano
@@ -179,7 +205,7 @@ def _try_fluidsynth_render(
     sr: int,
 ) -> Optional[np.ndarray]:
     """Attempt FluidSynth rendering if binary and SoundFont exist; return None on fallback."""
-    sf_path = SOUNDFONT_PATH
+    sf_path = get_effective_soundfont_path()
     if not track.notes or shutil.which("fluidsynth") is None or not os.path.exists(sf_path):
         return None
 

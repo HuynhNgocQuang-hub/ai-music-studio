@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ProjectStateStore {
 
     private static final Logger log = LoggerFactory.getLogger(ProjectStateStore.class);
-    private static final int DEFAULT_MAX_UNDO = 20;
+    private static final int DEFAULT_MAX_UNDO = 50;
 
     private record MemoryEntry(byte[] data, long expiresAtNanos) {
         boolean isExpired(long nowNanos) {
@@ -324,7 +324,7 @@ public class ProjectStateStore {
         return new PagedProjects(pageItems, total);
     }
 
-    // --- Undo History (max 20 snapshots) ---
+    // --- Undo History (max 50 snapshots) ---
 
     public void pushUndo(String projectId, ProjectState snapshot) {
         pushUndo(projectId, snapshot, DEFAULT_MAX_UNDO);

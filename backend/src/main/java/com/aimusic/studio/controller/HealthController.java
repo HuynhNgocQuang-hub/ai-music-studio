@@ -63,12 +63,14 @@ public class HealthController {
             boolean workerSoundfont = workerEngines.containsKey("soundfont")
                     ? Boolean.TRUE.equals(workerEngines.get("soundfont"))
                     : workerFluidsynth;
+            boolean customSoundfontActive = Boolean.TRUE.equals(workerEngines.get("custom_soundfont_active"));
 
             Map<String, Object> engines = new LinkedHashMap<>();
             engines.put("audio_worker_available", workerHealthy);
             engines.put("ffmpeg_available", workerFfmpeg || isBinaryOnPath("ffmpeg"));
             engines.put("fluidsynth_available", workerFluidsynth || isBinaryOnPath("fluidsynth"));
             engines.put("soundfont_available", workerSoundfont);
+            engines.put("custom_soundfont_active", customSoundfontActive);
             engines.put("java_fallback_available", true);
 
             Map<String, Object> llmStatus = llmAdapter.status();

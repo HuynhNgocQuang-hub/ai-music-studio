@@ -92,6 +92,7 @@ class TrackState(_WorkerBaseModel):
     instrument: Optional[str] = None
     clips: list[AudioClip] = Field(default_factory=list)
     notes: list[MidiNote] = Field(default_factory=list)
+    automation: Optional[dict[str, list[dict[str, float]]]] = None
 
 
 class MasteringSettings(_WorkerBaseModel):

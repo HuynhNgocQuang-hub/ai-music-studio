@@ -205,6 +205,14 @@ public class AudioWorkerClient {
         return postMultipartJson("/internal/audio/overdub-fit-check", "file", filename, audioBytes, fields);
     }
 
+    public Optional<Map<String, Object>> separateStems(byte[] audioBytes, String filename) {
+        return postMultipartJson("/internal/audio/separate-stems", "file", filename != null ? filename : "mix.wav", audioBytes, Map.of());
+    }
+
+    public Optional<Map<String, Object>> uploadSoundFont(byte[] sf2Bytes, String filename) {
+        return postMultipartJson("/internal/audio/soundfont", "file", filename != null ? filename : "custom.sf2", sf2Bytes, Map.of());
+    }
+
     private Optional<Map<String, Object>> postMultipartJson(
             String path,
             String fileField,

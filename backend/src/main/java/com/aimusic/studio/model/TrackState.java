@@ -1,10 +1,13 @@
 package com.aimusic.studio.model;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class TrackState {
 
     @JsonProperty("type")
@@ -48,6 +51,9 @@ public class TrackState {
 
     @JsonProperty("notes")
     private List<MidiNote> notes = new ArrayList<>();
+
+    @JsonProperty("automation")
+    private Map<String, List<Map<String, Double>>> automation;
 
     public TrackState() {}
 
@@ -114,4 +120,7 @@ public class TrackState {
 
     public List<MidiNote> getNotes() { return notes; }
     public void setNotes(List<MidiNote> notes) { this.notes = notes != null ? notes : new ArrayList<>(); }
+
+    public Map<String, List<Map<String, Double>>> getAutomation() { return automation; }
+    public void setAutomation(Map<String, List<Map<String, Double>>> automation) { this.automation = automation; }
 }

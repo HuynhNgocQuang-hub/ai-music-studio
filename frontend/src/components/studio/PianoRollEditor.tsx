@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
   Copy,
   Eraser,
+  Keyboard,
   Magnet,
   Minus,
   Pencil,
@@ -13,6 +14,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import type { TransportSnapshot } from '@/lib/audio/player';
+import { useWebMidi } from '@/lib/audio/webmidi';
 import { getBeatsPerBar } from '@/lib/music/presets';
 import type { MidiNote, ProjectState } from '@/types/project';
 
@@ -117,6 +119,7 @@ export default function PianoRollEditor({
   const [editMode, setEditMode] = useState<'draw' | 'erase'>('draw');
   const [pxPerBeat, setPxPerBeat] = useState<number>(64);
   const [velDragActive, setVelDragActive] = useState(false);
+  const [midiRecArmed, setMidiRecArmed] = useState(false);
   const [noteDrag, setNoteDrag] = useState<NoteDragPreview | null>(null);
   const noteDragRef = useRef<NoteDragPreview | null>(null);
   noteDragRef.current = noteDrag;
@@ -173,6 +176,36 @@ export default function PianoRollEditor({
   const snapStep = snapGrid === '1/4' ? 1 : snapGrid === '1/8' ? 0.5 : 0.25;
   const gridWidthPx = totalBeats * pxPerBeat;
   const bpm = Math.max(40, project.analysis.bpm || 100);
+
+  const handleWebMidiNote = useCallback(
+    (pitch: number, velocity: number) => {
+      onAuditionNote(pitch, selectedTrack);
+      setActiveKeyPitch(pitch);
+      window.setTimeout(() => setActiveKeyPitch((curr) => (curr === pitch ? null : curr)), 160);
+      if (midiRecArmed) {
+        const beatPos = Number(
+          Math.max(0, Math.min(totalBeats - snapStep, Math.round(((transport.currentTimeSec * bpm) / 60) / snapStep) * snapStep)).toFixed(3)
+        );
+        const velClamped = Math.max(24, Math.min(127, velocity));
+        onMutateWithUndo((prev) => ({
+          ...prev,
+          tracks: {
+            ...prev.tracks,
+            [selectedTrack]: {
+              ...prev.tracks[selectedTrack],
+              notes: [
+                ...(prev.tracks[selectedTrack]?.notes || []),
+                { pitch, start_beat: beatPos, duration: snapStep, velocity: velClamped },
+              ],
+            },
+          },
+        }));
+      }
+    },
+    [bpm, midiRecArmed, onAuditionNote, onMutateWithUndo, selectedTrack, snapStep, totalBeats, transport.currentTimeSec]
+  );
+
+  const webMidi = useWebMidi({ enabled: true, onNoteOn: handleWebMidiNote });
   const currentBeatFloat = (transport.currentTimeSec * bpm) / 60;
   const playheadLeftPx = Math.max(0, Math.min(gridWidthPx, currentBeatFloat * pxPerBeat));
 
@@ -533,6 +566,28 @@ export default function PianoRollEditor({
           >
             Clear
           </button>
+
+          {webMidi.supported && (
+            <button
+              type="button"
+              onClick={() => setMidiRecArmed((v) => !v)}
+              title={
+                webMidi.connected
+                  ? `Hardware MIDI: ${webMidi.deviceNames.join(', ')}`
+                  : 'WebMIDI Ready — cắm USB/MIDI Keyboard để chơi trực tiếp'
+              }
+              className={`flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-semibold transition ${
+                midiRecArmed
+                  ? 'border-rose-400 bg-rose-500/25 text-rose-200'
+                  : webMidi.connected
+                  ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200'
+                  : 'border-white/10 bg-[#121419] text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Keyboard className="h-3 w-3" />
+              <span>{webMidi.connected ? `MIDI (${webMidi.deviceNames[0].slice(0, 10)})` : 'WebMIDI'}</span>
+            </button>
+          )}
         </div>
       </div>
 

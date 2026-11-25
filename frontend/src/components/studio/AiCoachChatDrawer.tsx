@@ -661,6 +661,21 @@ export default function AiCoachChatDrawer() {
                               <Undo2 className="h-2.5 w-2.5" /> Hoàn tác
                             </button>
                           )}
+                          {act.action === 'rearrange_chords' && (
+                            <button
+                              type="button"
+                              title="Nghe thử hợp âm A/B trước khi áp dụng"
+                              onClick={() => {
+                                const syms = Array.isArray(act.payload?.chords)
+                                  ? (act.payload.chords as string[])
+                                  : ['Am', 'F', 'C', 'G'];
+                                engine.auditionChordProgression(syms);
+                              }}
+                              className="inline-flex items-center gap-0.5 rounded-full border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-500/30"
+                            >
+                              <Volume2 className="h-2.5 w-2.5" /> Nghe thử
+                            </button>
+                          )}
                         </div>
                       );
                     })}

@@ -2270,4 +2270,38 @@ public class JavaAudioFallbackService {
             return 0.0;
         }
     }
+
+    public record StemSeparationResult(byte[] vocalWav, byte[] beatWav, double durationSec, String method) {}
+
+    public StemSeparationResult separateStemsFallback(byte[] wavBytes) {
+        DecodedWav decoded = decodeWavBytes(wavBytes);
+        float[] mono = decoded.mono();
+        int sr = Math.max(8000, decoded.sampleRate());
+        if (mono.length == 0) {
+            throw new IllegalArgumentException("Empty audio cannot be separated.");
+        }
+        // Simple 1st-order bandpass (220Hz .. 4.8kHz) isolating center vocal vs residual accompaniment
+        float[] vocal = new float[mono.length];
+        float[] beat = new float[mono.length];
+        double dt = 1.0 / sr;
+        double rcHp = 1.0 / (2.0 * Math.PI * 220.0);
+        double aHp = rcHp / (rcHp + dt);
+        double rcLp = 1.0 / (2.0 * Math.PI * 4800.0);
+        double aLp = dt / (rcLp + dt);
+        double hpPrev = 0.0;
+        double xPrev = 0.0;
+        double lpPrev = 0.0;
+        for (int i = 0; i < mono.length; i++) {
+            double x = mono[i];
+            double hp = aHp * (hpPrev + x - xPrev);
+            hpPrev = hp;
+            xPrev = x;
+            double lp = lpPrev + aLp * (hp - lpPrev);
+            lpPrev = lp;
+            vocal[i] = (float) Math.max(-0.88, Math.min(0.88, lp * 0.92));
+            beat[i] = (float) Math.max(-0.88, Math.min(0.88, (x - vocal[i]) * 0.85));
+        }
+        double dur = Math.round(((double) mono.length / sr) * 1000.0) / 1000.0;
+        return new StemSeparationResult(encodeWavMono(vocal, sr), encodeWavMono(beat, sr), dur, "java_bandpass_fallback");
+    }
 }

@@ -355,6 +355,8 @@ public class CoachLyricistAgent {
             case "switch_studio_mode" -> "Chuyển chế độ " + args.getOrDefault("studio_mode", "pro");
             case "create_template" -> "Tạo Project mẫu " + args.getOrDefault("genre", "Pop");
             case "export_project" -> "Xuất file " + String.valueOf(args.getOrDefault("format", "mp3")).toUpperCase(Locale.ROOT);
+            case "separate_stems" -> "Tách Stem Vocal & Beat từ audio gốc";
+            case "set_automation" -> "Vẽ Automation " + args.getOrDefault("parameter", "volume") + " track " + args.getOrDefault("track_id", "vocal");
             case "test_health" -> "Kiểm tra API Key & Hệ thống";
             case "clear_cache" -> "Dọn Cache hệ thống";
             default -> "Áp dụng cấu hình (" + name + ")";
@@ -740,6 +742,23 @@ public class CoachLyricistAgent {
         if (normMsg.contains("don cache") || normMsg.contains("xoa cache") || normMsg.contains("clear cache")) {
             actions.add(new CoachSuggestedAction("clear_be_cache", "Dọn Cache Backend Redis", "clear_cache", Map.of("scope", "backend")));
         }
+        if (normMsg.contains("tach stem") || normMsg.contains("tach beat") || normMsg.contains("tach vocal") || normMsg.contains("separate stem")) {
+            actions.add(new CoachSuggestedAction("sep_stems_act", "Tách Stem Vocal & Beat (HPSS)", "separate_stems", Map.of()));
+        }
+        if (normMsg.contains("automation") || normMsg.contains("fade out") || normMsg.contains("fade in") || normMsg.contains("quét filter") || normMsg.contains("quet filter") || normMsg.contains("loc tan") || normMsg.contains("cutoff")) {
+            String autoParam = normMsg.contains("filter") || normMsg.contains("cutoff") || normMsg.contains("loc tan") ? "filter"
+                    : normMsg.contains("pan") || normMsg.contains("trai phai") ? "pan"
+                    : normMsg.contains("reverb") || normMsg.contains("vang") ? "reverb" : "volume";
+            List<Map<String, Object>> pts = normMsg.contains("fade out")
+                    ? List.of(Map.of("bar", 1, "value", 1.0), Map.of("bar", 5, "value", 0.9), Map.of("bar", 8, "value", 0.1))
+                    : List.of(Map.of("bar", 1, "value", 0.45), Map.of("bar", 5, "value", 0.95), Map.of("bar", 8, "value", 0.8));
+            actions.add(new CoachSuggestedAction(
+                    "auto_curve_" + autoParam,
+                    "Vẽ Automation Curve (" + autoParam + ")",
+                    "set_automation",
+                    Map.of("track_id", detectTrackMention(normMsg, "vocal"), "parameter", autoParam, "points", pts)
+            ));
+        }
         if (normMsg.contains("test api") || normMsg.contains("kiem tra he thong") || normMsg.contains("health") || normMsg.contains("api key")) {
             actions.add(new CoachSuggestedAction("run_llm_diag", "Kiểm tra API Key & Hệ thống", "test_health", Map.of()));
         }
@@ -943,7 +962,21 @@ public class CoachLyricistAgent {
                     List.of("format")),
             toolDecl("test_health", "Run backend, Redis, Audio Worker, and LLM API Key diagnostic test", Map.of(), List.of()),
             toolDecl("clear_cache", "Clear temporary backend Redis cache or browser IndexedDB drafts",
-                    Map.of("scope", Map.of("type", "STRING", "description", "backend|local")), List.of("scope"))
+                    Map.of("scope", Map.of("type", "STRING", "description", "backend|local")), List.of("scope")),
+            toolDecl("separate_stems", "Separate uploaded or project audio into synchronized Vocal and Beat/Instrumental clips",
+                    Map.of("source_ref", Map.of("type", "STRING", "description", "Optional mem:// ref")), List.of()),
+            toolDecl("set_automation", "Set multi-parameter Web Audio automation keyframes (volume|pan|filter|reverb) on a track",
+                    Map.of(
+                            "track_id", Map.of("type", "STRING", "description", "vocal|texture|drums|bass|harmony|lead"),
+                            "parameter", Map.of("type", "STRING", "description", "volume|pan|filter|reverb"),
+                            "points", Map.of("type", "ARRAY", "items", Map.of(
+                                    "type", "OBJECT",
+                                    "properties", Map.of(
+                                            "bar", Map.of("type", "NUMBER"),
+                                            "value", Map.of("type", "NUMBER")
+                                    )
+                            ))
+                    ), List.of("track_id", "parameter", "points"))
     );
 
     private static Map<String, Object> toolDecl(String name, String description, Map<String, Object> properties, List<String> required) {

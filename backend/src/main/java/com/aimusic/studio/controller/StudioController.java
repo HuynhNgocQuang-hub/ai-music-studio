@@ -332,6 +332,74 @@ public class StudioController {
         return new AutoMixResponse(projectId, saved, mixResult.mixNotes(), mixResult.summary());
     }
 
+    @PostMapping("/api/studio/separate-stems")
+    public Map<String, Object> separateStems(@RequestBody Map<String, Object> req) {
+        Object pidObj = req != null ? req.get("project_id") : null;
+        if (pidObj == null || pidObj.toString().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
+        }
+        String projectId = pidObj.toString().trim();
+        Optional<ProjectState> existingOpt = store.getProject(projectId);
+        ProjectState state = existingOpt.orElseThrow(() -> new ResponseStatusException(
+                HttpStatus.NOT_FOUND, "Project '" + projectId + "' not found."));
+        existingOpt.ifPresent(prev -> store.pushUndo(projectId, prev));
+
+        String explicitRef = req.get("source_ref") != null ? req.get("source_ref").toString().trim() : null;
+        byte[] sourceBytes = resolveVocalBytes(state, explicitRef);
+        if (sourceBytes == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Project has no audio asset to separate stems.");
+        }
+
+        byte[] vocalWav;
+        byte[] beatWav;
+        String method;
+        double durationSec = 0.0;
+        Optional<Map<String, Object>> workerResp = audioWorkerClient.separateStems(sourceBytes, projectId + "_input.wav");
+        if (workerResp.isPresent()
+                && workerResp.get().get("vocal_wav_base64") instanceof String vB64
+                && workerResp.get().get("instrumental_wav_base64") instanceof String bB64) {
+            vocalWav = java.util.Base64.getDecoder().decode(vB64);
+            beatWav = java.util.Base64.getDecoder().decode(bB64);
+            method = String.valueOf(workerResp.get().getOrDefault("method", "worker_hpss"));
+            if (workerResp.get().get("duration_sec") instanceof Number num) {
+                durationSec = num.doubleValue();
+            }
+        } else {
+            JavaAudioFallbackService.StemSeparationResult fb = audioFallback.separateStemsFallback(sourceBytes);
+            vocalWav = fb.vocalWav();
+            beatWav = fb.beatWav();
+            method = fb.method();
+            durationSec = fb.durationSec();
+        }
+
+        String vocalRef = "mem://stems/" + projectId + "_vocal.wav";
+        String beatRef = "mem://stems/" + projectId + "_beat.wav";
+        store.saveAudioBytes(vocalRef, vocalWav);
+        store.saveAudioBytes(beatRef, beatWav);
+
+        TrackState vocalTrack = state.getTracks().computeIfAbsent("vocal", k -> TrackState.audioTrack(0.95, 0.0));
+        vocalTrack.setClips(new java.util.ArrayList<>(java.util.List.of(
+                new AudioClip("clip_stem_vocal", vocalRef, 1.0, 0.0)
+        )));
+        TrackState textureTrack = state.getTracks().computeIfAbsent("texture", k -> TrackState.audioTrack(0.85, 0.0));
+        textureTrack.setClips(new java.util.ArrayList<>(java.util.List.of(
+                new AudioClip("clip_stem_beat", beatRef, 1.0, 0.0)
+        )));
+
+        state.setVersion(state.getVersion() + 1);
+        ProjectState saved = store.saveProject(state);
+
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("project_id", projectId);
+        out.put("vocal_ref", vocalRef);
+        out.put("beat_ref", beatRef);
+        out.put("method", method);
+        out.put("duration_sec", durationSec);
+        out.put("summary", "Đã tách 2 Stems (Vocal + Beat/Texture) bằng " + method + ".");
+        out.put("project_state", saved);
+        return out;
+    }
+
     private String preferredVocalSourceSlot(ProjectState state) {
         AudioAssets assets = state.getAudioAssets();
         boolean autotuneEnabled = state.getAutotuneSettings() == null || state.getAutotuneSettings().isEnabled();

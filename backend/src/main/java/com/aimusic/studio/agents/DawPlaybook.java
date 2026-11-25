@@ -60,8 +60,8 @@ public final class DawPlaybook {
             new Entry(
                     "shortcuts_and_copilot",
                     "/studio",
-                    List.of("lam gi", "kha nang", "chuc nang", "moi thu", "tat ca", "de xuat", "phim tat", "shortcut", "space", "undo", "redo", "quick", "pro daw", "mastering", "lufs", "groove", "nhac cu", "dieu huong", "giup gi"),
-                    "[Toan bo Nang luc AI Copilot & Phim tat] AI co the dieu khien truc tiep moi tac vu qua nut bam an toan (kem Hoan tac 1 cham): (1) Khoi tao Template tu Home/Library; (2) Dieu huong giua 5 trang & Quick/Pro DAW + Play/Pause (Space), Loop, Metronome (M), Undo/Redo (Ctrl+Z/Y); (3) Chinh BPM/Key/Nhip 4-4/3-4/6-8, them/xoa Section, keo Dynamics Energy%, doi hop am & dieu trong (Pop/Trap/Lo-fi/EDM); (4) Them/xoa/khoa Track, doi nhac cu, Mix Volume/Pan/Mute/Solo/3-Band EQ/Reverb/Delay/Auto-Mix/Mastering LUFS; (5) Auto-Tune Pro, Auto-Trim, nghe audio WAV/Mic; (6) Viet/sua tung dong loi; (7) Xuat WAV/MP3/Stems/MIDI/.aimusic va test API/don cache."
+                    List.of("lam gi", "kha nang", "chuc nang", "moi thu", "tat ca", "de xuat", "phim tat", "shortcut", "space", "undo", "redo", "quick", "pro daw", "mastering", "lufs", "groove", "nhac cu", "dieu huong", "giup gi", "stem", "tach beat", "automation", "filter", "soundfont", "sf2", "webmidi", "pitch curve"),
+                    "[Toan bo Nang luc AI Copilot & Phase 6B-7 Pro DAW] AI co the dieu khien moi tac vu qua nut bam an toan (Undo 50 buoc & Hoan tac 1 cham): (1) Khoi tao Template tu Home/Library; (2) Dieu huong 5 trang & Quick/Pro DAW + Play/Pause (Space), Loop, Metronome (M), Undo/Redo; (3) Chinh BPM/Key/Nhip, Dynamics & Multi-Param Automation (Volume/Pan/Filter Cutoff/Reverb linearRamp), doi hop am kem Nghe thu A/B, doi dieu trong; (4) Tach Stem Vocal/Beat (HPSS), them/khoa Track, doi nhac cu, Mix 3-Band EQ/FX/Mastering LUFS; (5) Visual Pitch Curve Editor, WebMIDI Keyboard, Custom .sf2 SoundFont, Auto-Tune Pro & Audio WAV/Mic; (6) Viet/sua tung dong loi & Xuat WAV/MP3/Stems/MIDI/.aimusic."
             )
     );
 

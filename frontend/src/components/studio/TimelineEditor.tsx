@@ -26,10 +26,12 @@ import WaveformClipCanvas from '@/components/studio/WaveformClipCanvas';
 import type {
   AudioClip,
   AudioTrackState,
+  AutomationPoint,
   ChordEvent,
   MidiNote,
   ProjectState,
   SongSection,
+  TrackAutomationParam,
 } from '@/types/project';
 
 const SECTION_PRESETS = ['Intro', 'Verse', 'Chorus', 'Bridge', 'Outro'];
@@ -1465,6 +1467,7 @@ export default function TimelineEditor({
             {showEnvelopeLane && project.song_structure.sections.length > 0 && (
               <AutomationEnvelopeLane
                 sections={project.song_structure.sections}
+                vocalAutomation={project.tracks.vocal?.automation}
                 totalBars={totalBars}
                 beatsPerBar={beatsPerBar}
                 pxPerBar={pxPerBar}
@@ -1485,6 +1488,22 @@ export default function TimelineEditor({
                       `Cập nhật Dynamics ${project.song_structure.sections[idx]?.name || 'Section'}: ${Math.round(nextEnergy * 100)}%`
                     );
                   }
+                }}
+                onUpdateTrackAutomation={(param, points) => {
+                  onMutateWithUndo((prev) => ({
+                    ...prev,
+                    tracks: {
+                      ...prev.tracks,
+                      vocal: {
+                        ...prev.tracks.vocal,
+                        automation: {
+                          ...(prev.tracks.vocal?.automation || {}),
+                          [param]: points,
+                        },
+                      },
+                    },
+                  }));
+                  onNotice(`Đã cập nhật đường cong Automation Vocal (${param.toUpperCase()}).`);
                 }}
               />
             )}
@@ -1994,21 +2013,26 @@ export default function TimelineEditor({
 
 function AutomationEnvelopeLane({
   sections,
+  vocalAutomation,
   totalBars,
   beatsPerBar,
   pxPerBar,
   laneWidthPx,
   compact,
   onUpdateSectionEnergy,
+  onUpdateTrackAutomation,
 }: {
   sections: SongSection[];
+  vocalAutomation?: Partial<Record<TrackAutomationParam, AutomationPoint[]>>;
   totalBars: number;
   beatsPerBar: number;
   pxPerBar: number;
   laneWidthPx: number;
   compact: boolean;
   onUpdateSectionEnergy: (sectionIdx: number, nextEnergy: number, commit: boolean) => void;
+  onUpdateTrackAutomation: (param: TrackAutomationParam, points: AutomationPoint[]) => void;
 }) {
+  const [autoMode, setAutoMode] = useState<'dynamics' | TrackAutomationParam>('dynamics');
   const [draggingNode, setDraggingNode] = useState<{
     idx: number;
     laneEl: HTMLElement;
@@ -2018,6 +2042,29 @@ function AutomationEnvelopeLane({
   draggingRef.current = draggingNode;
   const commitEnergyRef = useRef(onUpdateSectionEnergy);
   commitEnergyRef.current = onUpdateSectionEnergy;
+  const commitAutoRef = useRef(onUpdateTrackAutomation);
+  commitAutoRef.current = onUpdateTrackAutomation;
+
+  const defaultAutoPoints = useMemo<AutomationPoint[]>(() => {
+    const defVal = autoMode === 'pan' ? 0.5 : autoMode === 'filter' ? 0.92 : autoMode === 'reverb' ? 0.2 : 0.85;
+    const mid1 = Math.max(2, Math.round(totalBars * 0.35));
+    const mid2 = Math.max(mid1 + 1, Math.round(totalBars * 0.7));
+    return [
+      { bar: 1, value: defVal },
+      { bar: mid1, value: defVal },
+      { bar: Math.min(totalBars, mid2), value: defVal },
+      { bar: Math.max(2, totalBars), value: defVal },
+    ];
+  }, [autoMode, totalBars]);
+
+  const activeAutoPoints = useMemo<AutomationPoint[]>(() => {
+    if (autoMode === 'dynamics') return [];
+    const saved = vocalAutomation?.[autoMode];
+    if (saved && saved.length >= 2) {
+      return [...saved].sort((a, b) => a.bar - b.bar);
+    }
+    return defaultAutoPoints;
+  }, [autoMode, defaultAutoPoints, vocalAutomation]);
 
   useEffect(() => {
     if (!draggingNode) return;
@@ -2028,14 +2075,21 @@ function AutomationEnvelopeLane({
       const pad = 4;
       const usableH = Math.max(16, rect.height - pad * 2);
       const relY = e.clientY - rect.top - pad;
-      const nextEnergy = Number(Math.max(0.1, Math.min(1, 1 - relY / usableH)).toFixed(2));
+      const minV = autoMode === 'dynamics' ? 0.1 : 0.0;
+      const nextEnergy = Number(Math.max(minV, Math.min(1, 1 - relY / usableH)).toFixed(2));
       setDraggingNode({ ...curr, energy: nextEnergy });
     };
     const onUp = () => {
       const curr = draggingRef.current;
       setDraggingNode(null);
-      if (curr) {
+      if (!curr) return;
+      if (autoMode === 'dynamics') {
         commitEnergyRef.current(curr.idx, curr.energy, true);
+      } else {
+        const nextPts = activeAutoPoints.map((pt, i) =>
+          i === curr.idx ? { ...pt, value: curr.energy } : pt
+        );
+        commitAutoRef.current(autoMode, nextPts);
       }
     };
     window.addEventListener('pointermove', onMove);
@@ -2046,15 +2100,18 @@ function AutomationEnvelopeLane({
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [Boolean(draggingNode)]);
+  }, [Boolean(draggingNode), autoMode, activeAutoPoints]);
 
   const sortedSections = sections
     .map((sec, origIdx) => ({ sec, origIdx }))
     .sort((a, b) => a.sec.start_bar - b.sec.start_bar);
 
-  const avgPct = sections.length
-    ? Math.round((sections.reduce((acc, s) => acc + (s.energy ?? 0.75), 0) / sections.length) * 100)
-    : 75;
+  const avgPct =
+    autoMode === 'dynamics'
+      ? sections.length
+        ? Math.round((sections.reduce((acc, s) => acc + (s.energy ?? 0.75), 0) / sections.length) * 100)
+        : 75
+      : Math.round((activeAutoPoints.reduce((acc, p) => acc + p.value, 0) / Math.max(1, activeAutoPoints.length)) * 100);
 
   return (
     <div className="flex bg-[#131823]">
@@ -2069,14 +2126,29 @@ function AutomationEnvelopeLane({
           <div className="flex min-w-0 items-center gap-1.5 text-[#9bc0ff]">
             <ClipTypeGlyph kind="envelope" />
             <span className="truncate text-[11px] font-bold uppercase tracking-wide text-slate-100">
-              Dynamics
+              {autoMode === 'dynamics' ? 'Dynamics' : `Auto ${autoMode}`}
             </span>
           </div>
           <span className="truncate font-mono text-[10px] font-semibold text-sky-300">
             Avg {avgPct}%
           </span>
         </div>
-        <div className="text-[10px] text-slate-400">Automation Envelope (kéo chấm tròn)</div>
+        <div className="flex flex-wrap gap-0.5 pt-0.5">
+          {(['dynamics', 'volume', 'pan', 'filter', 'reverb'] as const).map((param) => (
+            <button
+              key={param}
+              type="button"
+              onClick={() => setAutoMode(param)}
+              className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase transition ${
+                autoMode === param
+                  ? 'bg-sky-500 text-slate-950'
+                  : 'bg-white/[0.06] text-slate-400 hover:text-white'
+              }`}
+            >
+              {param === 'dynamics' ? 'Dyn' : param === 'volume' ? 'Vol' : param === 'filter' ? 'Filt' : param}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div
@@ -2100,85 +2172,120 @@ function AutomationEnvelopeLane({
           </div>
         ))}
 
-        {sortedSections.map(({ sec, origIdx }, orderIdx) => {
-          const leftPx = Math.max(0, (sec.start_bar - 1) * pxPerBar);
-          const widthPx = Math.max(40, sec.bars * pxPerBar - 2);
-          const prevEnergy =
-            orderIdx > 0
-              ? draggingNode?.idx === sortedSections[orderIdx - 1].origIdx
-                ? draggingNode.energy
-                : sortedSections[orderIdx - 1].sec.energy ?? 0.65
-              : 0.22;
-          const targetEnergy =
-            draggingNode?.idx === origIdx ? draggingNode.energy : sec.energy ?? 0.75;
-          const yStart = 88 - prevEnergy * 72;
-          const yEnd = 88 - targetEnergy * 72;
-          const midY = (yStart + yEnd) / 2 + (yEnd < yStart ? 10 : -8);
-          const pathD = `M 0 ${yStart.toFixed(1)} Q 45 ${midY.toFixed(1)}, 100 ${yEnd.toFixed(1)}`;
-          const areaD = `${pathD} L 100 100 L 0 100 Z`;
-          const gradId = `env_grad_${origIdx}`;
+        {autoMode === 'dynamics' ? (
+          sortedSections.map(({ sec, origIdx }, orderIdx) => {
+            const leftPx = Math.max(0, (sec.start_bar - 1) * pxPerBar);
+            const widthPx = Math.max(40, sec.bars * pxPerBar - 2);
+            const prevEnergy =
+              orderIdx > 0
+                ? draggingNode?.idx === sortedSections[orderIdx - 1].origIdx
+                  ? draggingNode.energy
+                  : sortedSections[orderIdx - 1].sec.energy ?? 0.65
+                : 0.22;
+            const targetEnergy =
+              draggingNode?.idx === origIdx ? draggingNode.energy : sec.energy ?? 0.75;
+            const yStart = 88 - prevEnergy * 72;
+            const yEnd = 88 - targetEnergy * 72;
+            const midY = (yStart + yEnd) / 2 + (yEnd < yStart ? 10 : -8);
+            const pathD = `M 0 ${yStart.toFixed(1)} Q 45 ${midY.toFixed(1)}, 100 ${yEnd.toFixed(1)}`;
+            const areaD = `${pathD} L 100 100 L 0 100 Z`;
+            const gradId = `env_grad_${origIdx}`;
 
-          return (
-            <div
-              key={`${sec.name}_${origIdx}`}
-              style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
-              className="group/env absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-[3px] border border-[#7498dc]/80 bg-[#23324f]/52 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] select-none"
-            >
-              <div className="flex h-[17px] shrink-0 items-center justify-between gap-1 border-b border-white/15 bg-[#4a6592]/90 px-1.5 text-[10px] font-bold text-white">
-                <span className="flex min-w-0 items-center gap-1 truncate">
-                  <ClipTypeGlyph kind="envelope" />
-                  <span className="truncate">{sec.name} envelope</span>
-                </span>
-                <span className="shrink-0 font-mono text-[9px] text-sky-100 tabular-nums">
-                  {Math.round(targetEnergy * 100)}%
-                </span>
-              </div>
+            return (
+              <div
+                key={`${sec.name}_${origIdx}`}
+                style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
+                className="group/env absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-[3px] border border-[#7498dc]/80 bg-[#23324f]/52 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] select-none"
+              >
+                <div className="flex h-[17px] shrink-0 items-center justify-between gap-1 border-b border-white/15 bg-[#4a6592]/90 px-1.5 text-[10px] font-bold text-white">
+                  <span className="flex min-w-0 items-center gap-1 truncate">
+                    <ClipTypeGlyph kind="envelope" />
+                    <span className="truncate">{sec.name} envelope</span>
+                  </span>
+                  <span className="shrink-0 font-mono text-[9px] text-sky-100 tabular-nums">
+                    {Math.round(targetEnergy * 100)}%
+                  </span>
+                </div>
 
-              <div className="relative flex-1 overflow-hidden">
-                <svg
-                  className="h-full w-full"
-                  viewBox="0 0 100 100"
-                  preserveAspectRatio="none"
-                >
-                  <defs>
-                    <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#93c5fd" stopOpacity="0.44" />
-                      <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.08" />
-                    </linearGradient>
-                  </defs>
-                  <path d={areaD} fill={`url(#${gradId})`} />
-                  <path
-                    d={pathD}
-                    fill="none"
-                    stroke="#e0f2fe"
-                    strokeWidth="2.2"
-                    vectorEffect="non-scaling-stroke"
+                <div className="relative flex-1 overflow-hidden">
+                  <svg className="h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <defs>
+                      <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#93c5fd" stopOpacity="0.44" />
+                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.08" />
+                      </linearGradient>
+                    </defs>
+                    <path d={areaD} fill={`url(#${gradId})`} />
+                    <path
+                      d={pathD}
+                      fill="none"
+                      stroke="#e0f2fe"
+                      strokeWidth="2.2"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
+
+                  <span
+                    className="pointer-events-none absolute -left-[3px] h-2 w-2 -translate-y-1/2 rounded-full border border-[#1e293b] bg-sky-200"
+                    style={{ top: `${yStart}%` }}
                   />
-                </svg>
 
-                {/* Start node */}
-                <span
-                  className="pointer-events-none absolute -left-[3px] h-2 w-2 -translate-y-1/2 rounded-full border border-[#1e293b] bg-sky-200"
-                  style={{ top: `${yStart}%` }}
-                />
-
-                {/* Draggable section target energy handle */}
+                  <button
+                    type="button"
+                    title={`Kéo lên/xuống để chỉnh Energy của ${sec.name} (${Math.round(targetEnergy * 100)}%)`}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      const container = e.currentTarget.parentElement;
+                      if (!container) return;
+                      setDraggingNode({ idx: origIdx, laneEl: container, energy: targetEnergy });
+                    }}
+                    style={{ top: `${yEnd}%` }}
+                    className="absolute right-1 z-20 h-3 w-3 -translate-y-1/2 cursor-ns-resize rounded-full border-2 border-[#1e293b] bg-[#dbeafe] shadow transition hover:scale-125 hover:bg-amber-300"
+                  />
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="relative h-full w-full select-none">
+            <svg className="pointer-events-none h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+              <polyline
+                fill="none"
+                stroke="#38bdf8"
+                strokeWidth="2"
+                vectorEffect="non-scaling-stroke"
+                points={activeAutoPoints
+                  .map((pt, idx) => {
+                    const v = draggingNode?.idx === idx ? draggingNode.energy : pt.value;
+                    const x = Math.max(1, Math.min(99, ((pt.bar - 1) / Math.max(1, totalBars - 1)) * 100));
+                    const y = 90 - v * 78;
+                    return `${x.toFixed(1)},${y.toFixed(1)}`;
+                  })
+                  .join(' ')}
+              />
+            </svg>
+            {activeAutoPoints.map((pt, idx) => {
+              const v = draggingNode?.idx === idx ? draggingNode.energy : pt.value;
+              const leftPx = Math.max(8, Math.min(laneWidthPx - 12, (pt.bar - 1) * pxPerBar));
+              const topPct = 90 - v * 78;
+              return (
                 <button
+                  key={`${autoMode}_${idx}`}
                   type="button"
-                  title={`Kéo lên/xuống để chỉnh Energy của ${sec.name} (${Math.round(targetEnergy * 100)}%)`}
+                  title={`Vocal ${autoMode.toUpperCase()} Bar ${pt.bar}: ${Math.round(v * 100)}%`}
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     const container = e.currentTarget.parentElement;
                     if (!container) return;
-                    setDraggingNode({ idx: origIdx, laneEl: container, energy: targetEnergy });
+                    setDraggingNode({ idx, laneEl: container, energy: v });
                   }}
-                  style={{ top: `${yEnd}%` }}
-                  className="absolute right-1 z-20 h-3 w-3 -translate-y-1/2 cursor-ns-resize rounded-full border-2 border-[#1e293b] bg-[#dbeafe] shadow transition hover:scale-125 hover:bg-amber-300"
+                  style={{ left: `${leftPx}px`, top: `${topPct}%` }}
+                  className="absolute z-20 h-3 w-3 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize rounded-full border-2 border-[#0f172a] bg-amber-300 shadow hover:scale-125"
                 />
-              </div>
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

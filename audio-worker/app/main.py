@@ -30,7 +30,8 @@ from app.services.denoise import (
     validate_and_decode_audio,
 )
 from app.services.exporter import export_mp3, export_stems_zip, export_wav, peak_dbfs
-from app.services.renderer import SOUNDFONT_PATH, render_project_mix
+from app.services.renderer import SOUNDFONT_PATH, has_custom_soundfont, render_project_mix, save_custom_soundfont
+from app.services.stems import separate_vocal_and_beat
 
 app = FastAPI(
     title="AI Music Studio Audio Worker",
@@ -92,6 +93,7 @@ def health() -> dict[str, Any]:
             "soundfile": _has_module("soundfile"),
             "ffmpeg": shutil.which("ffmpeg") is not None,
             "fluidsynth": shutil.which("fluidsynth") is not None and os.path.exists(SOUNDFONT_PATH),
+            "custom_soundfont_active": has_custom_soundfont(),
         },
     }
 
@@ -325,3 +327,42 @@ async def internal_overdub_fit_check(
     except AudioValidationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return OverdubFitCheckResponse(**result)
+
+
+@app.post("/internal/audio/separate-stems")
+async def internal_separate_stems(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Separate audio into synchronized vocal and instrumental/beat stems."""
+    raw_bytes = await _read_upload_bounded(file)
+    try:
+        wav_bytes = normalize_to_wav_bytes(raw_bytes, filename=file.filename or "audio.wav")
+        vocal_wav, beat_wav, meta = separate_vocal_and_beat(wav_bytes)
+    except AudioValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Stem separation failed: {exc}") from exc
+
+    return {
+        "vocal_wav_base64": base64.b64encode(vocal_wav).decode("ascii"),
+        "instrumental_wav_base64": base64.b64encode(beat_wav).decode("ascii"),
+        **meta,
+    }
+
+
+@app.post("/internal/audio/soundfont")
+async def internal_upload_soundfont(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Upload and activate a custom .sf2 SoundFont (<= 50 MB) for FluidSynth MIDI rendering."""
+    raw_bytes = await _read_upload_bounded(file, max_bytes=50 * 1024 * 1024)
+    filename = (file.filename or "custom.sf2").strip()
+    if not filename.lower().endswith(".sf2"):
+        raise HTTPException(status_code=400, detail="Custom SoundFont must have .sf2 extension.")
+    try:
+        saved_path = save_custom_soundfont(raw_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "ok",
+        "filename": filename,
+        "size_bytes": len(raw_bytes),
+        "soundfont_active": True,
+        "path": saved_path,
+    }

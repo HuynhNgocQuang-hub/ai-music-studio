@@ -1,6 +1,6 @@
 # E2E & Contract Verification (`tests/e2e/`)
 
-Automated integration, security, and contract verification suite for **AI Music Studio (Phase 1–5)**, aligned with:
+Automated integration, security, and contract verification suite for **AI Music Studio (Phase 1–7)**, aligned with:
 - [`docs/SRS.md`](../../docs/SRS.md)
 - [`docs/MULTI_AGENT_ARCHITECTURE.md`](../../docs/MULTI_AGENT_ARCHITECTURE.md)
 - [`docs/API_AND_UI_SPEC.md`](../../docs/API_AND_UI_SPEC.md)
@@ -21,7 +21,7 @@ Automated integration, security, and contract verification suite for **AI Music 
 | `test_projects_sync_and_pagination` | `PUT /api/projects/{id}/sync` + `GET /api/projects?page=&limit=&search=&genre=` returns `{items, total, page, total_pages}` |
 | `test_frontend_backend_api_contract_parity` | Static parity check across `frontend/src/lib/api/client.ts`, Spring Boot `controller/*.java`, `AudioWorkerClient.java`, and `audio-worker/app/main.py` |
 
-### `test_phase2_3_e2e.py` (11 Tests — Full Song, Pro DAW, CRUD, Security, Copilot & Lifecycle)
+### `test_phase2_3_e2e.py` (11 Tests — Full Song, Pro DAW, CRUD, Security, Copilot, Phase 6B/7 & Lifecycle)
 - `test_full_song_standard_structure_includes_bridge_and_short_preset`
 - `test_studio_auto_trim_vocal_trims_silence_and_updates_clips`
 - `test_studio_auto_mix_balances_tracks_and_enables_limiter`
@@ -32,7 +32,7 @@ Automated integration, security, and contract verification suite for **AI Music 
 - `test_phase4_crud_eq_send_fx_and_delete`
 - `test_security_headers_validation_and_dos_guards` (`nosniff`/`DENY`/`no-referrer`, Zip Bomb/path traversal, collision-safe `.aimusic` import, `total_bars > 256` -> `400`)
 - `test_end_to_end_full_lifecycle_workflow` (Upload -> Denoise -> Analyze -> AutoTune -> Generate SSE -> Overdub -> Export/Import)
-- `test_full_spectrum_copilot_stream_and_audio` (Global `/api/coach/chat` on `/`, SSE `/api/coach/chat/stream`, WAV `/api/coach/chat/audio` DSP telemetry & 10 MB `413` guard)
+- `test_full_spectrum_copilot_stream_and_audio` (Global `/api/coach/chat` on `/`, SSE `/api/coach/chat/stream`, WAV `/api/coach/chat/audio` DSP telemetry & 10 MB `413` guard + Phase 6B/7 `/api/studio/separate-stems`, `TrackState.automation` sync, `/api/audio/soundfont` invalid guard)
 
 ## Running the Suite
 

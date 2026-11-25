@@ -564,6 +564,34 @@ public class AudioController {
                 .body(wav);
     }
 
+    @PostMapping(value = "/soundfont", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Map<String, Object> uploadCustomSoundfont(@RequestParam("file") MultipartFile file) throws IOException {
+        if (file == null || file.isEmpty()) {
+            throw new AudioValidationException("SoundFont (.sf2) file must not be empty.", HttpStatus.BAD_REQUEST);
+        }
+        if (file.getSize() > 50L * 1024L * 1024L) {
+            throw new AudioValidationException("SoundFont (.sf2) exceeds maximum 50 MB.", HttpStatus.PAYLOAD_TOO_LARGE);
+        }
+        String fname = file.getOriginalFilename() != null ? file.getOriginalFilename().trim() : "custom.sf2";
+        if (!fname.toLowerCase(Locale.ROOT).endsWith(".sf2")) {
+            throw new AudioValidationException("SoundFont file must have .sf2 extension.", HttpStatus.BAD_REQUEST);
+        }
+        byte[] sf2Bytes = file.getBytes();
+        if (sf2Bytes.length < 64
+                || sf2Bytes[0] != 'R' || sf2Bytes[1] != 'I' || sf2Bytes[2] != 'F' || sf2Bytes[3] != 'F'
+                || sf2Bytes[8] != 's' || sf2Bytes[9] != 'f' || sf2Bytes[10] != 'b' || sf2Bytes[11] != 'k') {
+            throw new AudioValidationException("Invalid SoundFont header (expected RIFF/sfbk container).", HttpStatus.BAD_REQUEST);
+        }
+        Optional<Map<String, Object>> workerResp = audioWorkerClient.uploadSoundFont(sf2Bytes, fname);
+        boolean activeOnWorker = workerResp.isPresent() && Boolean.TRUE.equals(workerResp.get().get("soundfont_active"));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("status", "ok");
+        out.put("filename", fname);
+        out.put("size_bytes", sf2Bytes.length);
+        out.put("active_on_worker", activeOnWorker);
+        return out;
+    }
+
     private static final Set<String> SUPPORTED_SCALES = Set.of(
             "major", "minor", "pentatonic_major", "pentatonic_minor", "chromatic"
     );

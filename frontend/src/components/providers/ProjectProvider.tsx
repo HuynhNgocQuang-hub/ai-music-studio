@@ -19,9 +19,11 @@ import {
 } from '@/lib/music/presets';
 import {
   createDefaultProjectState,
+  type AutomationPoint,
   type CoachSuggestedAction,
   type OverdubFitCheckResponse,
   type ProjectState,
+  type TrackAutomationParam,
 } from '@/types/project';
 
 export type AutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -315,6 +317,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         act.action === 'transport_control' ||
         act.action === 'auto_mix' ||
         act.action === 'auto_trim_vocal' ||
+        act.action === 'separate_stems' ||
         act.action === 'regenerate_track' ||
         act.action === 'regenerate_song' ||
         act.action === 'export_project'
@@ -324,6 +327,34 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       }
 
       const next = updateProject((prev) => {
+        if (act.action === 'set_automation') {
+          const tid = String(payload.track_id || 'vocal');
+          const rawParam = String(payload.parameter || 'volume').toLowerCase();
+          const param: TrackAutomationParam =
+            rawParam === 'pan' || rawParam === 'filter' || rawParam === 'reverb' ? rawParam : 'volume';
+          const rawPts = Array.isArray(payload.points) ? payload.points : [];
+          const points: AutomationPoint[] = rawPts
+            .filter((p): p is Record<string, unknown> => Boolean(p && typeof p === 'object'))
+            .map((p, idx) => ({
+              bar: Math.max(1, Number(p.bar) || idx + 1),
+              value: Math.max(0, Math.min(1, Number(p.value) ?? 0.8)),
+            }));
+          const currTrack = prev.tracks[tid];
+          if (!currTrack || points.length === 0) return prev;
+          return {
+            ...prev,
+            tracks: {
+              ...prev.tracks,
+              [tid]: {
+                ...currTrack,
+                automation: {
+                  ...(currTrack.automation || {}),
+                  [param]: points,
+                },
+              },
+            },
+          };
+        }
         if (act.action === 'set_mastering') {
           const ceiling =
             typeof payload.limiter_ceiling_db === 'number'

@@ -62,6 +62,7 @@ export class MultiTrackAudioEngine {
   private channelLowEq: Map<string, BiquadFilterNode> = new Map();
   private channelMidEq: Map<string, BiquadFilterNode> = new Map();
   private channelHighEq: Map<string, BiquadFilterNode> = new Map();
+  private channelFilter: Map<string, BiquadFilterNode> = new Map();
   private channelAnalysers: Map<string, AnalyserNode> = new Map();
   private channelPanners: Map<string, StereoPannerNode> = new Map();
   private channelReverbSends: Map<string, GainNode> = new Map();
@@ -253,6 +254,7 @@ export class MultiTrackAudioEngine {
     lowEq: BiquadFilterNode;
     midEq: BiquadFilterNode;
     highEq: BiquadFilterNode;
+    filter: BiquadFilterNode;
     panner: StereoPannerNode;
     reverbSendGain: GainNode;
     delaySendGain: GainNode;
@@ -262,6 +264,7 @@ export class MultiTrackAudioEngine {
     let lowEq = this.channelLowEq.get(trackId);
     let midEq = this.channelMidEq.get(trackId);
     let highEq = this.channelHighEq.get(trackId);
+    let filter = this.channelFilter.get(trackId);
     let analyser = this.channelAnalysers.get(trackId);
     let panner = this.channelPanners.get(trackId);
     let reverbSendGain = this.channelReverbSends.get(trackId);
@@ -272,6 +275,7 @@ export class MultiTrackAudioEngine {
       !lowEq ||
       !midEq ||
       !highEq ||
+      !filter ||
       !analyser ||
       !panner ||
       !reverbSendGain ||
@@ -291,6 +295,11 @@ export class MultiTrackAudioEngine {
       highEq.type = 'highshelf';
       highEq.frequency.value = 6500;
 
+      filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 20000;
+      filter.Q.value = 0.85;
+
       analyser = ctx.createAnalyser();
       analyser.fftSize = 64;
       panner = ctx.createStereoPanner();
@@ -302,7 +311,8 @@ export class MultiTrackAudioEngine {
       gain.connect(lowEq);
       lowEq.connect(midEq);
       midEq.connect(highEq);
-      highEq.connect(analyser);
+      highEq.connect(filter);
+      filter.connect(analyser);
       analyser.connect(panner);
       panner.connect(this.masterGain!);
       panner.connect(reverbSendGain);
@@ -314,12 +324,13 @@ export class MultiTrackAudioEngine {
       this.channelLowEq.set(trackId, lowEq);
       this.channelMidEq.set(trackId, midEq);
       this.channelHighEq.set(trackId, highEq);
+      this.channelFilter.set(trackId, filter);
       this.channelAnalysers.set(trackId, analyser);
       this.channelPanners.set(trackId, panner);
       this.channelReverbSends.set(trackId, reverbSendGain);
       this.channelDelaySends.set(trackId, delaySendGain);
     }
-    return { gain, lowEq, midEq, highEq, panner, reverbSendGain, delaySendGain };
+    return { gain, lowEq, midEq, highEq, filter, panner, reverbSendGain, delaySendGain };
   }
 
   public subscribe(listener: TransportListener): () => void {
@@ -840,15 +851,20 @@ export class MultiTrackAudioEngine {
     const now = this.ctx.currentTime;
 
     for (const [id, cfg] of this.channelConfigs.entries()) {
-      const { gain, lowEq, midEq, highEq, panner, reverbSendGain, delaySendGain } =
+      const { gain, lowEq, midEq, highEq, filter, panner, reverbSendGain, delaySendGain } =
         this.getOrCreateChannelNodes(id);
       const audible = !cfg.mute && (!anySolo || cfg.solo);
       const targetGain = audible ? Math.max(0, Math.min(1.2, cfg.volume)) : 0;
+      gain.gain.cancelScheduledValues(now);
       gain.gain.setTargetAtTime(targetGain, now, 0.015);
       lowEq.gain.setTargetAtTime(this.clampEqDb(cfg.lowDb), now, 0.02);
       midEq.gain.setTargetAtTime(this.clampEqDb(cfg.midDb), now, 0.02);
       highEq.gain.setTargetAtTime(this.clampEqDb(cfg.highDb), now, 0.02);
+      filter.frequency.cancelScheduledValues(now);
+      filter.frequency.setTargetAtTime(20000, now, 0.02);
+      panner.pan.cancelScheduledValues(now);
       panner.pan.setTargetAtTime(Math.max(-1, Math.min(1, cfg.pan)), now, 0.015);
+      reverbSendGain.gain.cancelScheduledValues(now);
       reverbSendGain.gain.setTargetAtTime(
         audible ? this.clampSend(cfg.reverbSend) * 0.55 : 0,
         now,
@@ -1098,8 +1114,52 @@ export class MultiTrackAudioEngine {
     }
 
     this.applyChannelRouting();
+    this.scheduleTrackAutomation(ctx, scheduleAnchor, offsetSec);
     this.startAnimationLoop();
     this.emit();
+  }
+
+  private scheduleTrackAutomation(ctx: AudioContext, anchorTime: number, offsetSec: number): void {
+    const project = this.currentProject;
+    if (!project) return;
+    const secPerBar = this.getSecPerBar();
+    const anySolo = Array.from(this.channelConfigs.values()).some((c) => c.solo);
+
+    for (const [trackId, track] of Object.entries(project.tracks)) {
+      const auto = track?.automation;
+      if (!track || !auto) continue;
+      const cfg = this.channelConfigs.get(trackId);
+      const audible = !(cfg?.mute ?? track.mute) && (!anySolo || Boolean(cfg?.solo ?? track.solo));
+      if (!audible) continue;
+
+      const { gain, panner, filter, reverbSendGain } = this.getOrCreateChannelNodes(trackId);
+      const scheduleCurve = (
+        points: Array<{ bar: number; value: number }> | undefined,
+        param: AudioParam,
+        mapVal: (norm: number) => number
+      ) => {
+        if (!points || points.length === 0) return;
+        const sorted = [...points].sort((a, b) => a.bar - b.bar);
+        param.cancelScheduledValues(anchorTime);
+        let initSet = false;
+        for (const pt of sorted) {
+          const ptSec = Math.max(0, (pt.bar - 1) * secPerBar);
+          const relTime = anchorTime + Math.max(0, ptSec - offsetSec);
+          const mapped = mapVal(Math.max(0, Math.min(1, pt.value)));
+          if (!initSet) {
+            param.setValueAtTime(mapped, anchorTime);
+            initSet = true;
+          } else if (ptSec >= offsetSec) {
+            param.linearRampToValueAtTime(mapped, relTime);
+          }
+        }
+      };
+
+      scheduleCurve(auto.volume, gain.gain, (v) => Math.max(0.02, Math.min(1.2, v * 1.15)));
+      scheduleCurve(auto.pan, panner.pan, (v) => Math.max(-1, Math.min(1, v * 2 - 1)));
+      scheduleCurve(auto.filter, filter.frequency, (v) => 380 * Math.pow(20000 / 380, v));
+      scheduleCurve(auto.reverb, reverbSendGain.gain, (v) => Math.max(0, Math.min(0.65, v * 0.55)));
+    }
   }
 
   private scheduleAudioClip(
@@ -1476,6 +1536,31 @@ export class MultiTrackAudioEngine {
     }
 
     this.triggerMelodicNote(ctx, trackId, instrument, pitch, now, 0.35, 0.22, gain, false);
+  }
+
+  /**
+   * Audition a chord progression (up to 4 chords, 0.65s each) for A/B preview before applying.
+   */
+  public auditionChordProgression(symbols: string[]): void {
+    const ctx = this.ensureContext();
+    const now = ctx.currentTime + 0.02;
+    const { gain } = this.getOrCreateChannelNodes('harmony');
+    const noteRoots: Record<string, number> = {
+      C: 60, 'C#': 61, Db: 61, D: 62, 'D#': 63, Eb: 63,
+      E: 64, F: 65, 'F#': 66, Gb: 66, G: 67, 'G#': 68, Ab: 68, A: 69, 'A#': 70, Bb: 70, B: 71,
+    };
+    const previewChords = symbols.slice(0, 4);
+    previewChords.forEach((rawSym, idx) => {
+      const m = rawSym.trim().match(/^([A-G][#b]?)(maj7|m7|min|m|7)?/i);
+      const rootName = m ? m[1][0].toUpperCase() + (m[1].slice(1) || '') : 'C';
+      const qual = (m?.[2] || '').toLowerCase();
+      const rootMidi = noteRoots[rootName] ?? 60;
+      const intervals = qual === 'm' || qual === 'min' || qual === 'm7' ? [0, 3, 7] : [0, 4, 7];
+      const t = now + idx * 0.62;
+      for (const offset of intervals) {
+        this.triggerMelodicNote(ctx, 'harmony', 'electric_piano', rootMidi + offset, t, 0.55, 0.14, gain, false);
+      }
+    });
   }
 
   private stopSourcesOnly(): void {

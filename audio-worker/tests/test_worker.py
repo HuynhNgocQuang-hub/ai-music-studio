@@ -699,3 +699,39 @@ def test_worker_dos_clamps_and_render_bounds(client: TestClient) -> None:
     assert len(mix) == int(round(2 * 4 * (60.0 / 40.0) * 44100))
     assert "lead" in stems and len(stems["lead"]) == len(mix)
     assert peak_dbfs(mix) <= -1.0 + 1e-4
+
+
+def test_stem_separation_and_custom_soundfont_validation(client: TestClient) -> None:
+    """Verify /internal/audio/separate-stems returns 2 balanced stems and /soundfont validates .sf2 containers."""
+    sr = 44100
+    t = np.arange(int(1.6 * sr), dtype=np.float32) / sr
+    mix_sig = 0.45 * np.sin(2.0 * np.pi * 440.0 * t) + 0.25 * np.sin(2.0 * np.pi * 90.0 * t)
+    mix_wav = encode_wav_bytes(mix_sig, sr)
+
+    sep = client.post(
+        "/internal/audio/separate-stems",
+        files={"file": ("song.wav", mix_wav, "audio/wav")},
+    )
+    assert sep.status_code == 200, sep.text
+    data = sep.json()
+    assert "vocal_wav_base64" in data and "instrumental_wav_base64" in data
+    v_bytes = base64.b64decode(data["vocal_wav_base64"])
+    b_bytes = base64.b64decode(data["instrumental_wav_base64"])
+    assert v_bytes[:4] == b"RIFF" and b_bytes[:4] == b"RIFF"
+    v_samples, _ = decode_wav_bytes(v_bytes)
+    b_samples, _ = decode_wav_bytes(b_bytes)
+    assert len(v_samples) == len(b_samples)
+    assert peak_dbfs(v_samples) <= -1.0 + 1e-3
+    assert peak_dbfs(b_samples) <= -1.0 + 1e-3
+
+    # Custom SoundFont validation rejects non-.sf2 & invalid RIFF/sfbk headers
+    bad_ext = client.post(
+        "/internal/audio/soundfont",
+        files={"file": ("not_sf2.txt", b"RIFF" + b"\x00" * 100, "application/octet-stream")},
+    )
+    assert bad_ext.status_code == 400
+    bad_hdr = client.post(
+        "/internal/audio/soundfont",
+        files={"file": ("fake.sf2", b"NOPE" + b"\x00" * 100, "application/octet-stream")},
+    )
+    assert bad_hdr.status_code == 400

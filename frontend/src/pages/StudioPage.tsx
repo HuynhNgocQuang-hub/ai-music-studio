@@ -44,6 +44,7 @@ import {
   overdubFitCheck,
   rearrangeChordsJob,
   regenerateTrackJob,
+  separateStems,
   startGenerateJob,
   subscribeJobEvents,
   suggestLyrics,
@@ -74,6 +75,7 @@ import { getAudioBlob, getDraft, markDraftSaved, saveAudioBlob } from '@/lib/sto
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import ConsoleMixerPanel from '@/components/studio/ConsoleMixerPanel';
 import PianoRollEditor from '@/components/studio/PianoRollEditor';
+import PitchCurveEditor from '@/components/studio/PitchCurveEditor';
 import QuickStudioView from '@/components/studio/QuickStudioView';
 import StepSequencer from '@/components/studio/StepSequencer';
 import TimelineEditor from '@/components/studio/TimelineEditor';
@@ -81,6 +83,7 @@ import type {
   AudioClip,
   AutoTunePreset,
   AutotuneSettings,
+  AutomationPoint,
   ChordEvent,
   CoachSuggestedAction,
   LyricLine,
@@ -90,6 +93,7 @@ import type {
   OutputMode,
   ProjectState,
   StructurePreset,
+  TrackAutomationParam,
 } from '@/types/project';
 
 const KEYS = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
@@ -182,6 +186,7 @@ export default function StudioPage() {
   const [regenProgress, setRegenProgress] = useState<number>(0);
   const [autoTrimBusy, setAutoTrimBusy] = useState(false);
   const [autoMixBusy, setAutoMixBusy] = useState(false);
+  const [stemsBusy, setStemsBusy] = useState(false);
   const [clipUploadBusy, setClipUploadBusy] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [bpmDraft, setBpmDraft] = useState<string | null>(null);
@@ -441,7 +446,7 @@ export default function StudioPage() {
   const mutateWithUndo = useCallback(
     (updater: (prev: ProjectState) => ProjectState): ProjectState => {
       const prev = latestProjectRef.current;
-      setUndoStack((s) => [...s.slice(-19), prev]);
+      setUndoStack((s) => [...s.slice(-49), prev]);
       setRedoStack([]);
       const next = updateProject(updater);
       latestProjectRef.current = next;
@@ -527,7 +532,7 @@ export default function StudioPage() {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     setRedoStack((s) => s.slice(0, -1));
-    setUndoStack((s) => [...s.slice(-19), latestProjectRef.current]);
+    setUndoStack((s) => [...s.slice(-49), latestProjectRef.current]);
     loadProjectIntoSession(next, { dirty: true });
     void engine.syncFromProject(next);
   }, [redoStack, engine, loadProjectIntoSession]);
@@ -752,7 +757,7 @@ export default function StudioPage() {
             setRegenJobId(null);
             setRegenProgress(100);
             if (evt.project_state) {
-              setUndoStack((s) => [...s.slice(-19), current]);
+              setUndoStack((s) => [...s.slice(-49), current]);
               setRedoStack([]);
               loadProjectIntoSession(evt.project_state, { dirty: true });
               void engine.syncFromProject(evt.project_state);
@@ -826,7 +831,7 @@ export default function StudioPage() {
             await engine.loadAudioFromBlob(cacheKey, wavBlob);
 
             setLastOverdubClipId(clip.id);
-            setUndoStack((s) => [...s.slice(-19), current]);
+            setUndoStack((s) => [...s.slice(-49), current]);
             setRedoStack([]);
             loadProjectIntoSession(clipRes.project_state, { dirty: true });
             await engine.syncFromProject(clipRes.project_state);
@@ -1053,6 +1058,46 @@ export default function StudioPage() {
     if (act.action === 'auto_trim_vocal') {
       await handleAutoTrimVocal();
       return { notice: 'Đã chạy AI Auto-Trim Vocal.', revertable: true };
+    }
+    if (act.action === 'separate_stems') {
+      await handleSeparateStems(typeof payload.source_ref === 'string' ? payload.source_ref : undefined);
+      return { notice: 'Đã tách Stem Vocal & Beat lên Timeline.', revertable: true };
+    }
+    if (act.action === 'set_automation') {
+      const tid = String(payload.track_id || 'vocal');
+      const rawParam = String(payload.parameter || 'volume').toLowerCase();
+      const param: TrackAutomationParam =
+        rawParam === 'pan' || rawParam === 'filter' || rawParam === 'reverb' ? rawParam : 'volume';
+      const rawPts = Array.isArray(payload.points) ? payload.points : [];
+      const points: AutomationPoint[] = rawPts
+        .filter((p): p is Record<string, unknown> => Boolean(p && typeof p === 'object'))
+        .map((p, idx) => ({
+          bar: Math.max(1, Number(p.bar) || idx + 1),
+          value: Math.max(0, Math.min(1, Number(p.value) ?? 0.8)),
+        }));
+      if (points.length > 0 && current.tracks[tid]) {
+        const nextState = mutateWithUndo((prev) => {
+          const targetTrack = prev.tracks[tid];
+          if (!targetTrack) return prev;
+          return {
+            ...prev,
+            tracks: {
+              ...prev.tracks,
+              [tid]: {
+                ...targetTrack,
+                automation: {
+                  ...(targetTrack.automation || {}),
+                  [param]: points,
+                },
+              },
+            },
+          };
+        });
+        await saveNow(true, nextState);
+        setStudioMode('pro');
+        setStudioNotice(`Đã vẽ Automation Curve (${param}) cho track ${tid.toUpperCase()}.`);
+        return { notice: `Đã đặt Automation ${param} (${points.length} điểm).`, revertable: true };
+      }
     }
     if (act.action === 'switch_studio_mode') {
       const nextMode = payload.studio_mode === 'quick' ? 'quick' : 'pro';
@@ -1637,7 +1682,7 @@ export default function StudioPage() {
     try {
       await saveNow(true);
       const res = await autoTrimVocal(current.project_id);
-      setUndoStack((s) => [...s.slice(-19), current]);
+      setUndoStack((s) => [...s.slice(-49), current]);
       setRedoStack([]);
       loadProjectIntoSession(res.project_state, { dirty: true });
       await engine.syncFromProject(res.project_state);
@@ -1658,7 +1703,7 @@ export default function StudioPage() {
     try {
       await saveNow(true);
       const res = await autoMixProject(current.project_id);
-      setUndoStack((s) => [...s.slice(-19), current]);
+      setUndoStack((s) => [...s.slice(-49), current]);
       setRedoStack([]);
       loadProjectIntoSession(res.project_state, { dirty: true });
       await engine.syncFromProject(res.project_state);
@@ -1674,6 +1719,26 @@ export default function StudioPage() {
     }
   };
 
+  const handleSeparateStems = async (sourceRef?: string) => {
+    const current = latestProjectRef.current;
+    setStemsBusy(true);
+    setStudioNotice('AI DSP đang tách riêng Stem Vocal & Beat/Texture...');
+    try {
+      await saveNow(true);
+      const res = await separateStems(current.project_id, sourceRef);
+      setUndoStack((s) => [...s.slice(-49), current]);
+      setRedoStack([]);
+      engine.invalidateSlots(['vocal', 'texture']);
+      loadProjectIntoSession(res.project_state, { dirty: true });
+      await engine.syncFromProject(res.project_state);
+      setStudioNotice(res.summary || 'Đã tách riêng 2 Stems (Vocal + Beat/Texture).');
+    } catch (err) {
+      setStudioNotice(err instanceof ApiError ? err.detail : 'Không thể tách Stem từ audio dự án.');
+    } finally {
+      setStemsBusy(false);
+    }
+  };
+
   const handleUploadTextureClip = async (file: File) => {
     const current = latestProjectRef.current;
     setClipUploadBusy(true);
@@ -1685,7 +1750,7 @@ export default function StudioPage() {
         await saveAudioBlob(current.project_id, res.audio_ref, file);
         await engine.loadAudioFromBlob(res.audio_ref, file);
       }
-      setUndoStack((s) => [...s.slice(-19), current]);
+      setUndoStack((s) => [...s.slice(-49), current]);
       setRedoStack([]);
       loadProjectIntoSession(res.project_state, { dirty: true });
       await engine.syncFromProject(res.project_state);
@@ -2430,17 +2495,29 @@ export default function StudioPage() {
                         Vòng hợp âm nhanh (Chords + Bass)
                       </p>
                       {CHORD_PROGRESSIONS.map((prog) => (
-                        <button
+                        <div
                           key={prog.id}
-                          type="button"
-                          onClick={() => applyChordProgressionPreset(prog.symbols, prog.label)}
-                          className="flex w-full flex-col rounded border border-white/10 bg-[#1b1e25] px-2.5 py-2 text-left transition hover:border-sky-400/50 hover:bg-[#232730]"
+                          className="flex items-center justify-between gap-1.5 rounded border border-white/10 bg-[#1b1e25] px-2.5 py-2 transition hover:border-sky-400/50 hover:bg-[#232730]"
                         >
-                          <span className="text-[11px] font-semibold text-white">{prog.label}</span>
-                          <span className="mt-0.5 font-mono text-[10px] text-sky-300">
-                            {prog.symbols.join(' – ')}
-                          </span>
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => applyChordProgressionPreset(prog.symbols, prog.label)}
+                            className="flex min-w-0 flex-1 flex-col text-left"
+                          >
+                            <span className="truncate text-[11px] font-semibold text-white">{prog.label}</span>
+                            <span className="mt-0.5 font-mono text-[10px] text-sky-300">
+                              {prog.symbols.join(' – ')}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            title="Nghe thử vòng hợp âm A/B"
+                            onClick={() => engine.auditionChordProgression(prog.symbols)}
+                            className="shrink-0 rounded border border-amber-400/40 bg-amber-500/15 px-1.5 py-1 text-[9px] font-semibold text-amber-200 hover:bg-amber-500/30"
+                          >
+                            Nghe thử
+                          </button>
+                        </div>
                       ))}
                     </div>
                   </>
@@ -2518,6 +2595,19 @@ export default function StudioPage() {
                           className="w-full rounded border border-sky-400/40 bg-sky-500/15 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-500/25 disabled:opacity-40"
                         >
                           AI Tạo lại Track ({inspectedTrackId})
+                        </button>
+                      </div>
+                    )}
+
+                    {inspectedTrack.type === 'audio' && (
+                      <div className="space-y-1.5">
+                        <button
+                          type="button"
+                          disabled={stemsBusy}
+                          onClick={() => void handleSeparateStems()}
+                          className="w-full rounded border border-cyan-400/40 bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-40"
+                        >
+                          {stemsBusy ? 'Đang tách Stem...' : 'Tách Stem Vocal / Beat'}
                         </button>
                       </div>
                     )}
@@ -3031,6 +3121,23 @@ export default function StudioPage() {
                         >
                           Áp dụng Auto-Tune
                         </button>
+                      </div>
+                      <div className="sm:col-span-2 lg:col-span-3">
+                        <PitchCurveEditor
+                          notes={project.analysis.raw_melody_midi || []}
+                          musicalKey={project.autotune_settings.key || project.analysis.detected_key}
+                          scale={project.autotune_settings.scale || project.analysis.detected_scale}
+                          onUpdateNotes={(nextMelody) =>
+                            mutateWithUndo((prev) => ({
+                              ...prev,
+                              analysis: {
+                                ...prev.analysis,
+                                raw_melody_midi: nextMelody,
+                              },
+                            }))
+                          }
+                          onApplyResynth={() => void handleApplyAutotunePro()}
+                        />
                       </div>
                     </div>
                   )}

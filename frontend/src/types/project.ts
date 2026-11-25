@@ -104,6 +104,13 @@ export interface AudioClip {
   offset_ms?: number;
 }
 
+export interface AutomationPoint {
+  bar: number;
+  value: number;
+}
+
+export type TrackAutomationParam = 'volume' | 'pan' | 'filter' | 'reverb';
+
 export interface AudioTrackState {
   type: 'audio';
   locked: boolean;
@@ -117,6 +124,7 @@ export interface AudioTrackState {
   reverb_send?: number;
   delay_send?: number;
   clips: AudioClip[];
+  automation?: Partial<Record<TrackAutomationParam, AutomationPoint[]>>;
 }
 
 export interface MidiTrackState {
@@ -133,6 +141,7 @@ export interface MidiTrackState {
   delay_send?: number;
   instrument?: string | null;
   notes: MidiNote[];
+  automation?: Partial<Record<TrackAutomationParam, AutomationPoint[]>>;
 }
 
 export interface ProjectTracks {
@@ -402,6 +411,7 @@ export interface HealthResponse {
     ffmpeg_available?: boolean;
     fluidsynth_available?: boolean;
     soundfont_available?: boolean;
+    custom_soundfont_active?: boolean;
     java_fallback_available?: boolean;
   };
   llm_providers?: {

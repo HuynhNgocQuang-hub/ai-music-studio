@@ -1,8 +1,8 @@
 # Tài liệu Đặc tả Yêu cầu Phần mềm (SRS)
 ## Dự án: AI Music Studio — Hệ thống Sáng tác & Phối khí Âm nhạc Multi-Agent
 
-- **Phiên bản:** 1.3 (SRS Aligned + Multi-Mode AI Chatbot + FL Playlist)
-- **Ngày cập nhật:** 2026-11-23
+- **Phiên bản:** 1.4 (SRS Aligned + Multi-Mode AI Chatbot + FL Playlist + Phase 6B/7 Pro DSP)
+- **Ngày cập nhật:** 2026-11-25
 - **Tài liệu liên quan:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md)
 - **Phạm vi triển khai:** Ứng dụng **cá nhân (Single-User Local App)** — không cần đăng nhập/phân quyền, tối ưu lưu trữ nhẹ ổ đĩa (dùng Redis/RAM cache kết hợp MIDI JSON và dọn file tạm tự động).
 - **Phạm vi chức năng:** Đặc tả chi tiết các yêu cầu chức năng (FR), thành phần bắt buộc, ràng buộc kỹ thuật, luồng nghiệp vụ cho **Hum-to-Music**, **AI Denoise & Auto-Tune**, **Lyricist & AI Coach**, **Hybrid MIDI + Audio Clips** và **AI Music Studio (DAW-lite)**.
@@ -141,7 +141,7 @@ Hỗ trợ viết lời theo giai điệu/nền beat và giải đáp hướng d
 | :--- | :--- | :--- |
 | `FR-LYR-01` | **AI Gợi ý / Viết lời** | Dựa vào chủ đề, tâm trạng, ngôn ngữ (Tiếng Việt / Tiếng Anh) và tiết tấu giai điệu/beat để gợi ý lời bài hát chia theo từng đoạn (`Verse`, `Chorus`...). |
 | `FR-LYR-02` | **Viết lời trên nền Beat** | Cung cấp khung soạn lời (Lyric Pad) chạy song song khi đang phát beat hoặc loop đoạn nhạc để người dùng tự viết/chỉnh lời theo nhịp. |
-| `FR-LYR-03` | **Global AI Music Copilot (22 Tools & Multimodal)** | Trợ lý AI gắn toàn cục trên cả 5 trang (`/`..`/settings`) với **4 chế độ chuyên sâu** (`Producer`, `Hòa âm`, `Viết lời`, `Mix / Tune`), **Mini-RAG `DawPlaybook`**, **SSE Token Streaming** (`/api/coach/chat/stream`), **Multimodal Audio & Voice** (`/api/coach/chat/audio` `<= 10 MB`, `Gửi kèm Vocal`, Mic WAV/Speech), **22 Tool Actions** (`set_track_mix`, `manage_track`, `apply_drum_groove`, `edit_structure_and_dynamics`, `update_lyrics_lines`, `set_mastering`, `transport_control`, `navigate_route`, `switch_studio_mode`, `create_template`, `export_project`, ...), **Holistic Project Audit** (*"đề xuất mọi thứ"*), **Áp dụng tất cả**, **Hoàn tác 1 chạm**, và lưu bền vững qua `IndexedDB` (`chat_threads`). |
+| `FR-LYR-03` | **Global AI Music Copilot (24 Tools & Multimodal)** | Trợ lý AI gắn toàn cục trên cả 5 trang (`/`..`/settings`) với **4 chế độ chuyên sâu** (`Producer`, `Hòa âm`, `Viết lời`, `Mix / Tune`), **Mini-RAG `DawPlaybook`**, **SSE Token Streaming** (`/api/coach/chat/stream`), **Multimodal Audio & Voice** (`/api/coach/chat/audio` `<= 10 MB`, `Gửi kèm Vocal`, Mic WAV/Speech), **A/B nghe thử hợp âm** trực tiếp trong khung chat, **24 Tool Actions** (`set_track_mix`, `manage_track`, `apply_drum_groove`, `edit_structure_and_dynamics`, `set_automation`, `separate_stems`, `update_lyrics_lines`, `set_mastering`, `transport_control`, `navigate_route`, `switch_studio_mode`, `create_template`, `export_project`, ...), **Holistic Project Audit** (*"đề xuất mọi thứ"*), **Áp dụng tất cả**, **Hoàn tác 1 chạm**, và lưu bền vững qua `IndexedDB` (`chat_threads`). |
 
 * **Phải có gì (`FR-LYRIC`):**
   * Tab/Panel **Lyrics & AI Coach** gắn cạnh Timeline.
@@ -177,18 +177,22 @@ Không gian nghe thử, phối lại và chỉnh sửa đa lớp kết hợp gi�
 * `FR-STU-12`: **AI Auto-Mix & Mastering (Chống vỡ tiếng):** Tự động cân bằng Gain, đặt **Limiter đầu ra**, lách tần số nhẹ giữa Vocal và nhạc đệm; AI tự cảnh báo và đề xuất/tự điều chỉnh nếu phát hiện có track bị quá ngưỡng gây rè/vỡ tiếng.
 * `FR-STU-13`: **Lưu & Mở lại Dự án (`.aimusic` + Auto-Restore):** Cho phép lưu toàn bộ dự án thành 1 file nhẹ `.aimusic` (`1–3 MB`) và tự động khôi phục phiên làm việc gần nhất nếu người dùng quên bấm lưu.
 * `FR-STU-14`: **MIDI Export** — Xuất file `.mid` từng track hoặc toàn bộ dự án.
+* `FR-STU-15`: **Stem Separation (Tách Beat / Vocal):** Cho phép tách bản thu hoặc file ghép thành 2 stem riêng (`vocal` & `accompaniment`) qua `POST /api/studio/separate-stems` (`librosa` HPSS/Mid-Side hoặc Java DSP fallback).
+* `FR-STU-16`: **Multi-Param Web Audio Automation & A/B Chord Audition:** Hỗ trợ chuyển đổi & vẽ đường tự động hóa **`DYN | VOL | PAN | FILT | REVERB`** (`TrackState.automation`) chạy realtime trên Web Audio (`AudioParam.linearRampToValueAtTime`), kèm nút **Nghe thử hợp âm** trước khi áp dụng.
+* `FR-STU-17`: **Visual Pitch Curve Editor & Hardware WebMIDI:** Chỉnh sửa độ lệch cao độ bán âm (semitone nudge / scale snap) trực quan trong tab **`Auto-Tune DSP`**, và kết nối bàn phím **WebMIDI** (`navigator.requestMIDIAccess`) để ghi nốt trực tiếp trên Piano Roll.
+* `FR-STU-18`: **Custom `.sf2` SoundFont Upload:** Nạp bộ tiếng `.sf2` tùy chọn (`<= 50 MB`, xác thực header `RIFF`/`sfbk`) tại `/settings` để FluidSynth render MIDI với âm sắc riêng.
 
 * **Phải có gì (`FR-STUDIO`):**
   * **Header điều khiển chung:** Play/Pause, Stop, Loop Region, đồng hồ thời gian + vị trí ô nhịp (`Bar:Beat`), BPM hiện tại, Key hiện tại, nút **Undo / Redo**, công cụ **Select / Cut (Kéo cắt) / Snap Grid**, nút **Auto-Mix/Master**, nút **Export**.
   * **Chuyển đổi chế độ hiển thị:** Nút chuyển mượt giữa **Quick Mode** và **Studio Pro Mode** mà không làm mất dữ liệu đang mở.
-  * **Track List & Mixer:** Mỗi track có Tên, Nhạc cụ (hoặc loại Audio), nút `M` (Mute), `S` (Solo), nút `Lock` (Khóa không cho AI ghi đè), thanh Volume, nút Pan, đồng hồ Peak meter, nút **Regenerate Track** (với track nhạc đệm) hoặc **Auto-Tune / Dry Check** (với track Vocal).
-  * **Pro Panels:** Cửa sổ **Piano Roll** (trục dọc là nốt C1–C7, trục ngang là Bar/Beat, hỗ trợ snap-to-grid), thanh **Chord Track** ở trên cùng, và tab **Lyrics / AI Coach**.
+  * **Track List & Mixer:** Mỗi track có Tên, Nhạc cụ (hoặc loại Audio), nút `M` (Mute), `S` (Solo), nút `Lock` (Khóa không cho AI ghi đè), thanh Volume, nút Pan, đồng hồ Peak meter, nút **Regenerate Track** (với track nhạc đệm) hoặc **Auto-Tune / Dry Check / Separate Stems** (với track Vocal).
+  * **Pro Panels:** Cửa sổ **Piano Roll** (trục dọc là nốt C1–C7, trục ngang là Bar/Beat, hỗ trợ snap-to-grid + **Hardware WebMIDI**), **Visual Pitch Curve Editor** trong tab Auto-Tune DSP, **Multi-Param Automation** (`DYN/VOL/PAN/FILT/REVERB`), thanh **Chord Track** (kèm **Nghe thử** A/B), và tab **Lyrics / AI Coach**.
 * **Ràng buộc & Quy tắc (`FR-STUDIO`):**
   * **Đồng bộ phát đa track:** Sai số lệch pha/nhịp giữa các track khi Play/Loop phải nhỏ hơn **10 ms**; mọi track audio & MIDI đều neo theo chung 1 mốc `Bar 1, Beat 1 (t = 0.000s)`.
   * **Khóa track khi Regenerate cục bộ:** Khi bấm *Regenerate 1 track* (VD: Bass), hệ thống **cấm** làm thay đổi dữ liệu của các track khác (`Vocal`, `Drums`, `Harmony`) trừ khi người dùng chủ động sửa Hợp âm hoặc BPM.
   * **Ràng buộc sửa Hợp âm (Chord Re-arrange):** Nếu người dùng đổi hợp âm trên Chord Timeline, hệ thống phải đánh dấu cảnh báo *"Hòa âm chưa đồng bộ"* cho đến khi người dùng bấm *Cập nhật nhạc đệm* (hoặc tự động đồng bộ các track chưa bị khóa `Lock`), đồng thời cập nhật Key cho Auto-Tune nếu đang bật `Auto-Follow`.
   * **Ràng buộc Chống vỡ tiếng (Anti-Clipping & Mastering):** Dù người dùng kéo volume từng track lên `120%`, Master Bus khi phát và Export **bắt buộc** đi qua Limiter sao cho đỉnh tín hiệu đầu ra không vượt quá **`-1.0 dBFS`** (mục tiêu loudness quanh **`-14 LUFS`**).
-  * **Giới hạn Undo/History:** Lưu tối thiểu **10–20 bước lịch sử** chỉnh sửa gần nhất trong Redis/RAM (bao gồm cả phiên bản trước khi Regenerate hoặc cắt ghép) để quay lại khi cần.
+  * **Giới hạn Undo/History:** Lưu tối thiểu **50 bước lịch sử** chỉnh sửa gần nhất trong Redis/RAM (`DEFAULT_MAX_UNDO = 50`, đồng bộ Studio client Undo stack) để quay lại khi cần.
   * **Ràng buộc Export:**
     * Không cho phép xuất file nếu **tất cả các track đều đang bị Mute** (cảnh báo người dùng).
     * Xuất `Stems` phải đóng gói thành `.zip` chứa các file `.wav` có **cùng độ dài chính xác** từ `00:00` để khi kéo vào FL Studio/Ableton không bị lệch nhịp.

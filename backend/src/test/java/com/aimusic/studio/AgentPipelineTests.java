@@ -732,6 +732,11 @@ class AgentPipelineTests {
         CoachChatResponse sysResp = coach.chatCoach(state, "Phát nhạc rồi mở Settings", List.of(), "producer", "/studio/p1", Map.of(), null, null);
         assertTrue(sysResp.getSuggestedActions().stream().anyMatch(a -> "transport_control".equals(a.getAction()) && "play".equals(a.getPayload().get("command"))));
         assertTrue(sysResp.getSuggestedActions().stream().anyMatch(a -> "navigate_route".equals(a.getAction()) && "/settings".equals(a.getPayload().get("route"))));
+
+        // 5. Phase 6B tools: separate_stems and multi-param set_automation
+        CoachChatResponse phase6BResp = coach.chatCoach(state, "Tách stem beat và vẽ automation filter cho Vocal", List.of(), "mix", "/studio/p1", Map.of(), null, null);
+        assertTrue(phase6BResp.getSuggestedActions().stream().anyMatch(a -> "separate_stems".equals(a.getAction())));
+        assertTrue(phase6BResp.getSuggestedActions().stream().anyMatch(a -> "set_automation".equals(a.getAction()) && "filter".equals(a.getPayload().get("parameter"))));
     }
 
     private static byte[] synthMonoWav(double durationSec, int sampleRate, double amplitude) {

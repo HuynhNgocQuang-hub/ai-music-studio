@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   CheckCircle2,
@@ -12,6 +12,7 @@ import {
   Save,
   Server,
   Trash2,
+  Upload,
   XCircle,
 } from 'lucide-react';
 import {
@@ -21,6 +22,7 @@ import {
   loadStudioSettings,
   saveStudioSettings,
   testLlmConnection,
+  uploadSoundFont,
 } from '@/lib/api/client';
 import { clearAllDrafts, getStorageUsageBytes } from '@/lib/storage/indexeddb';
 import type { HealthResponse, LLMProvider, LlmTestResponse, StudioLLMSettings } from '@/types/project';
@@ -31,6 +33,8 @@ export default function SettingsPage() {
   const [showOpenai, setShowOpenai] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
   const [cacheNotice, setCacheNotice] = useState<string | null>(null);
+  const [sf2Busy, setSf2Busy] = useState(false);
+  const sf2InputRef = useRef<HTMLInputElement | null>(null);
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
@@ -198,7 +202,9 @@ export default function SettingsPage() {
               )}
             </div>
             <p className="mt-1.5 text-sm font-semibold text-white">
-              {health?.engines?.fluidsynth_available
+              {health?.engines?.custom_soundfont_active
+                ? 'Custom .sf2 Active'
+                : health?.engines?.fluidsynth_available
                 ? health.engines.soundfont_available
                   ? 'FluidSynth + SoundFont Ready'
                   : 'FluidSynth (No SoundFont)'
@@ -206,6 +212,36 @@ export default function SettingsPage() {
                 ? `Synth Fallback (${health.engines?.ffmpeg_available ? 'FFmpeg OK' : 'Pure DSP'})`
                 : 'Unknown'}
             </p>
+            <input
+              ref={sf2InputRef}
+              type="file"
+              accept=".sf2"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (!file) return;
+                setSf2Busy(true);
+                void uploadSoundFont(file)
+                  .then((res) => {
+                    setCacheNotice(`Đã nạp SoundFont ${res.filename} (${Math.round(res.size_bytes / 1024)} KB).`);
+                    void refreshHealth();
+                  })
+                  .catch((err) => {
+                    setCacheNotice(err instanceof Error ? err.message : 'Lỗi tải file .sf2.');
+                  })
+                  .finally(() => setSf2Busy(false));
+              }}
+            />
+            <button
+              type="button"
+              disabled={sf2Busy}
+              onClick={() => sf2InputRef.current?.click()}
+              className="mt-2 inline-flex items-center gap-1 rounded border border-amber-400/35 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/20 disabled:opacity-50"
+            >
+              <Upload className="h-2.5 w-2.5" />
+              <span>{sf2Busy ? 'Đang nạp...' : 'Nạp SoundFont (.sf2)'}</span>
+            </button>
           </div>
 
           <div className="rounded-xl border border-white/[0.08] bg-[#1b1e25] p-3.5">

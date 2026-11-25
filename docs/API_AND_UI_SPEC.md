@@ -1,7 +1,7 @@
 # Tài liệu Thiết kế Giao diện, Điều hướng & API Contract
 ## Dự án: AI Music Studio (Hybrid Multi-Agent)
 
-- **Phiên bản:** 2.0 (Pro DAW + FL Playlist Clips + Multi-Mode AI Chatbot + Phase 5 Hardened)
+- **Phiên bản:** 2.1 (Pro DAW + Phase 6B Stem/Automation + Phase 7 Pitch Curve/WebMIDI/Custom `.sf2` + 24-Tool Copilot)
 - **Liên kết:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 - **Mục tiêu:** Đặc tả kiến trúc điều hướng (Menu, Chuyển trang, Phân trang), bố cục tối ưu cho từng màn hình, hợp đồng API giữa Frontend (`React + Vite`) – Core Backend (`Java 21 + Spring Boot 3.x`) – Audio DSP Microservice (`audio-worker`) – Redis, và cấu trúc file dự án `.aimusic`.
 
@@ -95,11 +95,12 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 ### 3.1. Nhóm Health, Audio Input, Denoise & Auto-Tune
 | Method & Endpoint | Mục đích | Payload / Output chính |
 | :--- | :--- | :--- |
-| `GET /api/health` | Kiểm tra sức khỏe Backend, Redis, Audio Worker, Engines, LLM | `{ status, redis: { backend, connected }, audio_worker, engines, llm_providers }` |
+| `GET /api/health` | Kiểm tra sức khỏe Backend, Redis, Audio Worker (gồm `custom_soundfont_active`), Engines, LLM | `{ status, redis: { backend, connected }, audio_worker, engines, llm_providers }` |
 | `POST /api/health/llm-test` | Kiểm tra kết nối API Key Gemini/OpenAI theo header hiện tại | `{ ok, is_mock, provider, model, latency_ms, message }` |
 | `POST /api/settings/cache/clear` | Dọn cache tạm trong Backend State Store | `{ status: "cleared", cleared_assets }` |
 | `POST /api/audio/upload` | Tải hoặc gửi bản thu Mic WAV lên Backend | Form-data audio $\rightarrow$ `project_id`, `raw_input_ref`, `filename`, `duration_sec`, `warnings` |
 | `POST /api/audio/clip-upload` | Tải clip overdub / sample phụ lên track `vocal` hoặc `texture` | Form-data audio + `project_id`, `track_id`, `start_bar` $\rightarrow$ `project_state`, `clip`, `audio_ref` |
+| `POST /api/audio/soundfont` | Nạp SoundFont `.sf2` tùy chọn (`<= 50 MB`, xác thực header `RIFF`/`sfbk`) vào `audio-worker` | Form-data `.sf2` $\rightarrow$ `{ status, filename, size_bytes, custom_soundfont_active }` |
 | `POST /api/audio/denoise` | Chạy AI Denoise & Auto-Trim | `{ project_id, enable_denoise, auto_trim }` $\rightarrow$ `dry_denoised_ref`, `warnings` |
 | `POST /api/audio/analyze` | Trích xuất BPM, Key/Scale, Pitch MIDI | `{ project_id, source_ref }` $\rightarrow$ `bpm`, `key`, `scale`, `raw_melody_midi` |
 | `POST /api/audio/autotune` | Render giọng qua Auto-Tune DSP | `{ project_id, autotune_settings }` $\rightarrow$ `tuned_vocal_ref` |
@@ -120,9 +121,10 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 | :--- | :--- | :--- |
 | `POST /api/studio/auto-trim-vocal` | AI cắt khoảng lặng & căn nhịp clip Vocal trong Studio | `{ project_id }` $\rightarrow$ `project_state`, `trim_start_sec`, `trim_end_sec`, `trimmed_clips` |
 | `POST /api/studio/auto-mix` | Cân bằng Gain, Pan từng track & bật Master Limiter (`<= -1.0 dBFS`) | `{ project_id }` $\rightarrow$ `project_state`, `mix_notes`, `summary` |
+| `POST /api/studio/separate-stems` | Tách audio thành 2 stem riêng (`vocal` & `accompaniment`, librosa HPSS/Mid-Side + Java DSP fallback) | `{ project_id }` $\rightarrow$ `project_state`, `vocal_stem_ref`, `beat_stem_ref`, `engine` |
 | `POST /api/studio/overdub-fit-check` | Upload clip thu đè lên beat & chạy AI Fit Check | Trả về `timing_offset_ms`, `pitch_issues[]`, `gain_suggestion`, danh sách **1-Click Fixes** |
 | `POST /api/lyrics/suggest` | Sinh/gợi ý lời bài hát khớp đoạn & tiết tấu | `{ project_id, language, topic, section }` $\rightarrow$ `lines[]` |
-| `POST /api/coach/chat` | Trợ lý AI Music Copilot (`producer`, `arrangement`, `lyricist`, `mix`) + Mini-RAG `DawPlaybook` + 22 Tool Declarations | `{ project_id, route, mode, message, context, project_state, history }` $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
+| `POST /api/coach/chat` | Trợ lý AI Music Copilot (`producer`, `arrangement`, `lyricist`, `mix`) + Mini-RAG `DawPlaybook` + **24 Tool Declarations** | `{ project_id, route, mode, message, context, project_state, history }` $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
 | `POST /api/coach/chat/stream` | **SSE Streaming** phản hồi Chatbot theo chunk từ trên mọi màn hình + push `suggested_actions` cuối luồng | `{ project_id, route, mode, message, context, project_state, history }` $\rightarrow$ `text/event-stream` (`chunk`, `actions`, `done`, `error`) |
 | `POST /api/coach/chat/audio` | Tiếp nhận file/mic WAV đính kèm (`<= 10 MB`, > 10 MB trả `413`) cho Gemini Multimodal hoặc Java DSP Telemetry | Multipart (`project_id`, `message`, `mode`, `route`, `file`) $\rightarrow$ `reply`, `provider`, `suggested_actions[]` |
 
@@ -131,8 +133,8 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 | :--- | :--- | :--- |
 | `GET /api/projects` | Lấy danh sách dự án từ Redis có **phân trang & lọc** | Query: `?page=1&limit=12&search=&genre=` $\rightarrow$ `{ items, total, page, total_pages }` |
 | `GET /api/projects/{id}` | Lấy chi tiết 1 `ProjectState` theo ID | `ProjectState JSON` |
-| `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` (gồm `low_db`, `mid_db`, `high_db`, `reverb_send`, `delay_send` trên từng track) | Body: `ProjectState JSON` |
-| `POST /api/projects/{id}/undo` | Khôi phục snapshot trước đó từ Undo stack (20 bước) | `ProjectState JSON` |
+| `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` (gồm `low_db`, `mid_db`, `high_db`, `reverb_send`, `delay_send`, `automation` trên từng track) | Body: `ProjectState JSON` |
+| `POST /api/projects/{id}/undo` | Khôi phục snapshot trước đó từ Undo stack (**50 bước**) | `ProjectState JSON` |
 | `DELETE /api/projects/{id}` | Xóa hẳn Project khỏi Redis/In-Memory Store | `{ status: "deleted", project_id }` |
 | `POST /api/projects/{id}/export/aimusic` | Đóng gói dự án thành file nhẹ `.aimusic` | Trả về binary stream `.aimusic` |
 | `POST /api/projects/import` | Nạp file `.aimusic` vào Redis & Studio (mặc định UI `overwrite=false` chống ghi đè, kiểm tra Zip Bomb & path traversal) | Form-data `.aimusic` + `overwrite` $\rightarrow$ `ProjectState` |
@@ -144,13 +146,15 @@ Spring Boot (`AudioWorkerClient.java`) gọi các endpoint nội bộ sau trên 
 
 | Method & Endpoint | Chức năng DSP nội bộ |
 | :--- | :--- |
-| `GET /health` | Trả trạng thái `audio-worker`, `ffmpeg_available`, `fluidsynth_available`, `soundfont_available` |
+| `GET /health` | Trả trạng thái `audio-worker`, `ffmpeg_available`, `fluidsynth_available`, `soundfont_available`, `custom_soundfont_active` |
 | `POST /internal/audio/denoise` | Lọc ồn (`noisereduce`), auto-trim khoảng lặng, kiểm tra ngưỡng ồn/clipping |
 | `POST /internal/audio/analyze` | Trích xuất BPM (`40–220`), Key/Scale, chuỗi `raw_melody_midi` |
 | `POST /internal/audio/autotune` | Chỉnh phô theo `key`, `scale`, `retune_speed_ms`, `humanize`, `mix_percent` |
-| `POST /internal/audio/render` | Tổng hợp MIDI + Vocal thành audio mix qua `FluidSynth` / built-in synth |
+| `POST /internal/audio/render` | Tổng hợp MIDI + Vocal thành audio mix qua `FluidSynth` (Default / Custom `.sf2`) / built-in synth |
 | `POST /internal/audio/export` | Render `wav` / `mp3` / `stems` (`.zip`) với **Master Limiter $\le -1.0\text{ dBFS}$** |
 | `POST /internal/audio/overdub-fit-check` | Phân tích `timing_offset_ms`, `pitch_issues`, `gain_suggestion` cho clip thu đè |
+| `POST /internal/audio/separate-stems` | Tách stem `vocal.wav` + `beat.wav` qua `librosa` HPSS / Mid-Side / Bandpass |
+| `POST /internal/audio/soundfont` | Nạp & xác thực SoundFont `.sf2` (`RIFF`/`sfbk`, `<= 50 MB`) cho `FluidSynth` |
 
 ---
 

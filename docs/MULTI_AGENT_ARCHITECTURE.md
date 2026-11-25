@@ -1,7 +1,7 @@
 # Tài liệu Kiến trúc Multi-Agent & Thiết kế Kỹ thuật
 ## Dự án: AI Music Studio (Hum-to-Music + Auto-Tune + DAW-lite)
 
-- **Phiên bản:** 2.0 (Phase 1–5 Complete + FL Playlist + Multi-Mode Chatbot + Roadmap Phase 6–8)
+- **Phiên bản:** 2.2 (Phase 1–7 Complete: 24-Tool Copilot, Stem Separation, Multi-Param Automation, Pitch Curve, WebMIDI, Custom `.sf2` + Roadmap Phase 8)
 - **Liên kết:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 - **Phạm vi:** Ứng dụng **Single-User Local App** (cá nhân, không phân quyền), tối ưu lưu trữ nhẹ ổ đĩa bằng Redis + MIDI JSON.
 - **Mục tiêu tài liệu:** Định nghĩa cách các AI Agent phối hợp với nhau, cấu trúc dữ liệu dùng chung (`Shared State`), cơ chế kết hợp **MIDI + Audio Clips**, kiến trúc tách lớp Java Spring Boot + Python DSP Worker, kiến trúc lưu trữ nhẹ đĩa, và lộ trình triển khai từ MVP đến bản hoàn chỉnh.
@@ -281,22 +281,24 @@ Vì ứng dụng chạy cho **cá nhân trên máy có dung lượng đĩa hạn
 
 * **Phase 6A — Global Full-Spectrum AI Copilot, SSE Streaming, Mini-RAG & Multimodal Audio (DONE):**
   * **Global Copilot 5 Trang:** Nhúng `AiCoachChatDrawer` vào `AppShell.tsx` + `ProjectProvider.tsx`, thêm store **`chat_threads` (`IndexedDB v2`)** lưu hội thoại theo từng project/workspace qua F5 reload.
-  * **22 Native Tool Actions + Holistic Audit + Apply All + 1-Click Revert:** Hỗ trợ `LlmAdapter.generateWithTools` (Gemini `functionDeclarations` + OpenAI `tools` lowercase schema), điều khiển trọn vẹn cả ứng dụng từ điều hướng 5 trang (`navigate_route`), chuyển Quick/Pro (`switch_studio_mode`), phát/dừng/Undo (`transport_control`), thêm/khóa track & đổi nhạc cụ (`manage_track`), nạp điệu trống (`apply_drum_groove`), Mastering LUFS (`set_mastering`), EQ/FX Mixer (`set_track_mix`), Structure/Nhịp/Dynamics (`edit_structure_and_dynamics`), sửa lời (`update_lyrics_lines`), tới khởi tạo Starter Template (`create_template`), Export (`export_project`) & Dọn Cache (`clear_cache`) kèm nút **`Hoàn tác`**.
+  * **24 Native Tool Actions + Holistic Audit + Apply All + 1-Click Revert:** Hỗ trợ `LlmAdapter.generateWithTools` (Gemini `functionDeclarations` + OpenAI `tools` lowercase schema), điều khiển trọn vẹn cả ứng dụng từ điều hướng 5 trang (`navigate_route`), chuyển Quick/Pro (`switch_studio_mode`), phát/dừng/Undo (`transport_control`), thêm/khóa track & đổi nhạc cụ (`manage_track`), tách Stem (`separate_stems`), vẽ đường Automation (`set_automation`), nạp điệu trống (`apply_drum_groove`), Mastering LUFS (`set_mastering`), EQ/FX Mixer (`set_track_mix`), Structure/Nhịp/Dynamics (`edit_structure_and_dynamics`), sửa lời (`update_lyrics_lines`), tới khởi tạo Starter Template (`create_template`), Export (`export_project`) & Dọn Cache (`clear_cache`) kèm nút **`Hoàn tác`**.
   * **SSE Streaming & Multimodal Audio/Voice:** Thêm `POST /api/coach/chat/stream` (`text/event-stream`: `chunk`/`actions`/`done`), `POST /api/coach/chat/audio` (`<= 10 MB`, `413` guard), Web Speech `vi-VN` / ghi âm WAV, toggle **`Gửi kèm Vocal để AI nghe`**, và `DawPlaybook.java` Mini-RAG + Java DSP Telemetry fallback.
+* **Phase 6B — Stem Separation, Multi-Param Web Audio Automation & A/B Chord Audition (DONE):**
+  * **Stem Separation (Tách Beat/Vocal):** Module `audio-worker/app/services/stems.py` (`separate_vocal_and_beat` dùng `librosa` HPSS + Mid-Side + Bandpass & Peak Limiter `-1.0 dBFS`) kèm `JavaAudioFallbackService.separateStemsFallback` và endpoint `POST /api/studio/separate-stems` (`POST /internal/audio/separate-stems`).
+  * **Multi-Param Automation Lane & Web Audio Ramping:** Mở rộng `TrackState.automation` (`volume`, `pan`, `filter` lowpass `380–20000 Hz`, `reverb`) kèm UI switcher `DYN | VOL | PAN | FILT | REVERB` trong `TimelineEditor.tsx`, phát realtime qua Web Audio `AudioParam.linearRampToValueAtTime` (`player.ts`) và tool `set_automation`.
+  * **A/B Chord Progression Audition:** Bổ sung `engine.auditionChordProgression` (`player.ts`) cùng nút **`Nghe thử`** trực tiếp trong `StudioPage.tsx` và `AiCoachChatDrawer.tsx`.
+* **Phase 7 — Visual Pitch Curve Editor, WebMIDI, Custom `.sf2` SoundFont & Undo 50 Bước (DONE):**
+  * **Visual Pitch Curve Editor (`PitchCurveEditor.tsx`):** Kéo chỉnh độ lệch cao độ bán âm (semitone nudge) và bám scale (scale snap) cho từng nốt/âm tiết ngay trong tab **`Auto-Tune DSP`** trên Studio.
+  * **Hardware WebMIDI Keyboard (`webmidi.ts`):** Hook `useWebMidi` kết nối bàn phím MIDI vật lý qua `navigator.requestMIDIAccess`, hiển thị badge **`WebMIDI`** và cho phép ghi nốt trực tiếp trong `PianoRollEditor.tsx`.
+  * **Custom `.sf2` SoundFont Upload:** Hỗ trợ nạp SoundFont `.sf2` (`<= 50 MB`, xác thực header `RIFF`/`sfbk`) qua `SettingsPage.tsx` -> `POST /api/audio/soundfont` -> `POST /internal/audio/soundfont` (`renderer.py`), đồng thời phản ánh trạng thái `custom_soundfont_active` qua `/api/health`.
+  * **Undo 50 Bước (`ProjectStateStore.java` & `StudioPage.tsx`):** Tăng giới hạn Undo stack lên **`DEFAULT_MAX_UNDO = 50`** trên backend và `slice(-49)` trên Studio frontend.
 
 ---
 
-## 9. Định hướng Các Phase Tiếp Theo (Roadmap Phase 6B–8)
+## 9. Định hướng Phase Tiếp Theo (Roadmap Phase 8 — Cloud Multi-User SaaS)
 
-Sau khi hoàn thiện Phase 1–6A, lộ trình mở rộng tiếp theo tập trung vào Audio DSP & Cloud Multi-User:
+Sau khi hoàn thiện trọn vẹn Phase 1–7 cho ứng dụng Single-User Local Pro DAW + Copilot, lộ trình triển khai mở rộng lên Cloud SaaS tập trung vào **Phase 8**:
 
-* **Phase 6B — Stem Separation & Multi-Param Web Audio Automation:**
-  * **Stem Separation (Tách Beat/Vocal):** Tích hợp tách vocal/accompaniment gọn nhẹ trong `audio-worker` khi người dùng upload file ghép sẵn.
-  * **Automation Lane Đa Tham Số & A/B Preview:** Mở rộng làn `Dynamics Envelope` trên Playlist để vẽ & tự động hóa `Volume`, `Pan`, `Filter Cutoff`, và `Reverb Send` phát trực tiếp qua Web Audio (`AudioParam.linearRampToValueAtTime`), kèm nghe thử nhanh phương án hợp âm trước khi áp dụng.
-* **Phase 7 — Visual Pitch Editor, WebMIDI & Custom SoundFont:**
-  * **Visual Pitch Curve Editor (Melodyne-lite):** Cho phép kéo chỉnh cao độ/vibrato từng âm tiết vocal trực tiếp trên Piano Roll kết hợp Formant shift.
-  * **Hardware MIDI & Low-Latency Recording:** Hỗ trợ cắm MIDI Keyboard ngoài (`navigator.requestMIDIAccess`), `AudioWorklet` thu mic độ trễ thấp, và Undo nén delta lên tới 50 bước.
-  * **Custom SoundFont Upload:** Cho phép nạp SoundFont `.sf2` tùy chọn vào `audio-worker`.
 * **Phase 8 — Multi-User Cloud Workspace & Publishing (Web SaaS):**
   * **Auth & Cloud Storage:** Bổ sung OAuth2/JWT, PostgreSQL cho metadata dự án, và Object Storage (S3/MinIO) lưu `.aimusic` + stems bền vững đa thiết bị.
   * **Quản trị Quota & Chia sẻ Cộng đồng:** Rate limiting theo người dùng, HTTPS reverse proxy, chia sẻ link demo hoặc xuất bản Master (`-14 LUFS`, WAV/MP3/FLAC kèm ID3 tags).

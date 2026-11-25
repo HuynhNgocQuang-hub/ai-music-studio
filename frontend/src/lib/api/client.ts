@@ -412,6 +412,49 @@ export async function autoTrimVocal(projectId: string): Promise<AutoTrimVocalRes
   };
 }
 
+export interface SeparateStemsResponse {
+  project_id: string;
+  vocal_ref: string;
+  beat_ref: string;
+  method: string;
+  duration_sec?: number;
+  summary: string;
+  project_state: ProjectState;
+}
+
+export async function separateStems(
+  projectId: string,
+  sourceRef?: string
+): Promise<SeparateStemsResponse> {
+  const raw = await requestJson<SeparateStemsResponse>('/api/studio/separate-stems', {
+    method: 'POST',
+    body: JSON.stringify({
+      project_id: projectId,
+      ...(sourceRef ? { source_ref: sourceRef } : {}),
+    }),
+  });
+  return {
+    ...raw,
+    project_state: hydrateProjectTitle(raw.project_state),
+  };
+}
+
+export interface SoundFontUploadResponse {
+  status: string;
+  filename: string;
+  size_bytes: number;
+  active_on_worker: boolean;
+}
+
+export async function uploadSoundFont(file: File): Promise<SoundFontUploadResponse> {
+  const formData = new FormData();
+  formData.append('file', file, file.name);
+  return requestJson<SoundFontUploadResponse>('/api/audio/soundfont', {
+    method: 'POST',
+    body: formData,
+  });
+}
+
 export async function autoMixProject(projectId: string): Promise<AutoMixResponse> {
   const raw = await requestJson<AutoMixResponse | (ProjectState & { summary?: string; mix_notes?: string[] })>(
     '/api/studio/auto-mix',

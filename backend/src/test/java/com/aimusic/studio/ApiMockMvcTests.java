@@ -762,7 +762,28 @@ class ApiMockMvcTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.suggested_actions.length()").value(greaterThanOrEqualTo(6)));
 
-        // 5. Oversized chat audio (> 10 MB) returns 413 Payload Too Large
+        // 5. Phase 6B/7: Separate Stems + SoundFont guard + Automation persist
+        byte[] vocalUpload = makeMelodyWav(3.2, 44100);
+        MockMultipartFile stemUpload = new MockMultipartFile("file", "vocal.wav", "audio/wav", vocalUpload);
+        mockMvc.perform(multipart("/api/audio/upload")
+                        .file(stemUpload)
+                        .param("project_id", pid)
+                        .param("title", "Stem Song"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/studio/separate-stems")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.vocal_ref").value(containsString("mem://stems/")))
+                .andExpect(jsonPath("$.beat_ref").value(containsString("mem://stems/")))
+                .andExpect(jsonPath("$.project_state.tracks.texture.clips[0].id").value("clip_stem_beat"));
+
+        MockMultipartFile badSf2 = new MockMultipartFile("file", "bad.sf2", "application/octet-stream", "NOT_SF2".getBytes());
+        mockMvc.perform(multipart("/api/audio/soundfont").file(badSf2))
+                .andExpect(status().isBadRequest());
+
+        // 6. Oversized chat audio (> 10 MB) returns 413 Payload Too Large
         byte[] oversized = new byte[10 * 1024 * 1024 + 64];
         MockMultipartFile bigFile = new MockMultipartFile("file", "huge.wav", "audio/wav", oversized);
         mockMvc.perform(multipart("/api/coach/chat/audio")
