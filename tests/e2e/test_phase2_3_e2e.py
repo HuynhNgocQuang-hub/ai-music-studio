@@ -1197,10 +1197,19 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
     assert pub_res.status_code == 200, pub_res.text
     slug = pub_res.json()["share_slug"]
     assert slug
+    assert api_client.get("/api/projects?scope=public").json().get("total", 0) >= 1
+    assert api_client.get("/api/share?search=E2E&page=1&limit=12").status_code == 200
     assert api_client.get(f"/api/share/{slug}").status_code == 200
     stream_res = api_client.get(f"/api/share/{slug}/audio")
     assert stream_res.status_code == 200 and stream_res.content[:4] == b"RIFF"
     assert api_client.delete(f"/api/projects/{pid}/publish").status_code == 200
     assert api_client.get(f"/api/share/{slug}").status_code == 404
 
-    api_client.delete(f"/api/projects/{pid}")
+    pub_res2 = api_client.post(
+        f"/api/projects/{pid}/publish",
+        json={"format": "wav", "artist": "E2E Producer"},
+    )
+    assert pub_res2.status_code == 200, pub_res2.text
+    slug2 = pub_res2.json()["share_slug"]
+    assert api_client.delete(f"/api/projects/{pid}").status_code == 200
+    assert api_client.get(f"/api/share/{slug2}").status_code == 404

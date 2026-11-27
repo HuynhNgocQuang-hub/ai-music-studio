@@ -4,9 +4,11 @@ import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
 import com.aimusic.studio.cloud.AuthContextHolder;
 import com.aimusic.studio.cloud.CloudDatabaseService;
+import com.aimusic.studio.cloud.CloudProjectAccessService;
 import com.aimusic.studio.cloud.ObjectStorageService;
 import com.aimusic.studio.cloud.QuotaRateLimitService;
 import com.aimusic.studio.config.AppProperties;
+import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.ProjectState;
 import com.aimusic.studio.model.TrackState;
 import com.aimusic.studio.model.dto.ExportAudioRequest;
@@ -32,14 +34,15 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 @RestController
 @RequestMapping("/api/projects")
@@ -53,6 +56,7 @@ public class ProjectsController {
     private final ObjectStorageService objectStorage;
     private final QuotaRateLimitService quotaService;
     private final ObjectMapper objectMapper;
+    private final CloudProjectAccessService projectAccess;
 
     public ProjectsController(
             ProjectStateStore store,
@@ -60,7 +64,7 @@ public class ProjectsController {
             JavaAudioFallbackService audioFallback,
             AppProperties properties
     ) {
-        this(store, audioWorkerClient, audioFallback, properties, null, null, null, new ObjectMapper());
+        this(store, audioWorkerClient, audioFallback, properties, null, null, null, new ObjectMapper(), null);
     }
 
     @Autowired
@@ -72,7 +76,8 @@ public class ProjectsController {
             @Autowired(required = false) CloudDatabaseService cloudDb,
             @Autowired(required = false) ObjectStorageService objectStorage,
             @Autowired(required = false) QuotaRateLimitService quotaService,
-            @Autowired(required = false) ObjectMapper objectMapper
+            @Autowired(required = false) ObjectMapper objectMapper,
+            @Autowired(required = false) CloudProjectAccessService projectAccess
     ) {
         this.store = store;
         this.audioWorkerClient = audioWorkerClient;
@@ -82,6 +87,8 @@ public class ProjectsController {
         this.objectStorage = objectStorage;
         this.quotaService = quotaService;
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
+        this.projectAccess = projectAccess != null ? projectAccess
+                : new CloudProjectAccessService(store, cloudDb, this.objectMapper);
     }
 
     @GetMapping
@@ -151,54 +158,23 @@ public class ProjectsController {
 
     @GetMapping("/{projectId}")
     public ProjectState getProject(@PathVariable("projectId") String projectId) {
-        Optional<ProjectState> found = store.getProject(projectId);
-        if (found.isEmpty() && cloudDb != null) {
-            found = cloudDb.findProject(projectId).flatMap(rec -> {
-                try {
-                    ProjectState p = objectMapper.readValue(rec.stateJson(), ProjectState.class);
-                    return Optional.of(store.saveProject(p));
-                } catch (Exception ex) {
-                    return Optional.empty();
-                }
-            });
-        }
-        ProjectState state = found.orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
-                "Project '" + projectId + "' not found."));
-        String callerOwner = AuthContextHolder.getOwnerId();
-        String owner = state.getOwnerId();
-        if (owner != null && owner.startsWith("u_") && !"public".equalsIgnoreCase(state.getVisibility())
-                && !owner.equals(callerOwner)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                    "This private cloud project belongs to another creator.");
-        }
+        ProjectState state = projectAccess.findOrRehydrate(projectId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Project '" + projectId + "' not found."));
+        projectAccess.requireReadAccess(state, "This private cloud project belongs to another creator.");
         return state;
     }
 
     @PutMapping("/{projectId}/sync")
     public ProjectState syncProject(@PathVariable("projectId") String projectId, @RequestBody ProjectState payload) {
-        Optional<ProjectState> existing = store.getProject(projectId);
-        String callerOwner = AuthContextHolder.getOwnerId();
+        Optional<ProjectState> existing = projectAccess.findOrRehydrate(projectId);
         if (existing.isPresent()) {
-            String prevOwner = existing.get().getOwnerId();
-            if (prevOwner != null && prevOwner.startsWith("u_") && !prevOwner.equals(callerOwner)) {
-                throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                        "Cannot overwrite another creator's project.");
-            }
+            projectAccess.requireWriteAccess(existing.get(), "Cannot overwrite another creator's project.");
             store.pushUndo(projectId, existing.get());
         }
 
         payload.setProjectId(projectId);
-        if (payload.getOwnerId() == null || payload.getOwnerId().isBlank()
-                || ("guest".equals(payload.getOwnerId()) && callerOwner.startsWith("u_"))) {
-            payload.setOwnerId(callerOwner);
-        }
-        if (payload.getVisibility() == null || payload.getVisibility().isBlank()) {
-            existing.ifPresent(prev -> {
-                payload.setVisibility(prev.getVisibility());
-                payload.setShareSlug(prev.getShareSlug());
-                payload.setPublishedAt(prev.getPublishedAt());
-            });
-        }
+        projectAccess.bindOwnerOnSave(payload, existing);
         if (payload.getConfig() != null && (payload.getConfig().getTitle() == null || payload.getConfig().getTitle().isBlank())
                 && payload.getTitle() != null && !payload.getTitle().isBlank()) {
             payload.getConfig().setTitle(payload.getTitle());
@@ -206,37 +182,62 @@ public class ProjectsController {
         int nextVersion = existing.map(p -> p.getVersion() + 1).orElse(Math.max(1, payload.getVersion()));
         payload.setVersion(nextVersion);
         ProjectState saved = store.saveProject(payload);
-        mirrorProjectToCloud(saved);
+        projectAccess.mirrorToCloud(saved, null);
         return saved;
     }
 
     @PostMapping("/{projectId}/undo")
     public ProjectState undoProject(@PathVariable("projectId") String projectId) {
-        return store.popUndo(projectId)
+        projectAccess.findOrRehydrate(projectId).ifPresent(p ->
+                projectAccess.requireWriteAccess(p, "Cannot undo changes on another creator's project."));
+        ProjectState restored = store.popUndo(projectId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "No undo history available for this project."));
+        projectAccess.mirrorToCloud(restored, null);
+        return restored;
     }
 
     @DeleteMapping("/{projectId}")
     public Map<String, String> deleteProject(@PathVariable("projectId") String projectId) {
-        Optional<ProjectState> existing = store.getProject(projectId);
-        String callerOwner = AuthContextHolder.getOwnerId();
+        Optional<ProjectState> existing = projectAccess.findOrRehydrate(projectId);
+        Optional<CloudDatabaseService.CloudProjectRecord> cloudRec = projectAccess.findCloudRecord(projectId);
         if (existing.isPresent()) {
-            String owner = existing.get().getOwnerId();
-            if (owner != null && owner.startsWith("u_") && !owner.equals(callerOwner)) {
-                throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                        "Cannot delete another creator's project.");
+            projectAccess.requireWriteAccess(existing.get(), "Cannot delete another creator's project.");
+        } else if (cloudRec.isPresent()) {
+            String recOwner = cloudRec.get().ownerId();
+            String callerOwner = AuthContextHolder.getOwnerId();
+            if (recOwner != null && recOwner.startsWith("u_") && !recOwner.equals(callerOwner)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot delete another creator's project.");
             }
         }
+
         boolean deleted = store.deleteProject(projectId);
+        Set<String> audioRefsToDelete = new LinkedHashSet<>();
+        existing.ifPresent(p -> audioRefsToDelete.addAll(store.collectAudioRefs(p)));
+        for (String ref : audioRefsToDelete) {
+            store.deleteAudioBytes(ref);
+        }
+
         if (cloudDb != null) {
-            if (cloudDb.findProject(projectId).isPresent()) {
+            cloudDb.findReleaseByProjectId(projectId).ifPresent(rel -> {
+                if (objectStorage != null) {
+                    objectStorage.deleteObject(rel.masterStorageKey());
+                }
+                cloudDb.deleteReleaseByProjectId(projectId);
+            });
+            if (cloudRec.isPresent()) {
                 cloudDb.deleteProject(projectId);
                 deleted = true;
             }
         }
         if (objectStorage != null) {
-            objectStorage.deleteObject("projects/" + callerOwner + "/" + projectId + ".aimusic");
+            String ownerPrefix = existing.map(ProjectState::getOwnerId)
+                    .or(() -> cloudRec.map(CloudDatabaseService.CloudProjectRecord::ownerId))
+                    .orElse(AuthContextHolder.getOwnerId());
+            objectStorage.deleteObject("projects/" + ownerPrefix + "/" + projectId + ".aimusic");
+            cloudRec.map(CloudDatabaseService.CloudProjectRecord::storageKey)
+                    .filter(k -> k != null && !k.isBlank())
+                    .ifPresent(objectStorage::deleteObject);
         }
         if (!deleted) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Project '" + projectId + "' not found.");
@@ -330,34 +331,15 @@ public class ProjectsController {
                     "Uploaded .aimusic archive exceeds maximum allowed size.");
         }
         ProjectState imported = audioFallback.importAimusicBundle(file.getBytes(), store, overwrite);
-        String callerOwner = AuthContextHolder.getOwnerId();
-        if (imported.getOwnerId() == null || imported.getOwnerId().isBlank()
-                || ("guest".equals(imported.getOwnerId()) && callerOwner.startsWith("u_"))) {
-            imported.setOwnerId(callerOwner);
-            store.saveProject(imported);
+        Optional<ProjectState> existing = projectAccess.findOrRehydrate(imported.getProjectId());
+        if (existing.isPresent()) {
+            projectAccess.requireWriteAccess(existing.get(),
+                    "Cannot overwrite another creator's existing project during .aimusic import.");
         }
-        mirrorProjectToCloud(imported);
+        projectAccess.bindOwnerOnSave(imported, existing);
+        store.saveProject(imported);
+        projectAccess.mirrorToCloud(imported, null);
         return imported;
-    }
-
-    private void mirrorProjectToCloud(ProjectState p) {
-        if (cloudDb == null || p == null || p.getProjectId() == null) return;
-        try {
-            String json = objectMapper.writeValueAsString(p);
-            cloudDb.upsertProject(new CloudDatabaseService.CloudProjectRecord(
-                    p.getProjectId(),
-                    p.getOwnerId() != null ? p.getOwnerId() : "guest",
-                    p.getTitle() != null ? p.getTitle() : "Untitled Project",
-                    p.getConfig() != null && p.getConfig().getGenre() != null ? p.getConfig().getGenre() : "Pop",
-                    p.getVisibility() != null ? p.getVisibility() : "private",
-                    p.getShareSlug(),
-                    p.getPublishedAt(),
-                    null,
-                    p.getUpdatedAt() != null ? p.getUpdatedAt() : Instant.now().toString(),
-                    json
-            ));
-        } catch (Exception ignored) {
-        }
     }
 
     private static boolean matchesFilter(ProjectState p, String search, String genre, String keyFilter) {

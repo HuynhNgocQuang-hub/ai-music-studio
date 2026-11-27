@@ -1,5 +1,6 @@
 package com.aimusic.studio.store;
 
+import com.aimusic.studio.cloud.ObjectStorageService;
 import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.ProjectState;
@@ -53,6 +54,7 @@ public class ProjectStateStore {
     private final long projectTtlSeconds;
     private final long audioTtlSeconds;
     private final RedisTemplate<String, byte[]> redisTemplate;
+    private final ObjectStorageService objectStorage;
     private final AtomicBoolean redisAvailable = new AtomicBoolean(false);
     private final AtomicLong lastRedisFailureNanos = new AtomicLong(0L);
     private volatile long redisRetryIntervalNanos = TimeUnit.SECONDS.toNanos(5);
@@ -64,13 +66,23 @@ public class ProjectStateStore {
     public ProjectStateStore(
             ObjectMapper objectMapper,
             AppProperties properties,
-            @Autowired(required = false) RedisTemplate<String, byte[]> redisTemplate
+            @Autowired(required = false) RedisTemplate<String, byte[]> redisTemplate,
+            @Autowired(required = false) ObjectStorageService objectStorage
     ) {
         this.objectMapper = objectMapper;
         this.projectTtlSeconds = properties.getProjectTtlSeconds();
         this.audioTtlSeconds = properties.getAudioTtlSeconds();
         this.redisTemplate = redisTemplate;
+        this.objectStorage = objectStorage;
         probeRedis();
+    }
+
+    public ProjectStateStore(
+            ObjectMapper objectMapper,
+            AppProperties properties,
+            RedisTemplate<String, byte[]> redisTemplate
+    ) {
+        this(objectMapper, properties, redisTemplate, null);
     }
 
     public ProjectStateStore(ObjectMapper objectMapper, long projectTtlSeconds, long audioTtlSeconds, boolean forceMemory) {
@@ -78,6 +90,7 @@ public class ProjectStateStore {
         this.projectTtlSeconds = projectTtlSeconds;
         this.audioTtlSeconds = audioTtlSeconds;
         this.redisTemplate = null;
+        this.objectStorage = null;
         this.redisAvailable.set(false);
     }
 
@@ -403,6 +416,12 @@ public class ProjectStateStore {
     public String saveAudioBytes(String ref, byte[] data, Long ttlSeconds) {
         String key = "audio:" + ref;
         long exp = ttlSeconds != null ? ttlSeconds : audioTtlSeconds;
+        if (objectStorage != null && data != null) {
+            String objKey = toObjectStorageKey(ref);
+            if (objKey != null) {
+                objectStorage.putObject(objKey, data, "audio/wav");
+            }
+        }
         if (shouldUseRedis()) {
             try {
                 if (exp > 0) {
@@ -439,30 +458,83 @@ public class ProjectStateStore {
         if (data == null) {
             data = memGet(key);
         }
+        if (data == null && objectStorage != null) {
+            String objKey = toObjectStorageKey(ref);
+            if (objKey != null) {
+                Optional<byte[]> s3Data = objectStorage.getObject(objKey);
+                if (s3Data.isPresent()) {
+                    data = s3Data.get();
+                    // Re-warm Redis / memory cache after TTL expiry or restart
+                    warmAudioCacheOnly(ref, data);
+                }
+            }
+        }
         return Optional.ofNullable(data);
     }
 
-    public Map<String, byte[]> collectAudioAssets(ProjectState project) {
-        Map<String, byte[]> map = new LinkedHashMap<>();
-        if (project == null) return map;
+    private void warmAudioCacheOnly(String ref, byte[] data) {
+        String key = "audio:" + ref;
+        if (shouldUseRedis()) {
+            try {
+                if (audioTtlSeconds > 0) {
+                    redisTemplate.opsForValue().set(key, data, Duration.ofSeconds(audioTtlSeconds));
+                } else {
+                    redisTemplate.opsForValue().set(key, data);
+                }
+                memSet(key, data, audioTtlSeconds > 0 ? Math.min(audioTtlSeconds, 30L) : 30L);
+                markRedisUp();
+                return;
+            } catch (Exception ex) {
+                markRedisDown(ex);
+            }
+        }
+        memSet(key, data, audioTtlSeconds);
+    }
+
+    public Set<String> collectAudioRefs(ProjectState project) {
+        Set<String> refs = new LinkedHashSet<>();
+        if (project == null) return refs;
         if (project.getAudioAssets() != null) {
-            putAudioIfPresent(map, project.getAudioAssets().getRawInputRef());
-            putAudioIfPresent(map, project.getAudioAssets().getDryDenoisedRef());
-            putAudioIfPresent(map, project.getAudioAssets().getTunedVocalRef());
-            putAudioIfPresent(map, project.getAudioAssets().getRenderedMixRef());
-            putAudioIfPresent(map, project.getAudioAssets().getAccompanimentRef());
-            putAudioIfPresent(map, project.getAudioAssets().getPreserveMixRef());
-            putAudioIfPresent(map, project.getAudioAssets().getEnhanceMixRef());
+            addNonBlankRef(refs, project.getAudioAssets().getRawInputRef());
+            addNonBlankRef(refs, project.getAudioAssets().getDryDenoisedRef());
+            addNonBlankRef(refs, project.getAudioAssets().getTunedVocalRef());
+            addNonBlankRef(refs, project.getAudioAssets().getRenderedMixRef());
+            addNonBlankRef(refs, project.getAudioAssets().getAccompanimentRef());
+            addNonBlankRef(refs, project.getAudioAssets().getPreserveMixRef());
+            addNonBlankRef(refs, project.getAudioAssets().getEnhanceMixRef());
         }
         if (project.getTracks() != null) {
             for (TrackState track : project.getTracks().values()) {
                 if (track == null || track.getClips() == null) continue;
                 for (AudioClip clip : track.getClips()) {
                     if (clip != null) {
-                        putAudioIfPresent(map, clip.getSource());
+                        addNonBlankRef(refs, clip.getSource());
                     }
                 }
             }
+        }
+        return refs;
+    }
+
+    private static void addNonBlankRef(Set<String> refs, String ref) {
+        if (ref != null && !ref.isBlank() && ref.startsWith("mem://")) {
+            refs.add(ref);
+        }
+    }
+
+    private static String toObjectStorageKey(String ref) {
+        if (ref == null || !ref.startsWith("mem://") || ref.contains("..")) {
+            return null;
+        }
+        String suffix = ref.substring("mem://".length()).replaceAll("[^A-Za-z0-9_./-]", "_");
+        return suffix.isBlank() ? null : "assets/" + suffix;
+    }
+
+    public Map<String, byte[]> collectAudioAssets(ProjectState project) {
+        Map<String, byte[]> map = new LinkedHashMap<>();
+        if (project == null) return map;
+        for (String ref : collectAudioRefs(project)) {
+            putAudioIfPresent(map, ref);
         }
         return map;
     }
@@ -474,6 +546,7 @@ public class ProjectStateStore {
     }
 
     public boolean deleteAudioBytes(String ref) {
+        if (ref == null || ref.isBlank()) return false;
         String key = "audio:" + ref;
         boolean deleted = memDelete(key);
         if (shouldUseRedis()) {
@@ -483,6 +556,12 @@ public class ProjectStateStore {
                 deleted = deleted || Boolean.TRUE.equals(res);
             } catch (Exception ex) {
                 markRedisDown(ex);
+            }
+        }
+        if (objectStorage != null) {
+            String objKey = toObjectStorageKey(ref);
+            if (objKey != null) {
+                objectStorage.deleteObject(objKey);
             }
         }
         return deleted;

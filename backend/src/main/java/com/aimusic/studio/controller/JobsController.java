@@ -3,6 +3,7 @@ package com.aimusic.studio.controller;
 import com.aimusic.studio.agents.AgentOrchestrator;
 import com.aimusic.studio.agents.LlmContextHolder;
 import com.aimusic.studio.cloud.AuthContextHolder;
+import com.aimusic.studio.cloud.CloudProjectAccessService;
 import com.aimusic.studio.cloud.QuotaRateLimitService;
 import com.aimusic.studio.model.ProjectState;
 import com.aimusic.studio.model.dto.JobGenerateRequest;
@@ -26,6 +27,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 @RestController
@@ -37,15 +39,28 @@ public class JobsController {
     private final AgentOrchestrator orchestrator;
     private final ProjectStateStore store;
     private final QuotaRateLimitService quotaService;
+    private final CloudProjectAccessService projectAccess;
 
     public JobsController(
             AgentOrchestrator orchestrator,
             ProjectStateStore store,
             @Autowired(required = false) QuotaRateLimitService quotaService
     ) {
+        this(orchestrator, store, quotaService, null);
+    }
+
+    @Autowired
+    public JobsController(
+            AgentOrchestrator orchestrator,
+            ProjectStateStore store,
+            @Autowired(required = false) QuotaRateLimitService quotaService,
+            @Autowired(required = false) CloudProjectAccessService projectAccess
+    ) {
         this.orchestrator = orchestrator;
         this.store = store;
         this.quotaService = quotaService;
+        this.projectAccess = projectAccess != null ? projectAccess
+                : new CloudProjectAccessService(store, null, null);
     }
 
     @PostMapping("/generate")
@@ -53,8 +68,8 @@ public class JobsController {
         if (req.getProjectId() == null || req.getProjectId().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
         }
-        consumeGenerateQuotaIfEnabled();
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
+        consumeGenerateQuotaIfEnabled();
         LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
         AgentOrchestrator.JobRuntime job = orchestrator.startGenerateJob(state, req.getConfig(), overrides);
         return new JobStartResponse(job.getJobId(), job.getProjectId(), job.getStatus());
@@ -70,8 +85,8 @@ public class JobsController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "target_track must be one of [bass, drums, harmony, lead]");
         }
-        consumeGenerateQuotaIfEnabled();
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
+        consumeGenerateQuotaIfEnabled();
         LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
         AgentOrchestrator.JobRuntime job = orchestrator.startRegenerateTrackJob(state, target, req.getInstrument(), overrides);
         return new JobStartResponse(job.getJobId(), job.getProjectId(), job.getStatus(), target);
@@ -82,8 +97,8 @@ public class JobsController {
         if (req.getProjectId() == null || req.getProjectId().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
         }
-        consumeGenerateQuotaIfEnabled();
         ProjectState state = loadProjectState(req.getProjectId(), req.getProjectState());
+        consumeGenerateQuotaIfEnabled();
         LlmContextHolder.LlmOverrides overrides = LlmContextHolder.extractFromRequest(request);
         AgentOrchestrator.JobRuntime job = orchestrator.startRearrangeJob(
                 state, req.getChords(), req.getSections(), req.getTotalBars(), req.getLockedTracks(), overrides);
@@ -114,10 +129,18 @@ public class JobsController {
     }
 
     private ProjectState loadProjectState(String projectId, ProjectState inlineState) {
+        Optional<ProjectState> existing = projectAccess.findOrRehydrate(projectId);
+        existing.ifPresent(prev -> projectAccess.requireWriteAccess(prev,
+                "You do not have permission to generate or modify another creator's project."));
         if (inlineState != null) {
             inlineState.setProjectId(projectId);
+            projectAccess.bindOwnerOnSave(inlineState, existing);
             return inlineState;
         }
-        return store.getProject(projectId).orElseGet(() -> ProjectState.createDefault(projectId, "Untitled Project"));
+        return existing.orElseGet(() -> {
+            ProjectState created = ProjectState.createDefault(projectId, "Untitled Project");
+            projectAccess.bindOwnerOnSave(created, Optional.empty());
+            return created;
+        });
     }
 }

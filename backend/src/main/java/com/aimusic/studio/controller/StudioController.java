@@ -5,6 +5,9 @@ import com.aimusic.studio.agents.LlmContextHolder;
 import com.aimusic.studio.audio.AudioValidationException;
 import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
+import com.aimusic.studio.cloud.AuthContextHolder;
+import com.aimusic.studio.cloud.CloudProjectAccessService;
+import com.aimusic.studio.cloud.QuotaRateLimitService;
 import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.AudioAssets;
 import com.aimusic.studio.model.AudioClip;
@@ -23,6 +26,7 @@ import com.aimusic.studio.model.dto.OverdubFitCheckResponse;
 import com.aimusic.studio.store.ProjectStateStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -49,6 +53,8 @@ public class StudioController {
     private final AudioWorkerClient audioWorkerClient;
     private final JavaAudioFallbackService audioFallback;
     private final ObjectMapper objectMapper;
+    private final CloudProjectAccessService projectAccess;
+    private final QuotaRateLimitService quotaService;
     private final ExecutorService chatStreamExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "coach-sse-worker");
         t.setDaemon(true);
@@ -62,11 +68,27 @@ public class StudioController {
             JavaAudioFallbackService audioFallback,
             ObjectMapper objectMapper
     ) {
+        this(coachLyricistAgent, store, audioWorkerClient, audioFallback, objectMapper, null, null);
+    }
+
+    @Autowired
+    public StudioController(
+            CoachLyricistAgent coachLyricistAgent,
+            ProjectStateStore store,
+            AudioWorkerClient audioWorkerClient,
+            JavaAudioFallbackService audioFallback,
+            ObjectMapper objectMapper,
+            @Autowired(required = false) CloudProjectAccessService projectAccess,
+            @Autowired(required = false) QuotaRateLimitService quotaService
+    ) {
         this.coachLyricistAgent = coachLyricistAgent;
         this.store = store;
         this.audioWorkerClient = audioWorkerClient;
         this.audioFallback = audioFallback;
         this.objectMapper = objectMapper;
+        this.projectAccess = projectAccess != null ? projectAccess
+                : new CloudProjectAccessService(store, null, objectMapper);
+        this.quotaService = quotaService;
     }
 
     @PostMapping("/api/lyrics/suggest")
@@ -235,6 +257,10 @@ public class StudioController {
         }
 
         ProjectState state = loadProjectState(projectId, null);
+        projectAccess.requireWriteAccess(state, "Cannot upload overdub audio to another creator's project.");
+        if (quotaService != null) {
+            quotaService.addStorageBytes(AuthContextHolder.getActorQuotaKey(), audioBytes.length);
+        }
         double bpm = state.getAnalysis() != null && state.getAnalysis().getBpm() > 0
                 ? state.getAnalysis().getBpm() : 100.0;
         String key = state.getAnalysis() != null ? state.getAnalysis().getDetectedKey() : "C";
@@ -254,11 +280,14 @@ public class StudioController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
         }
         String projectId = req.getProjectId();
-        Optional<ProjectState> existingOpt = store.getProject(projectId);
+        Optional<ProjectState> existingOpt = projectAccess.findOrRehydrate(projectId);
+        existingOpt.ifPresent(prev -> projectAccess.requireWriteAccess(prev,
+                "Cannot modify another creator's project."));
         ProjectState state;
         if (req.getProjectState() != null) {
             state = req.getProjectState();
             state.setProjectId(projectId);
+            projectAccess.bindOwnerOnSave(state, existingOpt);
         } else {
             state = existingOpt.orElseThrow(() -> new ResponseStatusException(
                     HttpStatus.NOT_FOUND, "Project '" + projectId + "' not found."));
@@ -298,6 +327,7 @@ public class StudioController {
 
         state.setVersion(state.getVersion() + 1);
         ProjectState saved = store.saveProject(state);
+        projectAccess.mirrorToCloud(saved, null);
 
         double trimStart = primaryAnalysis != null ? primaryAnalysis.trimStartSec() : 0.0;
         double trimEnd = primaryAnalysis != null ? primaryAnalysis.trimEndSec() : 0.0;
@@ -314,11 +344,14 @@ public class StudioController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
         }
         String projectId = req.getProjectId();
-        Optional<ProjectState> existingOpt = store.getProject(projectId);
+        Optional<ProjectState> existingOpt = projectAccess.findOrRehydrate(projectId);
+        existingOpt.ifPresent(prev -> projectAccess.requireWriteAccess(prev,
+                "Cannot modify another creator's project."));
         ProjectState state;
         if (req.getProjectState() != null) {
             state = req.getProjectState();
             state.setProjectId(projectId);
+            projectAccess.bindOwnerOnSave(state, existingOpt);
         } else {
             state = existingOpt.orElseThrow(() -> new ResponseStatusException(
                     HttpStatus.NOT_FOUND, "Project '" + projectId + "' not found."));
@@ -328,6 +361,7 @@ public class StudioController {
         JavaAudioFallbackService.AutoMixResult mixResult = audioFallback.autoMixProject(state, store);
         state.setVersion(state.getVersion() + 1);
         ProjectState saved = store.saveProject(state);
+        projectAccess.mirrorToCloud(saved, null);
 
         return new AutoMixResponse(projectId, saved, mixResult.mixNotes(), mixResult.summary());
     }
@@ -339,9 +373,10 @@ public class StudioController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "project_id is required");
         }
         String projectId = pidObj.toString().trim();
-        Optional<ProjectState> existingOpt = store.getProject(projectId);
+        Optional<ProjectState> existingOpt = projectAccess.findOrRehydrate(projectId);
         ProjectState state = existingOpt.orElseThrow(() -> new ResponseStatusException(
                 HttpStatus.NOT_FOUND, "Project '" + projectId + "' not found."));
+        projectAccess.requireWriteAccess(state, "Cannot modify another creator's project.");
         existingOpt.ifPresent(prev -> store.pushUndo(projectId, prev));
 
         String explicitRef = req.get("source_ref") != null ? req.get("source_ref").toString().trim() : null;
@@ -376,6 +411,10 @@ public class StudioController {
         String beatRef = "mem://stems/" + projectId + "_beat.wav";
         store.saveAudioBytes(vocalRef, vocalWav);
         store.saveAudioBytes(beatRef, beatWav);
+        if (quotaService != null) {
+            quotaService.addStorageBytes(AuthContextHolder.getActorQuotaKey(),
+                    (long) vocalWav.length + beatWav.length);
+        }
 
         TrackState vocalTrack = state.getTracks().computeIfAbsent("vocal", k -> TrackState.audioTrack(0.95, 0.0));
         vocalTrack.setClips(new java.util.ArrayList<>(java.util.List.of(
@@ -388,6 +427,7 @@ public class StudioController {
 
         state.setVersion(state.getVersion() + 1);
         ProjectState saved = store.saveProject(state);
+        projectAccess.mirrorToCloud(saved, null);
 
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("project_id", projectId);
@@ -462,10 +502,18 @@ public class StudioController {
     }
 
     private ProjectState loadProjectState(String projectId, ProjectState inlineState) {
+        Optional<ProjectState> existing = projectAccess.findOrRehydrate(projectId);
+        existing.ifPresent(prev -> projectAccess.requireReadAccess(prev,
+                "Cannot inspect or process another creator's private cloud project."));
         if (inlineState != null) {
             inlineState.setProjectId(projectId);
+            projectAccess.bindOwnerOnSave(inlineState, existing);
             return inlineState;
         }
-        return store.getProject(projectId).orElseGet(() -> ProjectState.createDefault(projectId, "Untitled Project"));
+        return existing.orElseGet(() -> {
+            ProjectState created = ProjectState.createDefault(projectId, "Untitled Project");
+            projectAccess.bindOwnerOnSave(created, Optional.empty());
+            return created;
+        });
     }
 }

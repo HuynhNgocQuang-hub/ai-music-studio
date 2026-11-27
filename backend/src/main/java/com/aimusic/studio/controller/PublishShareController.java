@@ -4,6 +4,7 @@ import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
 import com.aimusic.studio.cloud.AuthContextHolder;
 import com.aimusic.studio.cloud.CloudDatabaseService;
+import com.aimusic.studio.cloud.CloudProjectAccessService;
 import com.aimusic.studio.cloud.ObjectStorageService;
 import com.aimusic.studio.cloud.QuotaRateLimitService;
 import com.aimusic.studio.cloud.UserPrincipal;
@@ -12,7 +13,6 @@ import com.aimusic.studio.model.LyricLine;
 import com.aimusic.studio.model.ProjectState;
 import com.aimusic.studio.model.TrackState;
 import com.aimusic.studio.store.ProjectStateStore;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -44,7 +44,7 @@ public class PublishShareController {
     private final CloudDatabaseService cloudDb;
     private final ObjectStorageService objectStorage;
     private final QuotaRateLimitService quotaService;
-    private final ObjectMapper objectMapper;
+    private final CloudProjectAccessService projectAccess;
 
     public PublishShareController(
             ProjectStateStore store,
@@ -54,7 +54,7 @@ public class PublishShareController {
             CloudDatabaseService cloudDb,
             ObjectStorageService objectStorage,
             QuotaRateLimitService quotaService,
-            ObjectMapper objectMapper
+            CloudProjectAccessService projectAccess
     ) {
         this.store = store;
         this.audioWorkerClient = audioWorkerClient;
@@ -63,7 +63,7 @@ public class PublishShareController {
         this.cloudDb = cloudDb;
         this.objectStorage = objectStorage;
         this.quotaService = quotaService;
-        this.objectMapper = objectMapper;
+        this.projectAccess = projectAccess;
     }
 
     @PostMapping("/api/projects/{projectId}/publish")
@@ -283,35 +283,11 @@ public class PublishShareController {
     }
 
     private Optional<ProjectState> loadOrRehydrateProject(String projectId) {
-        Optional<ProjectState> inStore = store.getProject(projectId);
-        if (inStore.isPresent()) return inStore;
-        return cloudDb.findProject(projectId).flatMap(rec -> {
-            try {
-                ProjectState parsed = objectMapper.readValue(rec.stateJson(), ProjectState.class);
-                return Optional.of(store.saveProject(parsed));
-            } catch (Exception ex) {
-                return Optional.empty();
-            }
-        });
+        return projectAccess.findOrRehydrate(projectId);
     }
 
     private void persistProjectRecord(ProjectState p, String storageKey) {
-        try {
-            String json = objectMapper.writeValueAsString(p);
-            cloudDb.upsertProject(new CloudDatabaseService.CloudProjectRecord(
-                    p.getProjectId(),
-                    p.getOwnerId() != null ? p.getOwnerId() : "guest",
-                    p.getTitle() != null ? p.getTitle() : "Untitled Project",
-                    p.getConfig() != null && p.getConfig().getGenre() != null ? p.getConfig().getGenre() : "Pop",
-                    p.getVisibility() != null ? p.getVisibility() : "private",
-                    p.getShareSlug(),
-                    p.getPublishedAt(),
-                    storageKey,
-                    p.getUpdatedAt() != null ? p.getUpdatedAt() : Instant.now().toString(),
-                    json
-            ));
-        } catch (Exception ignored) {
-        }
+        projectAccess.mirrorToCloud(p, storageKey);
     }
 
     private Map<String, Object> toReleaseMap(CloudDatabaseService.PublishedReleaseRecord r, ProjectState state) {

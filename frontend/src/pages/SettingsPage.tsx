@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Activity,
   CheckCircle2,
@@ -9,11 +10,14 @@ import {
   EyeOff,
   HardDrive,
   KeyRound,
+  LogIn,
+  LogOut,
   RefreshCw,
   Save,
   Server,
   Trash2,
   Upload,
+  UserCheck,
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '@/components/providers/AuthProvider';
@@ -30,7 +34,7 @@ import { clearAllDrafts, getStorageUsageBytes } from '@/lib/storage/indexeddb';
 import type { HealthResponse, LLMProvider, LlmTestResponse, StudioLLMSettings } from '@/types/project';
 
 export default function SettingsPage() {
-  const { setAuthModalOpen } = useAuth();
+  const { authenticated, user, quota, setAuthModalOpen, logout } = useAuth();
   const [settings, setSettings] = useState<StudioLLMSettings>(DEFAULT_LLM_SETTINGS);
   const [showGemini, setShowGemini] = useState(false);
   const [showOpenai, setShowOpenai] = useState(false);
@@ -268,35 +272,113 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Phase 8 Cloud & Storage Row */}
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-[#1b1e25] px-4 py-3 text-xs">
-          <div className="flex flex-wrap items-center gap-4 text-slate-300">
-            <span className="inline-flex items-center gap-1.5">
-              <Cloud className="h-3.5 w-3.5 text-amber-400" />
-              Cloud DB:{' '}
-              <strong className="text-white">
-                {health?.cloud?.postgres_connected
-                  ? 'PostgreSQL Online'
-                  : health?.cloud?.database_backend || 'H2 Local Fallback'}
-              </strong>
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <HardDrive className="h-3.5 w-3.5 text-emerald-400" />
-              Object Storage:{' '}
-              <strong className="text-white">
-                {health?.cloud?.object_storage_connected
-                  ? `MinIO S3 (${health.cloud.bucket || 'aimusic-cloud'})`
-                  : health?.cloud?.object_storage_backend || 'Local S3 Fallback'}
-              </strong>
-            </span>
+        {/* Phase 8 Cloud, Account & Quota Panel */}
+        <div className="space-y-3 rounded-xl border border-white/[0.08] bg-[#1b1e25] p-4 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-4 text-slate-300">
+              <span className="inline-flex items-center gap-1.5">
+                <UserCheck className={`h-3.5 w-3.5 ${authenticated ? 'text-emerald-400' : 'text-slate-400'}`} />
+                Tài khoản:{' '}
+                <strong className="text-white">
+                  {authenticated ? `${user.display_name} (${user.email})` : 'Guest Mode (Dùng ngay)'}
+                </strong>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <Cloud className="h-3.5 w-3.5 text-amber-400" />
+                Cloud DB:{' '}
+                <strong className="text-white">
+                  {health?.cloud?.postgres_connected
+                    ? 'PostgreSQL Online'
+                    : health?.cloud?.database_backend || 'H2 Local Fallback'}
+                </strong>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <HardDrive className="h-3.5 w-3.5 text-emerald-400" />
+                Object Storage:{' '}
+                <strong className="text-white">
+                  {health?.cloud?.object_storage_connected
+                    ? `MinIO S3 (${health.cloud.bucket || 'aimusic-cloud'})`
+                    : health?.cloud?.object_storage_backend || 'Local S3 Fallback'}
+                </strong>
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {authenticated ? (
+                <button
+                  type="button"
+                  onClick={() => void logout()}
+                  className="inline-flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/20"
+                >
+                  <LogOut className="h-3 w-3" /> Đăng xuất
+                </button>
+              ) : (
+                <Link
+                  to="/login?redirect=%2Fsettings"
+                  className="inline-flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/20"
+                >
+                  <LogIn className="h-3 w-3" /> Trang Đăng nhập
+                </Link>
+              )}
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(true)}
+                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] font-bold text-slate-100 transition hover:bg-white/10"
+              >
+                Quản lý Tài khoản Cloud &amp; Quota
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={() => setAuthModalOpen(true)}
-            className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-1.5 text-[11px] font-bold text-amber-200 transition hover:bg-amber-500/25"
-          >
-            Quản lý Tài khoản Cloud &amp; Quota
-          </button>
+
+          {quota && (
+            <div className="grid gap-3 border-t border-white/[0.06] pt-3 sm:grid-cols-3">
+              <div>
+                <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
+                  <span>AI Jobs hôm nay</span>
+                  <span className="font-mono font-bold text-emerald-300">
+                    {quota.generate_used} / {quota.generate_limit}
+                  </span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full bg-emerald-400 transition-all"
+                    style={{ width: `${Math.min(100, (quota.generate_used / Math.max(1, quota.generate_limit)) * 100)}%` }}
+                  />
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Export &amp; Publish</span>
+                  <span className="font-mono font-bold text-sky-300">
+                    {quota.export_used} / {quota.export_limit}
+                  </span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full bg-sky-400 transition-all"
+                    style={{ width: `${Math.min(100, (quota.export_used / Math.max(1, quota.export_limit)) * 100)}%` }}
+                  />
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Cloud Object Storage</span>
+                  <span className="font-mono font-bold text-amber-300">
+                    {(quota.storage_used_bytes / (1024 * 1024)).toFixed(2)} /{' '}
+                    {Math.round(quota.storage_limit_bytes / (1024 * 1024))} MB
+                  </span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full bg-amber-400 transition-all"
+                    style={{
+                      width: `${Math.min(100, (quota.storage_used_bytes / Math.max(1, quota.storage_limit_bytes)) * 100)}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </section>
 

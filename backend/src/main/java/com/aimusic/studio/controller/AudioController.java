@@ -4,6 +4,8 @@ import com.aimusic.studio.audio.AudioValidationException;
 import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
 import com.aimusic.studio.cloud.AuthContextHolder;
+import com.aimusic.studio.cloud.CloudProjectAccessService;
+import com.aimusic.studio.cloud.QuotaRateLimitService;
 import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.AutotuneSettings;
@@ -21,6 +23,7 @@ import com.aimusic.studio.model.dto.DenoiseResponse;
 import com.aimusic.studio.store.ProjectStateStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -53,6 +56,8 @@ public class AudioController {
     private final AudioWorkerClient audioWorkerClient;
     private final JavaAudioFallbackService audioFallback;
     private final ObjectMapper objectMapper;
+    private final CloudProjectAccessService projectAccess;
+    private final QuotaRateLimitService quotaService;
 
     public AudioController(
             AppProperties properties,
@@ -61,11 +66,27 @@ public class AudioController {
             JavaAudioFallbackService audioFallback,
             ObjectMapper objectMapper
     ) {
+        this(properties, store, audioWorkerClient, audioFallback, objectMapper, null, null);
+    }
+
+    @Autowired
+    public AudioController(
+            AppProperties properties,
+            ProjectStateStore store,
+            AudioWorkerClient audioWorkerClient,
+            JavaAudioFallbackService audioFallback,
+            ObjectMapper objectMapper,
+            @Autowired(required = false) CloudProjectAccessService projectAccess,
+            @Autowired(required = false) QuotaRateLimitService quotaService
+    ) {
         this.properties = properties;
         this.store = store;
         this.audioWorkerClient = audioWorkerClient;
         this.audioFallback = audioFallback;
         this.objectMapper = objectMapper;
+        this.projectAccess = projectAccess != null ? projectAccess
+                : new CloudProjectAccessService(store, null, objectMapper);
+        this.quotaService = quotaService;
     }
 
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -127,17 +148,19 @@ public class AudioController {
                 ? (filename.lastIndexOf('.') > 0 ? filename.substring(0, filename.lastIndexOf('.')) : filename)
                 : title;
 
-        ProjectState project = (projectId != null && !projectId.isBlank())
-                ? store.getProject(projectId).orElseGet(() -> ProjectState.createDefault(projectId, resolvedTitle))
-                : ProjectState.createDefault(null, resolvedTitle);
-        String callerOwner = AuthContextHolder.getOwnerId();
-        if (project.getOwnerId() == null || project.getOwnerId().isBlank()
-                || ("guest".equals(project.getOwnerId()) && callerOwner.startsWith("u_"))) {
-            project.setOwnerId(callerOwner);
-        }
+        Optional<ProjectState> existingOpt = (projectId != null && !projectId.isBlank())
+                ? projectAccess.findOrRehydrate(projectId)
+                : Optional.empty();
+        existingOpt.ifPresent(prev -> projectAccess.requireWriteAccess(prev,
+                "Cannot upload audio into another creator's private project."));
+        ProjectState project = existingOpt.orElseGet(() -> ProjectState.createDefault(projectId, resolvedTitle));
+        projectAccess.bindOwnerOnSave(project, existingOpt);
 
         String rawRef = "mem://raw/" + project.getProjectId() + ".wav";
         store.saveAudioBytes(rawRef, meta.wavBytes());
+        if (quotaService != null) {
+            quotaService.addStorageBytes(AuthContextHolder.getActorQuotaKey(), meta.wavBytes().length);
+        }
         project.getAudioAssets().setRawInputRef(rawRef);
         project.getAnalysis().setDurationSec(meta.durationSec());
 
@@ -146,6 +169,7 @@ public class AudioController {
             vocalTrack.getClips().add(new AudioClip("clip_vocal_1", "raw_input_ref", 1.0, 0.0));
         }
         store.saveProject(project);
+        projectAccess.mirrorToCloud(project, null);
 
         return new AudioUploadResponse(
                 project.getProjectId(),
@@ -217,9 +241,12 @@ public class AudioController {
                 properties.getSampleRate()
         );
 
-        Optional<ProjectState> existingOpt = store.getProject(projectId);
+        Optional<ProjectState> existingOpt = projectAccess.findOrRehydrate(projectId);
+        existingOpt.ifPresent(prev -> projectAccess.requireWriteAccess(prev,
+                "Cannot upload audio clips into another creator's private project."));
         ProjectState project = existingOpt.orElseGet(() -> ProjectState.createDefault(projectId, "Untitled Project"));
         existingOpt.ifPresent(prev -> store.pushUndo(projectId, prev));
+        projectAccess.bindOwnerOnSave(project, existingOpt);
 
         TrackState track = project.getTracks().get(normTrackId);
         if (track == null) {
@@ -233,6 +260,9 @@ public class AudioController {
         String clipId = "clip_" + normTrackId + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         String audioRef = "mem://clips/" + projectId + "/" + clipId + ".wav";
         store.saveAudioBytes(audioRef, meta.wavBytes());
+        if (quotaService != null) {
+            quotaService.addStorageBytes(AuthContextHolder.getActorQuotaKey(), meta.wavBytes().length);
+        }
 
         AudioClip clip = new AudioClip(clipId, audioRef, Math.max(1.0, startBar), 0.0);
         clip.setTrimEndSec(meta.durationSec());
@@ -243,15 +273,17 @@ public class AudioController {
 
         project.setVersion(project.getVersion() + 1);
         ProjectState saved = store.saveProject(project);
+        projectAccess.mirrorToCloud(saved, null);
 
         return new ClipUploadResponse(saved, clip, audioRef, normTrackId, meta.durationSec(), meta.warnings());
     }
 
     @PostMapping("/denoise")
     public DenoiseResponse denoiseAudio(@RequestBody DenoiseRequest req) {
-        ProjectState project = store.getProject(req.getProjectId())
+        ProjectState project = projectAccess.findOrRehydrate(req.getProjectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + req.getProjectId() + "' not found."));
+        projectAccess.requireWriteAccess(project, "Cannot modify audio on another creator's project.");
 
         String rawRef = project.getAudioAssets().getRawInputRef();
         if (rawRef == null || rawRef.isBlank()) {
@@ -298,6 +330,7 @@ public class AudioController {
             vocalTrack.getClips().get(0).setSource("dry_denoised_ref");
         }
         store.saveProject(project);
+        projectAccess.mirrorToCloud(project, null);
 
         return new DenoiseResponse(
                 project.getProjectId(),
@@ -313,9 +346,10 @@ public class AudioController {
 
     @PostMapping("/analyze")
     public AnalyzeResponse analyzeProjectAudio(@RequestBody AnalyzeRequest req) {
-        ProjectState project = store.getProject(req.getProjectId())
+        ProjectState project = projectAccess.findOrRehydrate(req.getProjectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + req.getProjectId() + "' not found."));
+        projectAccess.requireWriteAccess(project, "Cannot analyze or update another creator's project.");
 
         String ref = req.getSourceRef();
         if (ref == null || ref.isBlank()) ref = project.getAudioAssets().getDryDenoisedRef();
@@ -418,9 +452,10 @@ public class AudioController {
 
     @PostMapping("/autotune")
     public AutotuneResponse autotuneAudio(@RequestBody AutotuneRequest req) {
-        ProjectState project = store.getProject(req.getProjectId())
+        ProjectState project = projectAccess.findOrRehydrate(req.getProjectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + req.getProjectId() + "' not found."));
+        projectAccess.requireWriteAccess(project, "Cannot modify autotune settings on another creator's project.");
 
         String srcRef = project.getAudioAssets().getDryDenoisedRef();
         if (srcRef == null || srcRef.isBlank()) srcRef = project.getAudioAssets().getRawInputRef();
@@ -470,6 +505,7 @@ public class AudioController {
                     : "raw_input_ref";
             updateStandardVocalClips(project.getTracks().get("vocal"), fallbackSlot);
             store.saveProject(project);
+            projectAccess.mirrorToCloud(project, null);
             return new AutotuneResponse(project.getProjectId(), srcRef, effective, project.getAnalysis().getDurationSec());
         }
 
@@ -488,6 +524,7 @@ public class AudioController {
         project.getAudioAssets().setTunedVocalRef(tunedRef);
         updateStandardVocalClips(project.getTracks().get("vocal"), "tuned_vocal_ref");
         store.saveProject(project);
+        projectAccess.mirrorToCloud(project, null);
 
         return new AutotuneResponse(project.getProjectId(), tunedRef, effective, project.getAnalysis().getDurationSec());
     }
@@ -538,9 +575,10 @@ public class AudioController {
     }
 
     private ResponseEntity<byte[]> renderPreviewWav(String projectId, String mode) {
-        ProjectState project = store.getProject(projectId)
+        ProjectState project = projectAccess.findOrRehydrate(projectId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + projectId + "' not found."));
+        projectAccess.requireReadAccess(project, "You do not have permission to preview this private cloud project.");
 
         Map<String, TrackState> tracks = project.getTracks();
         if (tracks != null && !tracks.isEmpty() && tracks.values().stream().allMatch(TrackState::isMute)) {

@@ -23,6 +23,7 @@ import {
   importAimusic,
   listProjects,
   syncProject,
+  unpublishProject,
 } from '@/lib/api/client';
 import { buildProjectFromTemplate, DAW_TEMPLATES } from '@/lib/music/presets';
 import {
@@ -52,6 +53,7 @@ export default function LibraryPage() {
   const [search, setSearch] = useState('');
   const [genre, setGenre] = useState('');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'draft' | 'saved'>('all');
+  const [scope, setScope] = useState<'all' | 'mine' | 'public'>('all');
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState<12 | 24 | 48>(12);
 
@@ -83,7 +85,7 @@ export default function LibraryPage() {
     setLoadingRemote(true);
     setRemoteError(null);
     try {
-      const res = await listProjects({ page, limit, search, genre });
+      const res = await listProjects({ page, limit, search, genre, scope });
       setRemoteItems(res.items || []);
       setTotalRemote(res.total || 0);
       setTotalPages(Math.max(1, res.total_pages || 1));
@@ -97,7 +99,7 @@ export default function LibraryPage() {
     } finally {
       setLoadingRemote(false);
     }
-  }, [page, limit, search, genre, authenticated, user.user_id]);
+  }, [page, limit, search, genre, scope, authenticated, user.user_id]);
 
   useEffect(() => {
     void refreshLocalDrafts();
@@ -154,6 +156,15 @@ export default function LibraryPage() {
     }
   };
 
+  const handleUnpublishRemoteProject = async (projectId: string) => {
+    try {
+      await unpublishProject(projectId);
+      await fetchRemoteProjects();
+    } catch (err) {
+      setRemoteError(err instanceof ApiError ? err.detail : 'Không thể thu hồi trạng thái Public.');
+    }
+  };
+
   const handleDuplicateRemoteProject = async (projectId: string) => {
     try {
       const src = await getProject(projectId);
@@ -164,6 +175,11 @@ export default function LibraryPage() {
         project_id: copyId,
         title: copyTitle,
         version: 1,
+        owner_id: authenticated ? user.user_id : 'guest',
+        visibility: 'private' as const,
+        share_slug: null,
+        published_at: null,
+        source: 'draft' as const,
         config: { ...src.config, title: copyTitle },
       };
       const saved = await syncProject(copyId, dup).catch(() => dup);
@@ -287,6 +303,24 @@ export default function LibraryPage() {
           ))}
         </select>
 
+        <label htmlFor="library-scope-filter" className="sr-only">
+          Phạm vi Workspace
+        </label>
+        <select
+          id="library-scope-filter"
+          name="scopeFilter"
+          value={scope}
+          onChange={(e) => {
+            setScope(e.target.value as 'all' | 'mine' | 'public');
+            setPage(1);
+          }}
+          className="rounded border border-white/10 bg-[#111317] px-3 py-1.5 text-xs text-white"
+        >
+          <option value="all">Workspace: Tất cả</option>
+          <option value="mine">Của tôi ({authenticated ? user.display_name : 'Guest'})</option>
+          <option value="public">Cộng đồng Public</option>
+        </select>
+
         <label htmlFor="library-source-filter" className="sr-only">
           Nguồn
         </label>
@@ -385,7 +419,7 @@ export default function LibraryPage() {
                   </p>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-xs">
-                  <span className="text-[11px] text-slate-500">{formatBytes(d.size_bytes)}</span>
+                  <span className="text-[11px] text-slate-400">{formatBytes(d.size_bytes)}</span>
                   <button
                     type="button"
                     onClick={() => {
@@ -420,16 +454,24 @@ export default function LibraryPage() {
           </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {visibleRemoteItems.map((item) => (
+            {visibleRemoteItems.map((item) => {
+              const isMine = authenticated
+                ? item.owner_id === user.user_id || !item.owner_id || item.owner_id === 'guest'
+                : !item.owner_id || item.owner_id === 'guest';
+              return (
               <div
                 key={item.project_id}
                 className="flex flex-col justify-between rounded-lg border border-white/10 bg-[#181b22] p-3.5"
               >
                 <div>
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-300">
-                        Saved
+                        {item.owner_id && item.owner_id.startsWith('u_')
+                          ? isMine
+                            ? 'Cloud (Của bạn)'
+                            : 'Cloud'
+                          : 'Guest'}
                       </span>
                       {item.visibility === 'public' && item.share_slug && (
                         <a
@@ -451,12 +493,23 @@ export default function LibraryPage() {
                         type="button"
                         onClick={() => void handleDuplicateRemoteProject(item.project_id)}
                         aria-label={`Nhân bản ${item.title || item.project_id}`}
-                        title="Nhân bản thành session mới"
+                        title={isMine ? 'Nhân bản thành session mới' : 'Remix thành session của bạn'}
                         className="rounded p-1 text-slate-400 hover:bg-white/10 hover:text-sky-300"
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </button>
-                      {confirmDeleteKey === `remote:${item.project_id}` ? (
+                      {isMine && item.visibility === 'public' && item.share_slug && (
+                        <button
+                          type="button"
+                          onClick={() => void handleUnpublishRemoteProject(item.project_id)}
+                          aria-label={`Ẩn Share ${item.title || item.project_id}`}
+                          title="Thu hồi link Public (chuyển về Private)"
+                          className="rounded border border-amber-400/30 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/15"
+                        >
+                          Ẩn Share
+                        </button>
+                      )}
+                      {isMine && (confirmDeleteKey === `remote:${item.project_id}` ? (
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
@@ -483,7 +536,7 @@ export default function LibraryPage() {
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
-                      )}
+                      ))}
                     </div>
                   </div>
                   <h3 className="mt-2 truncate text-sm font-bold text-white">
@@ -495,7 +548,7 @@ export default function LibraryPage() {
                   </p>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-xs">
-                  <span className="text-[11px] text-slate-500">
+                  <span className="text-[11px] text-slate-400">
                     {item.updated_at ? new Date(item.updated_at).toLocaleDateString() : '—'}
                   </span>
                   <button
@@ -507,7 +560,8 @@ export default function LibraryPage() {
                   </button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
 

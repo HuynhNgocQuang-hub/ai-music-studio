@@ -194,13 +194,45 @@ class CloudPhase8Tests {
         mockMvc.perform(delete("/api/projects/" + pid).header("Authorization", "Bearer " + bobToken))
                 .andExpect(status().isForbidden());
 
-        // 3. Alice deletes hot Redis/Memory cache ONLY -> CloudDB auto-rehydrates GET /api/projects/{id}!
+        // 3. Alice deletes hot Redis/Memory cache ONLY -> CloudDB auto-rehydrates & Bob STILL gets 403!
         store.deleteProject(pid);
         assertTrue(cloudDb.findProject(pid).isPresent());
+        mockMvc.perform(delete("/api/projects/" + pid).header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(put("/api/projects/" + pid + "/sync")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(state)))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/audio/denoise")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\",\"enable_denoise\":true,\"auto_trim\":true}"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/studio/auto-mix")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\"}"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/jobs/generate")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"project_id\":\"" + pid + "\"}"))
+                .andExpect(status().isForbidden());
+
         mockMvc.perform(get("/api/projects/" + pid).header("Authorization", "Bearer " + aliceToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.project_id").value(pid))
                 .andExpect(jsonPath("$.title").value("Midnight Cloud Ballad"));
+
+        // S3/ObjectStorage audio durability: even after Redis/memory cache clear, getAudioBytes rehydrates!
+        String sampleAudioRef = "mem://raw/" + pid + "_s3.wav";
+        byte[] sampleWav = new byte[]{'R', 'I', 'F', 'F', 36, 0, 0, 0, 'W', 'A', 'V', 'E', 1, 2, 3, 4};
+        store.saveAudioBytes(sampleAudioRef, sampleWav);
+        store.clearCache();
+        byte[] rehydratedAudio = store.getAudioBytes(sampleAudioRef).orElseThrow();
+        assertArrayEquals(sampleWav, rehydratedAudio);
+        store.deleteAudioBytes(sampleAudioRef);
 
         // 4. Alice publishes public demo link -> GET /api/share/{slug} & /audio work anonymously
         MvcResult pubRes = mockMvc.perform(post("/api/projects/" + pid + "/publish")
@@ -216,6 +248,30 @@ class CloudPhase8Tests {
                 .andReturn();
         JsonNode pubJson = objectMapper.readTree(pubRes.getResponse().getContentAsString());
         String slug = pubJson.get("share_slug").asText();
+
+        // Scope filtering (?scope=mine vs ?scope=public) & Showcase search/genre filtering
+        mockMvc.perform(get("/api/projects?scope=public"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total", greaterThan(0)));
+        mockMvc.perform(get("/api/share?search=Midnight&genre=Ballad"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total", greaterThan(0)));
+
+        // Remix spoofing guard: if Bob creates a new remix claiming Alice's owner_id, backend binds Bob as owner!
+        String remixPid = "remix_" + UUID.randomUUID().toString().substring(0, 8);
+        ProjectState bobRemix = ProjectState.createDefault(remixPid, "Bob Remix Ballad");
+        bobRemix.setOwnerId(state.getOwnerId());
+        MvcResult remixRes = mockMvc.perform(put("/api/projects/" + remixPid + "/sync")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(bobRemix)))
+                .andExpect(status().isOk())
+                .andReturn();
+        String remixOwner = objectMapper.readTree(remixRes.getResponse().getContentAsString()).get("owner_id").asText();
+        assertTrue(remixOwner.startsWith("u_"));
+        assertNotEquals(pubJson.get("project_state").get("owner_id").asText(), remixOwner);
+        mockMvc.perform(delete("/api/projects/" + remixPid).header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk());
 
         mockMvc.perform(get("/api/share"))
                 .andExpect(status().isOk())
@@ -233,7 +289,7 @@ class CloudPhase8Tests {
         assertTrue(audioStream.getResponse().getContentAsByteArray().length > 44);
         assertEquals("RIFF", new String(audioStream.getResponse().getContentAsByteArray(), 0, 4));
 
-        // 5. Revoke share -> 404 on slug
+        // 5. Revoke share -> 404 on slug; re-publish then Delete project cascades to 404 on /api/share/{slug}
         mockMvc.perform(delete("/api/projects/" + pid + "/publish")
                         .header("Authorization", "Bearer " + aliceToken))
                 .andExpect(status().isOk())
@@ -241,15 +297,25 @@ class CloudPhase8Tests {
         mockMvc.perform(get("/api/share/" + slug))
                 .andExpect(status().isNotFound());
 
+        MvcResult pubRes2 = mockMvc.perform(post("/api/projects/" + pid + "/publish")
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("format", "wav", "artist", "Alice Live"))))
+                .andExpect(status().isOk())
+                .andReturn();
+        String slug2 = objectMapper.readTree(pubRes2.getResponse().getContentAsString()).get("share_slug").asText();
+
         // 6. Health endpoint reports Phase 8 Cloud infrastructure details
         mockMvc.perform(get("/api/health"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.cloud.database_ready").value(true))
                 .andExpect(jsonPath("$.cloud.auth_mode").value("hybrid_jwt"));
 
-        // 7. Clean up Alice's project
+        // 7. Delete Alice's published project -> cascades cleanup to public demo slug2 -> 404!
         mockMvc.perform(delete("/api/projects/" + pid).header("Authorization", "Bearer " + aliceToken))
                 .andExpect(status().isOk());
+        mockMvc.perform(get("/api/share/" + slug2))
+                .andExpect(status().isNotFound());
 
         // 8. Quota rate limit enforcement (HTTP 429 when daily generate limit exceeded)
         String actorKey = "user:u_quota_test";

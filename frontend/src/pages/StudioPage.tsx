@@ -3541,11 +3541,17 @@ export default function StudioPage() {
 
             <div className="mt-4 space-y-3 text-xs">
               <div>
-                <label className="mb-1 block text-[11px] font-medium text-slate-300">
+                <label
+                  htmlFor="studio-publish-artist"
+                  className="mb-1 block text-[11px] font-medium text-slate-300"
+                >
                   Tên nghệ sĩ / Producer (ID3 Tag)
                 </label>
                 <input
+                  id="studio-publish-artist"
+                  name="publishArtist"
                   type="text"
+                  autoComplete="name"
                   value={publishArtist}
                   onChange={(e) => setPublishArtist(e.target.value)}
                   placeholder={authenticated ? user.display_name : 'AI Music Studio Creator'}
@@ -3554,10 +3560,15 @@ export default function StudioPage() {
               </div>
 
               <div>
-                <label className="mb-1 block text-[11px] font-medium text-slate-300">
+                <label
+                  htmlFor="studio-publish-format"
+                  className="mb-1 block text-[11px] font-medium text-slate-300"
+                >
                   Định dạng Master (-14 LUFS / Peak &lt;= -1.0 dBFS)
                 </label>
                 <select
+                  id="studio-publish-format"
+                  name="publishFormat"
                   value={publishFormat}
                   onChange={(e) => setPublishFormat(e.target.value as 'mp3' | 'flac' | 'wav')}
                   className="w-full rounded-lg border border-white/15 bg-[#0b0d11] px-3 py-2 text-xs text-white"
