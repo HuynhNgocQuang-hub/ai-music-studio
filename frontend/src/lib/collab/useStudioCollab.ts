@@ -4,13 +4,24 @@ import {
   addStudioBarComment,
   buildCollabWsUrl,
   closeCollabSession,
+  createProjectVersion,
+  deleteProjectVersion,
   deleteStudioBarComment,
   enableCollabSession,
   getCollabSession,
+  listProjectVersions,
   listStudioBarComments,
+  restoreProjectVersion,
   toggleStudioBarCommentResolved,
 } from '@/lib/api/client';
-import type { CollabPeerPresence, ProjectState, StudioBarComment } from '@/types/project';
+import type {
+  CollabChatMessage,
+  CollabPeerPresence,
+  CollabTrackLock,
+  ProjectState,
+  ProjectVersionSummary,
+  StudioBarComment,
+} from '@/types/project';
 
 interface UseStudioCollabOptions {
   project: ProjectState;
@@ -40,7 +51,11 @@ export function useStudioCollab({
   const [wsConnected, setWsConnected] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(collabCodeFromUrl);
   const [peers, setPeers] = useState<CollabPeerPresence[]>([]);
+  const [trackLocks, setTrackLocks] = useState<Record<string, CollabTrackLock>>({});
+  const [chatMessages, setChatMessages] = useState<CollabChatMessage[]>([]);
   const [barComments, setBarComments] = useState<StudioBarComment[]>([]);
+  const [versions, setVersions] = useState<ProjectVersionSummary[]>([]);
+  const [versionsBusy, setVersionsBusy] = useState(false);
   const [lastSyncNotice, setLastSyncNotice] = useState<string | null>(null);
   const [collabError, setCollabError] = useState<string | null>(null);
 
@@ -56,7 +71,17 @@ export function useStudioCollab({
     }
   }, [collabCodeFromUrl]);
 
-  // Load current collab session & bar comments on project switch
+  const refreshVersions = useCallback(async () => {
+    if (!project.project_id) return;
+    try {
+      const res = await listProjectVersions(project.project_id, roomCode || collabCodeFromUrl);
+      setVersions(res.items || []);
+    } catch {
+      // ignore if project not synced yet
+    }
+  }, [project.project_id, roomCode, collabCodeFromUrl]);
+
+  // Load current collab session, bar comments & saved checkpoints on project switch
   useEffect(() => {
     let active = true;
     setCollabError(null);
@@ -64,6 +89,7 @@ export function useStudioCollab({
       .then((res) => {
         if (!active) return;
         setPeers(res.members || []);
+        setTrackLocks(res.track_locks || {});
         if (res.active && res.room_code) {
           setRoomCode(res.room_code);
         } else if (!collabCodeFromUrl && !res.active) {
@@ -78,6 +104,14 @@ export function useStudioCollab({
       })
       .catch(() => {
         if (active) setBarComments([]);
+      });
+
+    void listProjectVersions(project.project_id, collabCodeFromUrl)
+      .then((res) => {
+        if (active) setVersions(res.items || []);
+      })
+      .catch(() => {
+        if (active) setVersions([]);
       });
 
     return () => {
@@ -107,8 +141,6 @@ export function useStudioCollab({
       displayName,
     });
 
-    // Defer socket creation slightly so React StrictMode immediate mount/unmount cycles
-    // cancel cleanly before opening a WebSocket (avoids premature close browser warnings).
     const connectTimer = window.setTimeout(() => {
       if (disposed) return;
 
@@ -135,6 +167,23 @@ export function useStudioCollab({
             if (Array.isArray(msg.members)) {
               setPeers(msg.members as CollabPeerPresence[]);
             }
+            if (msg.track_locks && typeof msg.track_locks === 'object') {
+              setTrackLocks(msg.track_locks as Record<string, CollabTrackLock>);
+            }
+            if (Array.isArray(msg.chat_history)) {
+              setChatMessages(msg.chat_history as CollabChatMessage[]);
+            }
+          } else if (type === 'track_locks') {
+            if (msg.track_locks && typeof msg.track_locks === 'object') {
+              setTrackLocks(msg.track_locks as Record<string, CollabTrackLock>);
+            }
+          } else if (type === 'room_chat' && msg.message) {
+            const incomingMsg = msg.message as CollabChatMessage;
+            setChatMessages((prev) =>
+              prev.some((m) => m.id === incomingMsg.id)
+                ? prev
+                : [...prev.slice(-49), incomingMsg]
+            );
           } else if (type === 'state_sync') {
             if (msg.client_id !== clientId && msg.state) {
               applyingRemoteRef.current = true;
@@ -175,6 +224,7 @@ export function useStudioCollab({
           } else if (type === 'room_closed') {
             setRoomCode(null);
             setWsConnected(false);
+            setTrackLocks({});
             setLastSyncNotice('Chủ phòng đã đóng phiên cộng tác.');
           } else if (type === 'error' && typeof msg.detail === 'string') {
             setCollabError(msg.detail);
@@ -253,12 +303,34 @@ export function useStudioCollab({
     }
   }, [currentBar]);
 
+  const toggleTrackLock = useCallback((trackId: string, locked: boolean) => {
+    setCollabError(null);
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'track_lock', track_id: trackId, locked }));
+    } else {
+      setCollabError('Cần kết nối WebSocket LIVE để khóa track.');
+    }
+  }, []);
+
+  const sendRoomChat = useCallback((text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'room_chat', text: clean }));
+    } else {
+      setCollabError('WebSocket chưa kết nối LIVE để gửi tin nhắn.');
+    }
+  }, []);
+
   const enableInvite = useCallback(async () => {
     setCollabError(null);
     try {
       const res = await enableCollabSession(project.project_id);
       if (res.room_code) setRoomCode(res.room_code);
       setPeers(res.members || []);
+      setTrackLocks(res.track_locks || {});
     } catch (err) {
       setCollabError(err instanceof ApiError ? err.detail : 'Không thể bật phòng cộng tác.');
     }
@@ -270,6 +342,7 @@ export function useStudioCollab({
       await closeCollabSession(project.project_id);
       setRoomCode(null);
       setPeers([]);
+      setTrackLocks({});
     } catch (err) {
       setCollabError(err instanceof ApiError ? err.detail : 'Không thể đóng phòng cộng tác.');
     }
@@ -327,20 +400,102 @@ export function useStudioCollab({
     [project.project_id, roomCode, collabCodeFromUrl]
   );
 
+  const saveCheckpoint = useCallback(
+    async (label?: string, stateOverride?: ProjectState) => {
+      setVersionsBusy(true);
+      setCollabError(null);
+      try {
+        const created = await createProjectVersion(
+          project.project_id,
+          { label, state: stateOverride || project },
+          roomCode || collabCodeFromUrl
+        );
+        setVersions((prev) => [created, ...prev]);
+        setLastSyncNotice(`Đã lưu Checkpoint "${created.label}"`);
+        return created;
+      } catch (err) {
+        setCollabError(err instanceof ApiError ? err.detail : 'Không thể lưu Checkpoint.');
+        return null;
+      } finally {
+        setVersionsBusy(false);
+      }
+    },
+    [project, roomCode, collabCodeFromUrl]
+  );
+
+  const restoreCheckpoint = useCallback(
+    async (versionId: string) => {
+      setVersionsBusy(true);
+      setCollabError(null);
+      try {
+        const res = await restoreProjectVersion(
+          project.project_id,
+          versionId,
+          roomCode || collabCodeFromUrl
+        );
+        if (res.project_state) {
+          applyingRemoteRef.current = true;
+          try {
+            onRemoteStateRef.current(res.project_state, 'Checkpoint');
+            setLastSyncNotice(`Đã khôi phục Checkpoint "${res.label}"`);
+          } finally {
+            window.setTimeout(() => {
+              applyingRemoteRef.current = false;
+            }, 80);
+          }
+        }
+        return res.project_state;
+      } catch (err) {
+        setCollabError(err instanceof ApiError ? err.detail : 'Không thể khôi phục Checkpoint.');
+        return null;
+      } finally {
+        setVersionsBusy(false);
+      }
+    },
+    [project.project_id, roomCode, collabCodeFromUrl]
+  );
+
+  const removeCheckpoint = useCallback(
+    async (versionId: string) => {
+      setVersionsBusy(true);
+      setCollabError(null);
+      try {
+        await deleteProjectVersion(project.project_id, versionId);
+        setVersions((prev) => prev.filter((v) => v.id !== versionId));
+      } catch (err) {
+        setCollabError(err instanceof ApiError ? err.detail : 'Chỉ chủ sở hữu mới có quyền xóa Checkpoint.');
+      } finally {
+        setVersionsBusy(false);
+      }
+    },
+    [project.project_id]
+  );
+
   return {
+    clientId,
     wsConnected,
     roomCode: roomCode || collabCodeFromUrl,
     peers,
+    trackLocks,
+    chatMessages,
     barComments,
+    versions,
+    versionsBusy,
     lastSyncNotice,
     collabError,
     isApplyingRemoteRef: applyingRemoteRef,
     queueBroadcastState,
     broadcastCue,
+    toggleTrackLock,
+    sendRoomChat,
     enableInvite,
     closeInvite,
     addBarComment,
     toggleResolved,
     deleteComment,
+    refreshVersions,
+    saveCheckpoint,
+    restoreCheckpoint,
+    removeCheckpoint,
   };
 }

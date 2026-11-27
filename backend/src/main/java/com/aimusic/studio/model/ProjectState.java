@@ -74,6 +74,9 @@ public class ProjectState {
     @JsonProperty("melody_notes")
     private List<MidiNote> melodyNotes;
 
+    @JsonProperty("remixed_from")
+    private Map<String, String> remixedFrom;
+
     public ProjectState() {}
 
     public static Map<String, TrackState> defaultTracks() {
@@ -172,4 +175,7 @@ public class ProjectState {
 
     public List<MidiNote> getMelodyNotes() { return melodyNotes; }
     public void setMelodyNotes(List<MidiNote> melodyNotes) { this.melodyNotes = melodyNotes; }
+
+    public Map<String, String> getRemixedFrom() { return remixedFrom; }
+    public void setRemixedFrom(Map<String, String> remixedFrom) { this.remixedFrom = remixedFrom; }
 }

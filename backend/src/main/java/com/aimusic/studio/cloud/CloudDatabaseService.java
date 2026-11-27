@@ -51,6 +51,18 @@ public class CloudDatabaseService {
             int totalLikes
     ) {}
 
+    public record ProjectVersionRecord(
+            String id,
+            String projectId,
+            String label,
+            String authorId,
+            String authorName,
+            double bpm,
+            int totalBars,
+            String stateJson,
+            String createdAt
+    ) {}
+
     public record CloudProjectRecord(
             String projectId,
             String ownerId,
@@ -204,6 +216,18 @@ public class CloudDatabaseService {
                     creator_id VARCHAR(64) NOT NULL,
                     created_at VARCHAR(64) NOT NULL,
                     PRIMARY KEY (follower_id, creator_id)
+                )""");
+        jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS project_versions (
+                    id VARCHAR(64) PRIMARY KEY,
+                    project_id VARCHAR(128) NOT NULL,
+                    label VARCHAR(160) NOT NULL,
+                    author_id VARCHAR(64) NOT NULL,
+                    author_name VARCHAR(120) NOT NULL,
+                    bpm DOUBLE PRECISION NOT NULL,
+                    total_bars INT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    created_at VARCHAR(64) NOT NULL
                 )""");
         jdbc.execute("""
                 CREATE TABLE IF NOT EXISTS cloud_projects (
@@ -399,6 +423,7 @@ public class CloudDatabaseService {
     public void deleteProject(String projectId) {
         findReleaseByProjectId(projectId).ifPresent(rel -> cleanupReleaseSocial(rel.shareSlug()));
         jdbc.update("DELETE FROM studio_bar_comments WHERE project_id = ?", projectId);
+        jdbc.update("DELETE FROM project_versions WHERE project_id = ?", projectId);
         jdbc.update("DELETE FROM cloud_projects WHERE project_id = ?", projectId);
         jdbc.update("DELETE FROM published_releases WHERE project_id = ?", projectId);
     }
@@ -663,6 +688,58 @@ public class CloudDatabaseService {
 
     public void deleteStudioBarComment(String commentId) {
         jdbc.update("DELETE FROM studio_bar_comments WHERE id = ?", commentId);
+    }
+
+    // --- Phase 10A: Named Project Version Checkpoints ---
+
+    public ProjectVersionRecord createProjectVersion(
+            String projectId,
+            String label,
+            String authorId,
+            String authorName,
+            double bpm,
+            int totalBars,
+            String stateJson
+    ) {
+        String id = "ver_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String now = Instant.now().toString();
+        jdbc.update(
+                "INSERT INTO project_versions (id, project_id, label, author_id, author_name, bpm, total_bars, state_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                id, projectId, label, authorId, authorName, bpm, totalBars, stateJson, now
+        );
+        return new ProjectVersionRecord(id, projectId, label, authorId, authorName, bpm, totalBars, stateJson, now);
+    }
+
+    public List<ProjectVersionRecord> listProjectVersions(String projectId) {
+        return jdbc.query(
+                "SELECT id, project_id, label, author_id, author_name, bpm, total_bars, state_json, created_at FROM project_versions WHERE project_id = ? ORDER BY created_at DESC",
+                (rs, i) -> new ProjectVersionRecord(
+                        rs.getString("id"), rs.getString("project_id"),
+                        rs.getString("label"), rs.getString("author_id"), rs.getString("author_name"),
+                        rs.getDouble("bpm"), rs.getInt("total_bars"),
+                        rs.getString("state_json"), rs.getString("created_at")
+                ),
+                projectId
+        );
+    }
+
+    public Optional<ProjectVersionRecord> findProjectVersion(String versionId) {
+        if (versionId == null || versionId.isBlank()) return Optional.empty();
+        List<ProjectVersionRecord> rows = jdbc.query(
+                "SELECT id, project_id, label, author_id, author_name, bpm, total_bars, state_json, created_at FROM project_versions WHERE id = ?",
+                (rs, i) -> new ProjectVersionRecord(
+                        rs.getString("id"), rs.getString("project_id"),
+                        rs.getString("label"), rs.getString("author_id"), rs.getString("author_name"),
+                        rs.getDouble("bpm"), rs.getInt("total_bars"),
+                        rs.getString("state_json"), rs.getString("created_at")
+                ),
+                versionId
+        );
+        return rows.stream().findFirst();
+    }
+
+    public void deleteProjectVersion(String versionId) {
+        jdbc.update("DELETE FROM project_versions WHERE id = ?", versionId);
     }
 
     // --- Phase 10B: Creator Profiles & Follow Graph ---

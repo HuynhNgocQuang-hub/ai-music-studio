@@ -167,6 +167,13 @@ export interface QAStatus {
   feedback: string;
 }
 
+export interface RemixOrigin {
+  share_slug: string;
+  title: string;
+  artist?: string;
+  owner_id?: string;
+}
+
 export interface ProjectState {
   project_id: string;
   title?: string;
@@ -178,6 +185,7 @@ export interface ProjectState {
   visibility?: 'private' | 'public';
   share_slug?: string | null;
   published_at?: string | null;
+  remixed_from?: RemixOrigin | null;
   config: ProjectConfig;
   audio_assets: AudioAssets;
   analysis: ProjectAnalysis;
@@ -533,11 +541,43 @@ export interface CollabPeerPresence {
   joined_at: string;
 }
 
+export interface CollabTrackLock {
+  track_id: string;
+  client_id: string;
+  user_id: string;
+  display_name: string;
+  color: string;
+  locked_at: string;
+}
+
+export interface CollabChatMessage {
+  id: string;
+  project_id: string;
+  client_id: string;
+  user_id: string;
+  display_name: string;
+  color: string;
+  text: string;
+  created_at: string;
+}
+
+export interface ProjectVersionSummary {
+  id: string;
+  project_id: string;
+  label: string;
+  author_id: string;
+  author_name: string;
+  bpm: number;
+  total_bars: number;
+  created_at: string;
+}
+
 export interface CollabSessionSummary {
   project_id: string;
   active: boolean;
   peer_count: number;
   members: CollabPeerPresence[];
+  track_locks?: Record<string, CollabTrackLock>;
   revision: number;
   room_code?: string;
   invite_url?: string;
@@ -561,6 +601,7 @@ export interface PublishedRelease {
   liked_by_me?: boolean;
   comments_count?: number;
   creator_followed?: boolean;
+  remixed_from?: RemixOrigin | null;
   created_at: string;
   share_url: string;
   stream_url: string;

@@ -1261,5 +1261,17 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
     trending_res = api_client.get("/api/share?sort=trending&scope=all")
     assert trending_res.status_code == 200 and trending_res.json()["total"] >= 1
 
+    # Phase 10A: Named Project Version Checkpoints & Restore
+    ver_res = api_client.post(
+        f"/api/projects/{pid}/versions",
+        json={"label": "E2E Safe Checkpoint"},
+    )
+    assert ver_res.status_code == 200, ver_res.text
+    ver_id = ver_res.json()["id"]
+    assert len(api_client.get(f"/api/projects/{pid}/versions").json()["items"]) >= 1
+    rest_res = api_client.post(f"/api/projects/{pid}/versions/{ver_id}/restore")
+    assert rest_res.status_code == 200 and rest_res.json()["status"] == "restored"
+    assert api_client.delete(f"/api/projects/{pid}/versions/{ver_id}").status_code == 200
+
     assert api_client.delete(f"/api/projects/{pid}").status_code == 200
     assert api_client.get(f"/api/share/{slug_p10}").status_code == 404

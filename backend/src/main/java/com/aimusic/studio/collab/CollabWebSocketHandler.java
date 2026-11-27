@@ -122,6 +122,8 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         snapshot.put("client_id", clientId);
         snapshot.put("self", peer.toMap());
         snapshot.put("members", roomService.listMembers(projectId));
+        snapshot.put("track_locks", roomService.listTrackLocks(projectId));
+        snapshot.put("chat_history", roomService.listChatHistory(projectId));
         snapshot.put("revision", roomService.findRoom(projectId).map(r -> r.revision.get()).orElse(1L));
         roomService.sendDirect(session, snapshot);
 
@@ -159,6 +161,40 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
                         "project_id", ctx.projectId(),
                         "members", roomService.listMembers(ctx.projectId())
                 ), null);
+            }
+            case "track_lock" -> {
+                String trackId = msg.get("track_id") instanceof String s ? s.trim() : "";
+                boolean locked = Boolean.TRUE.equals(msg.get("locked"));
+                roomService.findRoom(ctx.projectId()).ifPresent(room -> {
+                    CollabRoomService.PeerPresence peer = room.peers.get(session.getId());
+                    if (peer == null) return;
+                    Optional<String> err = roomService.trySetTrackLock(ctx.projectId(), peer, trackId, locked);
+                    if (err.isPresent()) {
+                        roomService.sendDirect(session, Map.of("type", "error", "detail", err.get()));
+                    } else {
+                        roomService.broadcast(ctx.projectId(), Map.of(
+                                "type", "track_locks",
+                                "project_id", ctx.projectId(),
+                                "track_locks", roomService.listTrackLocks(ctx.projectId())
+                        ), null);
+                    }
+                });
+            }
+            case "room_chat" -> {
+                String rawText = msg.get("text") instanceof String s ? s.trim() : "";
+                if (rawText.isBlank()) return;
+                if (rawText.length() > 400) rawText = rawText.substring(0, 400);
+                final String safeText = rawText;
+                roomService.findRoom(ctx.projectId()).ifPresent(room -> {
+                    CollabRoomService.PeerPresence peer = room.peers.get(session.getId());
+                    if (peer == null) return;
+                    Map<String, Object> chatMsg = roomService.appendChatMessage(ctx.projectId(), peer, safeText);
+                    roomService.broadcast(ctx.projectId(), Map.of(
+                            "type", "room_chat",
+                            "project_id", ctx.projectId(),
+                            "message", chatMsg
+                    ), null);
+                });
             }
             case "transport_cue" -> {
                 Map<String, Object> cue = new LinkedHashMap<>();
@@ -212,6 +248,11 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
                     "type", "presence",
                     "project_id", ctx.projectId(),
                     "members", roomService.listMembers(ctx.projectId())
+            ), session.getId());
+            roomService.broadcast(ctx.projectId(), Map.of(
+                    "type", "track_locks",
+                    "project_id", ctx.projectId(),
+                    "track_locks", roomService.listTrackLocks(ctx.projectId())
             ), session.getId());
         }
     }

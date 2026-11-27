@@ -30,6 +30,7 @@ import type {
   PaginatedProjectsResponse,
   PaginatedReleasesResponse,
   ProjectState,
+  ProjectVersionSummary,
   PublishedRelease,
   PublishReleaseRequest,
   PublishReleaseResponse,
@@ -1064,4 +1065,58 @@ export async function toggleFollowCreator(creatorId: string): Promise<CreatorFol
     method: 'POST',
     body: JSON.stringify({}),
   });
+}
+
+// ============================================================
+// 3.8 Phase 10A: Project Version Checkpoints
+// ============================================================
+export async function listProjectVersions(
+  projectId: string,
+  collabCode?: string | null
+): Promise<{ project_id: string; items: ProjectVersionSummary[] }> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<{ project_id: string; items: ProjectVersionSummary[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/versions${q}`,
+    { method: 'GET' }
+  );
+}
+
+export async function createProjectVersion(
+  projectId: string,
+  payload: { label?: string; state?: ProjectState },
+  collabCode?: string | null
+): Promise<ProjectVersionSummary> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<ProjectVersionSummary>(
+    `/api/projects/${encodeURIComponent(projectId)}/versions${q}`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+export async function restoreProjectVersion(
+  projectId: string,
+  versionId: string,
+  collabCode?: string | null
+): Promise<{ status: string; version_id: string; label: string; project_state: ProjectState }> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<{ status: string; version_id: string; label: string; project_state: ProjectState }>(
+    `/api/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}/restore${q}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }
+  );
+}
+
+export async function deleteProjectVersion(
+  projectId: string,
+  versionId: string
+): Promise<{ status: string; version_id: string }> {
+  return requestJson<{ status: string; version_id: string }>(
+    `/api/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(versionId)}`,
+    { method: 'DELETE' }
+  );
 }

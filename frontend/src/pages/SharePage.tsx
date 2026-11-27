@@ -269,6 +269,12 @@ export default function SharePage() {
           visibility: 'private',
           share_slug: null,
           published_at: null,
+          remixed_from: {
+            share_slug: release.share_slug,
+            title: release.title,
+            artist: release.artist,
+            owner_id: release.owner_id,
+          },
           source: 'draft',
           config: { ...state.config, title: remixTitle },
         },
@@ -669,6 +675,21 @@ export default function SharePage() {
             <p className="text-xs text-slate-400 tabular-nums">
               {release.genre} • {Math.round(release.bpm)} BPM • {release.key} {release.scale} • {release.total_bars} bars
             </p>
+            {release.remixed_from?.share_slug && (
+              <div className="pt-0.5">
+                <Link
+                  to={`/share/${encodeURIComponent(release.remixed_from.share_slug)}`}
+                  data-testid="share-remix-lineage"
+                  className="inline-flex items-center gap-1 rounded-full border border-indigo-400/40 bg-indigo-500/15 px-2.5 py-0.5 text-[11px] font-medium text-indigo-200 hover:bg-indigo-500/25"
+                >
+                  <Sparkles className="h-3 w-3 text-indigo-300" />
+                  <span>
+                    Remix từ &ldquo;{release.remixed_from.title}&rdquo;
+                    {release.remixed_from.artist ? ` (${release.remixed_from.artist})` : ''}
+                  </span>
+                </Link>
+              </div>
+            )}
           </div>
         </div>
 

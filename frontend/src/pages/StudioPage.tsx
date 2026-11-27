@@ -9,6 +9,7 @@ import {
   FileArchive,
   FolderTree,
   Grid3X3,
+  History,
   LogIn,
   LogOut,
   Maximize2,
@@ -206,6 +207,7 @@ export default function StudioPage() {
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const [collabOpen, setCollabOpen] = useState<boolean>(Boolean(collabCodeFromUrl));
+  const [collabDrawerTab, setCollabDrawerTab] = useState<'collab' | 'chat_lock' | 'versions'>('collab');
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishArtist, setPublishArtist] = useState('');
   const [publishFormat, setPublishFormat] = useState<'mp3' | 'flac' | 'wav'>('mp3');
@@ -2574,7 +2576,38 @@ export default function StudioPage() {
 
           <button
             type="button"
-            onClick={() => setCollabOpen((o) => !o)}
+            onClick={() => {
+              if (collabOpen && collabDrawerTab === 'versions') {
+                setCollabOpen(false);
+              } else {
+                setCollabDrawerTab('versions');
+                setCollabOpen(true);
+              }
+            }}
+            title="Lưu & Khôi phục Lịch sử Phiên bản (Checkpoints)"
+            data-testid="studio-versions-btn"
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${
+              collabOpen && collabDrawerTab === 'versions'
+                ? 'border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
+                : 'border-white/15 bg-[#232730] text-slate-300 hover:bg-white/10'
+            }`}
+          >
+            <History className="h-3.5 w-3.5 text-emerald-400" />
+            <span className="hidden xl:inline">
+              {collab.versions.length > 0 ? `Versions (${collab.versions.length})` : 'Versions'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (collabOpen && collabDrawerTab !== 'versions') {
+                setCollabOpen(false);
+              } else {
+                setCollabDrawerTab('collab');
+                setCollabOpen(true);
+              }
+            }}
             title="Phòng cộng tác Realtime & Ghi chú Bar"
             data-testid="studio-collab-btn"
             className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${
@@ -3609,8 +3642,10 @@ export default function StudioPage() {
         <div className="fixed top-14 right-3 bottom-3 z-40 flex">
           <StudioCollabPanel
             open={collabOpen}
+            initialTab={collabDrawerTab}
             onClose={() => setCollabOpen(false)}
             projectId={project.project_id}
+            clientId={collab.clientId}
             currentBar={currentBarNow}
             totalBars={project.song_structure.total_bars || 8}
             trackNames={Object.keys(project.tracks)}
@@ -3622,8 +3657,12 @@ export default function StudioPage() {
               (authenticated && project.owner_id === user.user_id)
             }
             peers={collab.peers}
+            trackLocks={collab.trackLocks}
+            chatMessages={collab.chatMessages}
             lastSyncNotice={collab.lastSyncNotice}
             barComments={collab.barComments}
+            versions={collab.versions}
+            versionsBusy={collab.versionsBusy}
             collabError={collab.collabError}
             onEnableInvite={collab.enableInvite}
             onCloseInvite={collab.closeInvite}
@@ -3632,6 +3671,11 @@ export default function StudioPage() {
             onDeleteComment={collab.deleteComment}
             onSeekToBar={handleSeekToBar}
             onBroadcastCue={collab.broadcastCue}
+            onToggleTrackLock={collab.toggleTrackLock}
+            onSendRoomChat={collab.sendRoomChat}
+            onSaveCheckpoint={(label) => collab.saveCheckpoint(label, latestProjectRef.current)}
+            onRestoreCheckpoint={collab.restoreCheckpoint}
+            onDeleteCheckpoint={collab.removeCheckpoint}
           />
         </div>
       )}

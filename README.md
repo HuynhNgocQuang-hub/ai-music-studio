@@ -4,14 +4,14 @@ Hệ thống sáng tác, chỉnh cao độ (**Auto-Tune**) và phối khí âm n
 
 ## Tài liệu Đặc tả & Kiến trúc
 
-- [PHASES_OVERVIEW.md](./docs/PHASES_OVERVIEW.md) — **Tổng hợp Toàn bộ Các Phase Phát triển (Phase 1–10B)** — bảng tổng hợp, sơ đồ tiến hóa kiến trúc và chi tiết từng giai đoạn.
+- [PHASES_OVERVIEW.md](./docs/PHASES_OVERVIEW.md) — **Tổng hợp Toàn bộ Các Phase Phát triển (Phase 1–10)** — bảng tổng hợp, sơ đồ tiến hóa kiến trúc và chi tiết từng giai đoạn.
 - [REQUIREMENTS.md](./docs/REQUIREMENTS.md) — **Tài liệu Yêu cầu Hệ thống & Nghiệp vụ** (Phạm vi In/Out-of-Scope, User Stories, Ma trận truy vết BR/FR -> Code -> Test).
 - [DESIGN_SPEC.md](./docs/DESIGN_SPEC.md) — **Tài liệu Thiết kế Kiến trúc & UI/UX** (Sơ đồ 4 tầng, Sequence TTL Recovery, ER `ProjectState`, FL Playlist Clip Tokens & Security Architecture).
 - [SRS.md](./docs/SRS.md) — Đặc tả yêu cầu chức năng chi tiết (`FR-INP`, `FR-ANA`, `FR-AUTOTUNE`, `FR-HUM`, `FR-LYRIC`, `FR-STUDIO`), ràng buộc và tiêu chí nghiệm thu.
-- [MULTI_AGENT_ARCHITECTURE.md](./docs/MULTI_AGENT_ARCHITECTURE.md) — Kiến trúc 6 Agent, Dual LLM (**Gemini `gemini-3.8-flash` + OpenAI**), lưu trữ nhẹ đĩa (`IndexedDB` + `Redis` + PostgreSQL/H2 + MinIO S3), WebSocket Collab, Social Creators và lộ trình Phase 1–10B.
+- [MULTI_AGENT_ARCHITECTURE.md](./docs/MULTI_AGENT_ARCHITECTURE.md) — Kiến trúc 6 Agent, Dual LLM (**Gemini `gemini-3.8-flash` + OpenAI**), lưu trữ nhẹ đĩa (`IndexedDB` + `Redis` + PostgreSQL/H2 + MinIO S3), WebSocket Collab/Locks, Checkpoints, Social Creators và lộ trình Phase 1–10.
 - [API_AND_UI_SPEC.md](./docs/API_AND_UI_SPEC.md) — Kiến trúc điều hướng (`/`, `/create`, `/studio/:id`, `/library`, `/share`, `/share/:slug`, `/creators`, `/creators/:id`, `/settings`), API Contract (**Spring Boot** + SSE + WebSocket `/ws/collab` + nội bộ `audio-worker`) và cấu trúc `.aimusic`.
 - [PHASE1_TEAM_PLAN.md](./docs/PHASE1_TEAM_PLAN.md) — Kế hoạch phân chia vai trò Multi-Agent thực hiện Phase 1 (MVP) trên kiến trúc Option B.
-- [TASK_BOARD.md](./docs/TASK_BOARD.md) — Bảng theo dõi tiến độ, kiểm lỗi chéo và bằng chứng kiểm thử Phase 1–10B.
+- [TASK_BOARD.md](./docs/TASK_BOARD.md) — Bảng theo dõi tiến độ, kiểm lỗi chéo và bằng chứng kiểm thử Phase 1–10.
 
 ## Kiến trúc Hệ thống (Option B — Hybrid SaaS)
 
@@ -73,12 +73,12 @@ npm run dev
 ```
 Mở trình duyệt tại `http://localhost:3000` (mọi request `/api/*` được `vite.config.ts` proxy sang `http://localhost:8000`).
 
-## Tính năng Nổi bật (Pro DAW & Hybrid Cloud Multi-Agent — Phase 1–10B)
-- **Pro DAW Workstation & Khung Clip FL Studio 12 (`/studio/:id`):** Top Transport cố định (`Play/Pause/Stop/Rec`, `Loop`, `Metronome`, `BPM`, `Key/Scale/Time Signature 4/4|3/4|6/8`, **Undo/Redo 50 bước**, `Select/Split/Snap`, **`Quick | Pro DAW`**, **`Collab` WebSocket**, **`Publish` Demo**), Playlist chuẩn FL Studio (**Audio Waveform** polygon đối xứng, **Multi-Param Automation Envelope `DYN | VOL | PAN | FILT | REVERB`** phát qua Web Audio `linearRampToValueAtTime`, **MIDI Pattern** chia theo Section + biến thể `#2`), và Bottom Dock (`Step Sequencer`, `Piano Roll + Hardware WebMIDI`, `Console Mixer` hỗ trợ **Target LUFS `-9 | -14 | -16`**, `Auto-Tune DSP + Visual Pitch Curve Editor`, `Lyrics & Karaoke`).
-- **Realtime Studio Collaboration & Pinned Bar Notes (`Phase 9`):** WebSocket `/ws/collab` (`2 MB` buffer, Vite `/ws` proxy, Caddy `/ws/*`) xác thực JWT + link mời `?collab=col_...`, hiển thị peer đang online + vị trí Bar/Track/màu riêng, đồng bộ live `ProjectState` (`state_sync`), gửi **`Cue Bar`** (`transport_cue`), và **Ghi chú theo Ô nhịp** (`/api/studio/{id}/comments` qua REST + WS `bar_comment_event`).
+## Tính năng Nổi bật (Pro DAW & Hybrid Cloud Multi-Agent — Phase 1–10)
+- **Pro DAW Workstation & Khung Clip FL Studio 12 (`/studio/:id`):** Top Transport cố định (`Play/Pause/Stop/Rec`, `Loop`, `Metronome`, `BPM`, `Key/Scale/Time Signature 4/4|3/4|6/8`, **Undo/Redo 50 bước**, **Named Checkpoints `Versions`**, `Select/Split/Snap`, **`Quick | Pro DAW`**, **`Collab` WebSocket**, **`Publish` Demo**), Playlist chuẩn FL Studio (**Audio Waveform** polygon đối xứng, **Multi-Param Automation Envelope `DYN | VOL | PAN | FILT | REVERB`** phát qua Web Audio `linearRampToValueAtTime`, **MIDI Pattern** chia theo Section + biến thể `#2`), và Bottom Dock (`Step Sequencer`, `Piano Roll + Hardware WebMIDI`, `Console Mixer` hỗ trợ **Target LUFS `-9 | -14 | -16`**, `Auto-Tune DSP + Visual Pitch Curve Editor`, `Lyrics & Karaoke`).
+- **Realtime Studio Collaboration, Track Lock, Room Chat & Checkpoints (`Phase 9 & 10A`):** WebSocket `/ws/collab` (`2 MB` buffer, Vite `/ws` proxy, Caddy `/ws/*`) xác thực JWT + link mời `?collab=col_...`, đồng bộ live `ProjectState` (`state_sync`), **`Cue Bar`**, **Ghi chú theo Ô nhịp** (`Pinned Bar Notes`), **Khóa mềm từng track (`track_lock`, tự mở khóa khi rớt WS)**, **Live Room Chat** (`chat_history`), và **Checkpoints CloudDB** (`Save / Restore / Delete`).
 - **AI Music Copilot Toàn cục & Toàn năng (`AiCoachChatDrawer.tsx`):** Hoạt động xuyên suốt các trang với **4 chế độ (`Producer` | `Hòa âm` | `Viết lời` | `Mix / Tune`)**, **Mini-RAG `DawPlaybook`**, **SSE Token Streaming** (`/api/coach/chat/stream`), **Multimodal Audio/Voice** (`/api/coach/chat/audio` `<= 10 MB`, `Gửi kèm Vocal`, Mic WAV/Web Speech), **A/B Nghe thử hợp âm**, **24 Native Tool Actions**, **Kiểm tra & Đề xuất tổng thể**, **Áp dụng tất cả**, **Hoàn tác 1 chạm**, và lưu lịch sử qua `IndexedDB chat_threads`.
 - **Stem Separation, DSP Mixer, Custom `.sf2`, FLAC & ID3 Master Export:** Tách stem **Vocal + Beat** (`POST /api/studio/separate-stems`), nạp **Custom `.sf2` SoundFont** tùy chọn (`<= 50 MB`, kiểm tra `RIFF/sfbk`), Auto-Tune **Formant Cepstral + Visual Pitch Curve Editor**, **3-Band EQ (`low_db`, `mid_db`, `high_db`)**, **Vocal Carve 2.2 kHz**, và **Send FX Bus** — xuất `WAV`, `MP3 (320k / 192k + ID3 tags)`, **`FLAC Lossless`**, `Stems`, `.mid` và `.aimusic` với Master Limiter (`<= -1.0 dBFS`) và tùy chọn **Target LUFS (`-9 | -14 | -16`)**.
-- **Hybrid Multi-User Cloud SaaS, Creator Profiles, Follow Feed & Trending Showcase (`Phase 8–10B`):** Hỗ trợ **Guest** hoặc **JWT** (`/login`, `/register`, Local OAuth Sandbox, `POST /api/auth/logout` thu hồi `jti`), phân quyền `CloudProjectAccessService` `403` + **PostgreSQL / H2 Fallback** + **MinIO S3 / Local Fallback**, **Daily Quota Progress (`429`)** trên `/settings`, trang cá nhân Producer **`/creators` & `/creators/:id`** (chỉnh Bio & Follow Graph), Showcase **`/share` & `/share/:slug`** (**Trending Sort**, **Feed Đang theo dõi**, Top Producers spotlight, **Thích**, **Bình luận mốc thời gian**, **Thu hồi Publish**, **Remix trong Studio**), và **Caddy HTTPS + WS Reverse Proxy** (`:8443`).
+- **Hybrid Multi-User Cloud SaaS, Creator Profiles, Follow Feed, Trending Showcase & Remix Lineage (`Phase 8–10`):** Hỗ trợ **Guest** hoặc **JWT** (`/login`, `/register`, Local OAuth Sandbox, `POST /api/auth/logout` thu hồi `jti`), phân quyền `CloudProjectAccessService` `403` + **PostgreSQL / H2 Fallback** + **MinIO S3 / Local Fallback**, **Daily Quota Progress (`429`)** trên `/settings`, trang cá nhân Producer **`/creators` & `/creators/:id`** (chỉnh Bio & Follow Graph), Showcase **`/share` & `/share/:slug`** (**Trending Sort**, **Feed Đang theo dõi**, Top Producers spotlight, **Thích**, **Bình luận mốc thời gian**, **Thu hồi Publish**, **Remix trong Studio** kèm huy hiệu nguồn gốc **`Remix từ ...`**), và **Caddy HTTPS + WS Reverse Proxy** (`:8443`).
 - **Bảo mật & Ổn định TTL (`Phase 5`):** Bind Docker ports về `127.0.0.1`, `CorsConfig` + `SecurityHeadersFilter`, redact key trong `LlmAdapter`, giới hạn upload (`55MB` / `413` trên worker), chống Zip Bomb + collision-safe import (`.aimusic` `overwrite=false`), từ chối `total_bars > 256` (`HTTP 400`), và **Auto-Rehydrate audio từ `IndexedDB` / `CloudDB` / `S3`**.
 - **Session Vault (`/library`) & Settings (`/settings`):** Tìm kiếm, lọc **Workspace Scope (`Tất cả | Của tôi | Công khai`)**, phân trang, badge **Cloud / Public**, nút **Ẩn Share**, xóa 2 bước nội tuyến (tự dọn release công khai), cấu hình Dual LLM, upload `.sf2` SoundFont, thanh tiến độ Cloud Quota, kiểm tra trạng thái Cloud DB/S3 & nút **Test API Key**.
 
@@ -88,15 +88,15 @@ Mở trình duyệt tại `http://localhost:3000` (mọi request `/api/*` đư�
 # Kiểm tra cấu hình Docker Compose nhóm music (redis, postgres, minio, audio-worker, backend, caddy)
 docker compose -p music config -q
 
-# Chạy unit, MockMvc, security, Phase 8 Auth, Phase 9 WebSocket & Phase 10B Creators/LUFS tests cho Backend (44/44 pass)
+# Chạy unit, MockMvc, security, Phase 8–10 Auth, WebSocket Collab/Locks & Checkpoints tests cho Backend (45/45 pass)
 cd backend && mvn -B package
 
-# Chạy unit & DSP/DoS/FLAC tests cho Python Audio DSP Worker trong Docker (17/17 pass ở Phase 7; 18 tests gồm FLAC export sẵn sàng khi Docker bật)
+# Chạy unit & DSP/DoS/Stems/SoundFont tests cho Python Audio DSP Worker trong Docker (17/17 pass)
 docker compose -p music exec -T audio-worker pytest -v tests/test_worker.py
 
 # Kiểm tra TypeScript & build production cho React Vite Frontend (2174 modules)
 cd frontend && npx tsc --noEmit && npm run build
 
-# Chạy Live Full-Stack E2E (yêu cầu Redis :16379, audio-worker :8001, Backend :8000 đang chạy - Phase 1..7 21/21 pass + Phase 8–10B Live Checks)
+# Chạy Live Full-Stack E2E (Redis :16379 + audio-worker :8001 + Backend :8000 -> 21/21 pass trong 69.86s)
 docker run --rm --add-host=host.docker.internal:host-gateway -v "${PWD}:/workspace" -w /workspace -e "E2E_BASE_URL=http://host.docker.internal:8000" music-audio-worker pytest -v tests/e2e/test_phase1_e2e.py tests/e2e/test_phase2_3_e2e.py
 ```

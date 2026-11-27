@@ -411,6 +411,9 @@ public class PublishShareController {
             map.put("chords", state.getSongStructure() != null ? state.getSongStructure().getChords() : List.of());
             map.put("lyrics", state.getLyrics() != null ? state.getLyrics().getLines() : List.of());
             map.put("comments", comments.stream().map(PublishShareController::toCommentMap).toList());
+            if (state.getRemixedFrom() != null && !state.getRemixedFrom().isEmpty()) {
+                map.put("remixed_from", state.getRemixedFrom());
+            }
         }
         return map;
     }
