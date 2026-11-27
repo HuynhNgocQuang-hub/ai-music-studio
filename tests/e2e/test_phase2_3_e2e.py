@@ -1211,5 +1211,42 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
     )
     assert pub_res2.status_code == 200, pub_res2.text
     slug2 = pub_res2.json()["share_slug"]
+
+    # Phase 9: Studio Collab session, Pinned Bar Notes & Community Showcase Likes/Timestamp Comments
+    collab_res = api_client.post(f"/api/studio/{pid}/collab/session")
+    assert collab_res.status_code == 200, collab_res.text
+    room_code = collab_res.json()["room_code"]
+    assert room_code
+
+    bcmt_res = api_client.post(
+        f"/api/studio/{pid}/comments?collab={room_code}",
+        json={"bar_number": 3, "track_id": "bass", "text": "Phase 9 E2E note"},
+    )
+    assert bcmt_res.status_code == 200, bcmt_res.text
+    bcmt_id = bcmt_res.json()["id"]
+    assert api_client.patch(
+        f"/api/studio/{pid}/comments/{bcmt_id}?collab={room_code}",
+        json={"resolved": True},
+    ).status_code == 200
+    assert len(api_client.get(f"/api/studio/{pid}/comments?collab={room_code}").json()["items"]) >= 1
+
+    like_res = api_client.post(f"/api/share/{slug2}/like")
+    assert like_res.status_code == 200, like_res.text
+    assert like_res.json()["likes_count"] >= 1
+
+    scmt_res = api_client.post(
+        f"/api/share/{slug2}/comments",
+        json={"text": "E2E timestamp comment", "timestamp_sec": 4.2, "bar_number": 2},
+    )
+    assert scmt_res.status_code == 200, scmt_res.text
+    scmt_id = scmt_res.json()["id"]
+
+    share_detail = api_client.get(f"/api/share/{slug2}")
+    assert share_detail.status_code == 200
+    assert share_detail.json()["likes_count"] >= 1
+    assert share_detail.json()["comments_count"] >= 1
+
+    assert api_client.delete(f"/api/share/{slug2}/comments/{scmt_id}").status_code == 200
+    assert api_client.delete(f"/api/studio/{pid}/collab/session").status_code == 200
     assert api_client.delete(f"/api/projects/{pid}").status_code == 200
     assert api_client.get(f"/api/share/{slug2}").status_code == 404

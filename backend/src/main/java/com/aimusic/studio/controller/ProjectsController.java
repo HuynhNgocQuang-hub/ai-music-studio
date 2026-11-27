@@ -7,6 +7,7 @@ import com.aimusic.studio.cloud.CloudDatabaseService;
 import com.aimusic.studio.cloud.CloudProjectAccessService;
 import com.aimusic.studio.cloud.ObjectStorageService;
 import com.aimusic.studio.cloud.QuotaRateLimitService;
+import com.aimusic.studio.collab.CollabRoomService;
 import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.AudioClip;
 import com.aimusic.studio.model.ProjectState;
@@ -57,6 +58,7 @@ public class ProjectsController {
     private final QuotaRateLimitService quotaService;
     private final ObjectMapper objectMapper;
     private final CloudProjectAccessService projectAccess;
+    private final CollabRoomService collabRoomService;
 
     public ProjectsController(
             ProjectStateStore store,
@@ -64,7 +66,7 @@ public class ProjectsController {
             JavaAudioFallbackService audioFallback,
             AppProperties properties
     ) {
-        this(store, audioWorkerClient, audioFallback, properties, null, null, null, new ObjectMapper(), null);
+        this(store, audioWorkerClient, audioFallback, properties, null, null, null, new ObjectMapper(), null, null);
     }
 
     @Autowired
@@ -77,7 +79,8 @@ public class ProjectsController {
             @Autowired(required = false) ObjectStorageService objectStorage,
             @Autowired(required = false) QuotaRateLimitService quotaService,
             @Autowired(required = false) ObjectMapper objectMapper,
-            @Autowired(required = false) CloudProjectAccessService projectAccess
+            @Autowired(required = false) CloudProjectAccessService projectAccess,
+            @Autowired(required = false) CollabRoomService collabRoomService
     ) {
         this.store = store;
         this.audioWorkerClient = audioWorkerClient;
@@ -89,6 +92,7 @@ public class ProjectsController {
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
         this.projectAccess = projectAccess != null ? projectAccess
                 : new CloudProjectAccessService(store, cloudDb, this.objectMapper);
+        this.collabRoomService = collabRoomService;
     }
 
     @GetMapping
@@ -157,19 +161,32 @@ public class ProjectsController {
     }
 
     @GetMapping("/{projectId}")
-    public ProjectState getProject(@PathVariable("projectId") String projectId) {
+    public ProjectState getProject(
+            @PathVariable("projectId") String projectId,
+            @RequestParam(value = "collab", required = false) String collabCode
+    ) {
         ProjectState state = projectAccess.findOrRehydrate(projectId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Project '" + projectId + "' not found."));
-        projectAccess.requireReadAccess(state, "This private cloud project belongs to another creator.");
+        boolean isInvited = collabRoomService != null && collabRoomService.isValidInvite(projectId, collabCode);
+        if (!isInvited) {
+            projectAccess.requireReadAccess(state, "This private cloud project belongs to another creator.");
+        }
         return state;
     }
 
     @PutMapping("/{projectId}/sync")
-    public ProjectState syncProject(@PathVariable("projectId") String projectId, @RequestBody ProjectState payload) {
+    public ProjectState syncProject(
+            @PathVariable("projectId") String projectId,
+            @RequestParam(value = "collab", required = false) String collabCode,
+            @RequestBody ProjectState payload
+    ) {
         Optional<ProjectState> existing = projectAccess.findOrRehydrate(projectId);
+        boolean isInvited = collabRoomService != null && collabRoomService.isValidInvite(projectId, collabCode);
         if (existing.isPresent()) {
-            projectAccess.requireWriteAccess(existing.get(), "Cannot overwrite another creator's project.");
+            if (!isInvited) {
+                projectAccess.requireWriteAccess(existing.get(), "Cannot overwrite another creator's project.");
+            }
             store.pushUndo(projectId, existing.get());
         }
 
@@ -251,7 +268,7 @@ public class ProjectsController {
             @RequestBody(required = false) ExportAudioRequest reqBody
     ) {
         ExportAudioRequest req = reqBody != null ? reqBody : new ExportAudioRequest();
-        ProjectState project = getProject(projectId);
+        ProjectState project = getProject(projectId, null);
 
         Map<String, TrackState> tracks = project.getTracks();
         if (tracks != null && !tracks.isEmpty() && tracks.values().stream().allMatch(TrackState::isMute)) {
@@ -297,7 +314,7 @@ public class ProjectsController {
 
     @PostMapping("/{projectId}/export/midi")
     public ResponseEntity<byte[]> exportProjectMidi(@PathVariable("projectId") String projectId) {
-        ProjectState project = getProject(projectId);
+        ProjectState project = getProject(projectId, null);
         byte[] midi = audioFallback.exportMidi(project);
         String safeName = sanitizeFilename(projectId);
         return ResponseEntity.ok()
@@ -308,7 +325,7 @@ public class ProjectsController {
 
     @PostMapping("/{projectId}/export/aimusic")
     public ResponseEntity<byte[]> exportAimusic(@PathVariable("projectId") String projectId) {
-        ProjectState project = getProject(projectId);
+        ProjectState project = getProject(projectId, null);
         byte[] bundle = audioFallback.exportAimusicBundle(project, store);
         String safeName = sanitizeFilename(projectId);
         return ResponseEntity.ok()

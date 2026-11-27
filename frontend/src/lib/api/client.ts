@@ -11,6 +11,7 @@ import type {
   CoachChatRequest,
   CoachChatResponse,
   CoachSuggestedAction,
+  CollabSessionSummary,
   DenoiseRequest,
   DenoiseResponse,
   HealthResponse,
@@ -29,6 +30,8 @@ import type {
   PublishedRelease,
   PublishReleaseRequest,
   PublishReleaseResponse,
+  ReleaseComment,
+  StudioBarComment,
   StudioLLMSettings,
   UploadAudioResponse,
 } from '@/types/project';
@@ -686,16 +689,24 @@ function hydrateProjectTitle(state: ProjectState): ProjectState {
   };
 }
 
-export async function getProject(projectId: string): Promise<ProjectState> {
-  const res = await requestJson<ProjectState>(`/api/projects/${encodeURIComponent(projectId)}`, {
+export async function getProject(projectId: string, collabCode?: string | null): Promise<ProjectState> {
+  const basePath = `/api/projects/${encodeURIComponent(projectId)}`;
+  const path = collabCode ? `${basePath}?collab=${encodeURIComponent(collabCode)}` : basePath;
+  const res = await requestJson<ProjectState>(path, {
     method: 'GET',
   });
   return hydrateProjectTitle(res);
 }
 
-export async function syncProject(projectId: string, state: ProjectState): Promise<ProjectState> {
+export async function syncProject(
+  projectId: string,
+  state: ProjectState,
+  collabCode?: string | null
+): Promise<ProjectState> {
   const normalized = hydrateProjectTitle(state);
-  const res = await requestJson<ProjectState>(`/api/projects/${encodeURIComponent(projectId)}/sync`, {
+  const basePath = `/api/projects/${encodeURIComponent(projectId)}/sync`;
+  const path = collabCode ? `${basePath}?collab=${encodeURIComponent(collabCode)}` : basePath;
+  const res = await requestJson<ProjectState>(path, {
     method: 'PUT',
     body: JSON.stringify(normalized),
   });
@@ -861,4 +872,155 @@ export async function getPublicShare(slug: string): Promise<PublishedRelease> {
 
 export function getPublicShareAudioUrl(slug: string): string {
   return `${getApiBaseUrl()}/api/share/${encodeURIComponent(slug)}/audio`;
+}
+
+// ============================================================
+// 3.6 Phase 9: Showcase Likes/Comments & Realtime Studio Collab
+// ============================================================
+export async function toggleShareLike(
+  slug: string
+): Promise<{ share_slug: string; liked: boolean; likes_count: number }> {
+  return requestJson<{ share_slug: string; liked: boolean; likes_count: number }>(
+    `/api/share/${encodeURIComponent(slug)}/like`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }
+  );
+}
+
+export async function listShareComments(
+  slug: string
+): Promise<{ share_slug: string; items: ReleaseComment[]; count: number }> {
+  return requestJson<{ share_slug: string; items: ReleaseComment[]; count: number }>(
+    `/api/share/${encodeURIComponent(slug)}/comments`,
+    { method: 'GET' }
+  );
+}
+
+export async function postShareComment(
+  slug: string,
+  payload: { timestamp_sec: number; bar_number?: number; text: string; author_name?: string }
+): Promise<ReleaseComment & { comments_count?: number }> {
+  return requestJson<ReleaseComment & { comments_count?: number }>(
+    `/api/share/${encodeURIComponent(slug)}/comments`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+export async function deleteShareComment(
+  slug: string,
+  commentId: string
+): Promise<{ status: string; comment_id: string; comments_count: number }> {
+  return requestJson<{ status: string; comment_id: string; comments_count: number }>(
+    `/api/share/${encodeURIComponent(slug)}/comments/${encodeURIComponent(commentId)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function getCollabSession(
+  projectId: string,
+  collabCode?: string | null
+): Promise<CollabSessionSummary> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<CollabSessionSummary>(`/api/studio/${encodeURIComponent(projectId)}/collab/session${q}`, {
+    method: 'GET',
+  });
+}
+
+export async function enableCollabSession(projectId: string): Promise<CollabSessionSummary> {
+  return requestJson<CollabSessionSummary>(`/api/studio/${encodeURIComponent(projectId)}/collab/session`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export async function closeCollabSession(
+  projectId: string
+): Promise<{ project_id: string; active: boolean; closed: boolean }> {
+  return requestJson<{ project_id: string; active: boolean; closed: boolean }>(
+    `/api/studio/${encodeURIComponent(projectId)}/collab/session`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function listStudioBarComments(
+  projectId: string,
+  collabCode?: string | null
+): Promise<{ project_id: string; items: StudioBarComment[] }> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<{ project_id: string; items: StudioBarComment[] }>(
+    `/api/studio/${encodeURIComponent(projectId)}/comments${q}`,
+    { method: 'GET' }
+  );
+}
+
+export async function addStudioBarComment(
+  projectId: string,
+  payload: { bar_number: number; track_id?: string; text: string; author_name?: string },
+  collabCode?: string | null
+): Promise<StudioBarComment> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<StudioBarComment>(`/api/studio/${encodeURIComponent(projectId)}/comments${q}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function toggleStudioBarCommentResolved(
+  projectId: string,
+  commentId: string,
+  resolved: boolean,
+  collabCode?: string | null
+): Promise<StudioBarComment> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<StudioBarComment>(
+    `/api/studio/${encodeURIComponent(projectId)}/comments/${encodeURIComponent(commentId)}${q}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ resolved }),
+    }
+  );
+}
+
+export async function deleteStudioBarComment(
+  projectId: string,
+  commentId: string,
+  collabCode?: string | null
+): Promise<{ status: string; comment_id: string }> {
+  const q = collabCode ? `?collab=${encodeURIComponent(collabCode)}` : '';
+  return requestJson<{ status: string; comment_id: string }>(
+    `/api/studio/${encodeURIComponent(projectId)}/comments/${encodeURIComponent(commentId)}${q}`,
+    { method: 'DELETE' }
+  );
+}
+
+export function buildCollabWsUrl(params: {
+  projectId: string;
+  clientId: string;
+  roomCode?: string | null;
+  displayName?: string | null;
+}): string {
+  const base = getApiBaseUrl();
+  let wsOrigin: string;
+  if (base.startsWith('https://')) {
+    wsOrigin = 'wss://' + base.slice('https://'.length);
+  } else if (base.startsWith('http://')) {
+    wsOrigin = 'ws://' + base.slice('http://'.length);
+  } else if (typeof window !== 'undefined') {
+    wsOrigin = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+  } else {
+    wsOrigin = 'ws://127.0.0.1:8000';
+  }
+  const qs = new URLSearchParams();
+  qs.set('projectId', params.projectId);
+  qs.set('clientId', params.clientId);
+  if (params.roomCode) qs.set('room', params.roomCode);
+  if (params.displayName) qs.set('displayName', params.displayName);
+  const token = getAuthToken();
+  if (token) qs.set('token', token);
+  return `${wsOrigin.replace(/\/+$/, '')}/ws/collab?${qs.toString()}`;
 }

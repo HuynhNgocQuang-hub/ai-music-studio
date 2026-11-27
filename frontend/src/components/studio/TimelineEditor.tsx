@@ -798,6 +798,9 @@ export default function TimelineEditor({
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-white/10 bg-[#16191f]">
+      <label htmlFor="timeline-texture-upload" className="sr-only">
+        Tải lên mẫu âm thanh Texture
+      </label>
       <input
         id="timeline-texture-upload"
         name="textureSample"
@@ -1391,7 +1394,7 @@ export default function TimelineEditor({
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                 Chord Track
               </span>
-              <span className="text-[10px] text-slate-500">Bấm ô để sửa</span>
+              <span className="text-[10px] text-slate-400">Bấm ô để sửa</span>
             </div>
             <div className="relative h-7" style={{ width: `${laneWidthPx}px` }}>
               {Array.from({ length: totalBars }, (_, idx) => {

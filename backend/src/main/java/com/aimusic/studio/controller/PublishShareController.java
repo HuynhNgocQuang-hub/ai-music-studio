@@ -266,6 +266,83 @@ public class PublishShareController {
         return toReleaseMap(refreshed, state);
     }
 
+    @PostMapping("/api/share/{slug}/like")
+    public Map<String, Object> toggleShareLike(@PathVariable("slug") String slug) {
+        cloudDb.findReleaseBySlug(slug)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Published demo '" + slug + "' not found."));
+        return cloudDb.toggleReleaseLike(slug, AuthContextHolder.getActorQuotaKey());
+    }
+
+    @GetMapping("/api/share/{slug}/comments")
+    public Map<String, Object> listShareComments(@PathVariable("slug") String slug) {
+        cloudDb.findReleaseBySlug(slug)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Published demo '" + slug + "' not found."));
+        List<Map<String, Object>> items = cloudDb.listReleaseComments(slug).stream()
+                .map(PublishShareController::toCommentMap)
+                .toList();
+        return Map.of("share_slug", slug, "items", items, "count", items.size());
+    }
+
+    @PostMapping("/api/share/{slug}/comments")
+    public Map<String, Object> addShareComment(
+            @PathVariable("slug") String slug,
+            @RequestBody Map<String, Object> body
+    ) {
+        cloudDb.findReleaseBySlug(slug)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Published demo '" + slug + "' not found."));
+        String text = body != null && body.get("text") instanceof String s ? s.trim() : "";
+        if (text.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Comment text is required.");
+        }
+        if (text.length() > 500) {
+            text = text.substring(0, 500);
+        }
+        double ts = body.get("timestamp_sec") instanceof Number n ? Math.max(0.0, n.doubleValue()) : 0.0;
+        Integer bar = body.get("bar_number") instanceof Number bn ? Math.max(1, bn.intValue()) : null;
+        UserPrincipal caller = AuthContextHolder.get();
+        String customName = body.get("author_name") instanceof String an && !an.isBlank() ? an.trim() : null;
+        String authorId = caller.isGuest() ? AuthContextHolder.getActorQuotaKey() : caller.userId();
+        String authorName = caller.isGuest()
+                ? (customName != null ? customName : "Guest Listener")
+                : caller.displayName();
+        CloudDatabaseService.ReleaseCommentRecord rec = cloudDb.addReleaseComment(
+                slug, authorId, authorName, ts, bar, text
+        );
+        Map<String, Object> out = new LinkedHashMap<>(toCommentMap(rec));
+        out.put("comments_count", cloudDb.listReleaseComments(slug).size());
+        return out;
+    }
+
+    @DeleteMapping("/api/share/{slug}/comments/{commentId}")
+    public Map<String, Object> deleteShareComment(
+            @PathVariable("slug") String slug,
+            @PathVariable("commentId") String commentId
+    ) {
+        CloudDatabaseService.PublishedReleaseRecord rel = cloudDb.findReleaseBySlug(slug)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Published demo '" + slug + "' not found."));
+        CloudDatabaseService.ReleaseCommentRecord cmt = cloudDb.findReleaseComment(commentId)
+                .filter(c -> slug.equals(c.shareSlug()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Comment not found."));
+
+        UserPrincipal caller = AuthContextHolder.get();
+        String actorKey = AuthContextHolder.getActorQuotaKey();
+        boolean isCommentAuthor = actorKey.equals(cmt.authorId()) || (!caller.isGuest() && caller.userId().equals(cmt.authorId()));
+        boolean isReleaseOwner = !caller.isGuest() && caller.userId().equals(rel.ownerId());
+        if (!isCommentAuthor && !isReleaseOwner) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You do not have permission to delete this comment.");
+        }
+        cloudDb.deleteReleaseComment(commentId);
+        return Map.of(
+                "status", "deleted",
+                "comment_id", commentId,
+                "comments_count", cloudDb.listReleaseComments(slug).size()
+        );
+    }
+
     @GetMapping("/api/share/{slug}/audio")
     public ResponseEntity<byte[]> streamPublicReleaseAudio(@PathVariable("slug") String slug) {
         CloudDatabaseService.PublishedReleaseRecord rel = cloudDb.findReleaseBySlug(slug)
@@ -291,6 +368,8 @@ public class PublishShareController {
     }
 
     private Map<String, Object> toReleaseMap(CloudDatabaseService.PublishedReleaseRecord r, ProjectState state) {
+        String actorKey = AuthContextHolder.getActorQuotaKey();
+        List<CloudDatabaseService.ReleaseCommentRecord> comments = cloudDb.listReleaseComments(r.shareSlug());
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("share_slug", r.shareSlug());
         map.put("project_id", r.projectId());
@@ -305,6 +384,9 @@ public class PublishShareController {
         map.put("master_format", r.masterFormat());
         map.put("lufs_target", r.lufsTarget());
         map.put("plays_count", r.playsCount());
+        map.put("likes_count", cloudDb.countReleaseLikes(r.shareSlug()));
+        map.put("liked_by_me", cloudDb.hasActorLikedRelease(r.shareSlug(), actorKey));
+        map.put("comments_count", comments.size());
         map.put("created_at", r.createdAt());
         map.put("share_url", "/share/" + r.shareSlug());
         map.put("stream_url", "/api/share/" + r.shareSlug() + "/audio");
@@ -313,7 +395,21 @@ public class PublishShareController {
             map.put("sections", state.getSongStructure() != null ? state.getSongStructure().getSections() : List.of());
             map.put("chords", state.getSongStructure() != null ? state.getSongStructure().getChords() : List.of());
             map.put("lyrics", state.getLyrics() != null ? state.getLyrics().getLines() : List.of());
+            map.put("comments", comments.stream().map(PublishShareController::toCommentMap).toList());
         }
+        return map;
+    }
+
+    private static Map<String, Object> toCommentMap(CloudDatabaseService.ReleaseCommentRecord c) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", c.id());
+        map.put("share_slug", c.shareSlug());
+        map.put("author_id", c.authorId());
+        map.put("author_name", c.authorName());
+        map.put("timestamp_sec", c.timestampSec());
+        map.put("bar_number", c.barNumber());
+        map.put("text", c.text());
+        map.put("created_at", c.createdAt());
         return map;
     }
 

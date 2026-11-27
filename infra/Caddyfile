@@ -12,6 +12,11 @@
 		}
 	}
 
+	@ws path /ws/*
+	handle @ws {
+		reverse_proxy backend:8000
+	}
+
 	handle {
 		reverse_proxy {$FRONTEND_UPSTREAM:host.docker.internal:3000}
 	}

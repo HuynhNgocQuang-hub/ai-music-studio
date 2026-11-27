@@ -1,7 +1,7 @@
-# Tổng quan Toàn bộ Các Phase Phát triển (Phase 1 – Phase 8)
+# Tổng quan Toàn bộ Các Phase Phát triển (Phase 1 – Phase 9)
 ## Dự án: AI Music Studio (Hybrid Multi-Agent DAW)
 
-- **Phiên bản tài liệu:** 1.1 (Phase 1–8 Complete: Hybrid Multi-User Cloud Pro DAW & Publishing)
+- **Phiên bản tài liệu:** 1.2 (Phase 1–9 Complete: Hybrid Multi-User Cloud Pro DAW, Publishing & Realtime WebSocket Collab Showcase)
 - **Cập nhật lần cuối:** 2026-11-27
 - **Liên kết liên quan:** [README.md](../README.md) | [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 
@@ -20,6 +20,7 @@
 | **Phase 6B** | **Stem Separation, Multi-Param Automation & A/B Audition** | `DONE` | Tách Stem **Vocal + Beat**, Automation đa tham số **`DYN \| VOL \| PAN \| FILT \| REVERB`** via `AudioParam.linearRampToValueAtTime`, **Nghe thử hợp âm** A/B, nâng lên **24 Tools** | `mvn -B package` `38/38`, `worker` `17/17`, `vite build` `2167` modules, Live E2E `21/21`, Chrome `recording_12.mp4` |
 | **Phase 7** | **Visual Pitch Curve, WebMIDI, Custom `.sf2` & Undo 50** | `DONE` | **Visual Pitch Curve Editor** (semitone nudge/scale snap), **Hardware WebMIDI** keyboard, nạp **Custom `.sf2` SoundFont** (`<= 50 MB`), mở rộng **Undo 50 bước** | Verified chung đợt Phase 6B + Phase 7 (`38/38` BE, `17/17` worker, `21/21` E2E, `recording_12.mp4`) |
 | **Phase 8** | **Multi-User Cloud Workspace & Publishing (Hybrid SaaS)** | `DONE` | **Hybrid Guest + JWT Auth & Logout JTI Revocation**, **S3 Audio Auto-Rehydration & Full Controller `403` Ownership**, **Workspace Scope (`all\|mine\|public`)**, **PostgreSQL + H2 Fallback**, **MinIO S3 + Local Fallback**, **Daily Quota Progress & Rate-Limit (`429`)**, **Caddy HTTPS**, **Master FLAC/ID3**, **Public Showcase Filters `/share/:slug`** & **Multi-User Remix** | `mvn -B package` **`41/41`**, `vite build` **`2171` modules**, `docker compose config -q` `0`, Live HTTP Proxy **16/16 PASS** (`10` auth + `6` Phase 8), Chrome Live E2E (`100/100` Accessibility trên `/login`, `/library`, `/share`, `/settings`, `0` console/HTTP errors) |
+| **Phase 9** | **Realtime Studio Collaboration & Community Showcase** | `DONE` | **WebSocket `/ws/collab`** (`2 MB` buffer, Vite `/ws`, Caddy `/ws/*`) với JWT + invite `room_code`, live presence/cursor, anti-echo `state_sync` & `transport_cue`; **Studio Pinned Bar Notes** (`studio_bar_comments`); **Showcase `/share/:slug` Likes (`release_likes`) & Timestamp Comments (`release_comments`)** kèm timeline markers tương tác | `mvn -B package` **`43/43`** (`CollabPhase9Tests` >16KB WS test PASS), `vite build` **`2173` modules**, Live WS+HTTP Proxy `live_phase9_test.mjs` **8/8 PASS**, Chrome Live E2E (`4d7a9921`): 2-tab `LIVE` sync + Showcase Likes/Comments **PASS**, Lighthouse Accessibility **100/100** (`/studio` & `/share/:slug`), `0` errors/warnings |
 
 ---
 
@@ -35,6 +36,7 @@ flowchart LR
     P6A --> P6B["Phase 6B: Stems & Automation<br/>Vocal/Beat Stems + DYN/VOL/PAN/FILT/REVERB + 24 Tools"]
     P6B --> P7["Phase 7: Pro DSP & Hardware<br/>Pitch Curve + WebMIDI + Custom .sf2 + Undo x50"]
     P7 --> P8["Phase 8: Hybrid Cloud SaaS<br/>JWT Auth + Postgres/H2 + MinIO S3 + Quota + Demo Share"]
+    P8 --> P9["Phase 9: Realtime Collab & Showcase<br/>WS /ws/collab + Bar Notes + Likes & Timestamp Comments"]
 ```
 
 ---
@@ -131,3 +133,12 @@ flowchart LR
   - **PostgreSQL + Embedded H2 Fallback (`CloudDatabaseService`) & MinIO S3 + Local Fallback Audio Durability (`ObjectStorageService`, `ProjectStateStore`):** Lưu bền vững `users`, `cloud_projects`, `published_releases`, `.aimusic`/Master audio và **tự khôi phục `mem://...` audio refs từ S3 (`assets/...`) khi Redis TTL hết hạn**; xóa project tự động dọn cascade `published_releases` + S3 assets.
   - **Quota Storage/Rate-Limit (`QuotaRateLimitService`, `SettingsPage`) & Caddy HTTPS (`infra/Caddyfile`):** Kiểm soát hạn mức AI Generate & Export/Publish theo ngày (`HTTP 429`), cộng dồn `storage_used_bytes` khi upload/tách stem, hiển thị **3 thanh tiến độ Quota** trên `/settings`, và tích hợp `postgres`, `minio`, `caddy` (`:8443`) vào `docker-compose.yml`.
   - **Public Demo Showcase & Workspace Library (`PublishShareController`, `SharePage.tsx`, `LibraryPage.tsx`):** Xuất bản **FLAC Lossless / MP3 / WAV** kèm **ID3/Vorbis tags**; lọc Kho Session theo **Workspace Scope (`all|mine|public`)** + nút **Ẩn Share**; trang `/share` & `/share/:slug` hỗ trợ **Tìm kiếm, Lọc thể loại, Phân trang**, đếm lượt nghe, nút **Thu hồi Publish** cho tác giả và **Remix trong Studio** gán sạch quyền cho người remix.
+
+---
+
+### Phase 9 — Realtime Studio Collaboration & Community Demo Showcase (`DONE`)
+- **Mục tiêu:** Cho phép nhiều người dùng cùng mở một Studio Session để cộng tác thời gian thực qua WebSocket và biến `/share` thành Community Demo Showcase có tương tác **Thích** & **Bình luận theo mốc thời gian**.
+- **Chức năng chính:**
+  - **Spring WebSocket `/ws/collab` (`WebSocketConfig.java`, `CollabRoomService.java`, `CollabWebSocketHandler.java`, Vite `/ws`, Caddy `/ws/*`):** Cấu hình frame buffer **`2 MB`**, xác thực JWT + invite `room_code`, đồng bộ danh sách peer + cursor (`bar`, `track_id`, màu peer), phát **`state_sync`** chống echo (`skipNextCollabBroadcastRef`), **`transport_cue`**, và hỗ trợ `GET/POST/DELETE /api/studio/{id}/collab/session`.
+  - **Studio Collab Drawer & Pinned Bar Notes (`CollabController.java`, `useStudioCollab.ts`, `StudioCollabPanel.tsx`):** Ngăn kéo `Collab` trên Top Transport để tạo/copy/thu hồi link `?collab=col_...`, gửi `Cue Bar X`, ghim/lọc/đánh dấu xong/xóa **Ghi chú theo Ô nhịp** (`studio_bar_comments` via REST + WS `bar_comment_event`), và chuẩn hóa Lighthouse Accessibility `/studio` lên **`100/100`**.
+  - **Showcase Likes & Timestamp Comments (`CloudDatabaseService.java`, `PublishShareController.java`, `SharePage.tsx`):** Thêm bảng **`release_likes`** & **`release_comments`**, nút **Thích** (`POST /api/share/{slug}/like`), form bình luận gắn mốc giây & ô nhịp (`mm:ss` / `Bar`), vạch đánh dấu tương tác ngay trên thanh tiến độ `<audio>`, click nhảy tới đúng giây đó, bảo vệ `403` khi xóa & dọn cascade khi xóa project.

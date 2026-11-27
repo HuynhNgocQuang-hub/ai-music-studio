@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Bot,
   ChevronDown,
@@ -31,6 +31,7 @@ import {
   Trash2,
   Undo2,
   UserCheck,
+  Users,
   Wand2,
   X,
   XCircle,
@@ -61,6 +62,7 @@ import {
   uploadTrackClip,
 } from '@/lib/api/client';
 import { useAuth } from '@/components/providers/AuthProvider';
+import { useStudioCollab } from '@/lib/collab/useStudioCollab';
 import {
   encodeBlobToWav,
   getAudioEngine,
@@ -82,6 +84,7 @@ import {
 import { getAudioBlob, getDraft, markDraftSaved, saveAudioBlob } from '@/lib/storage/indexeddb';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import ConsoleMixerPanel from '@/components/studio/ConsoleMixerPanel';
+import StudioCollabPanel from '@/components/studio/StudioCollabPanel';
 import PianoRollEditor from '@/components/studio/PianoRollEditor';
 import PitchCurveEditor from '@/components/studio/PitchCurveEditor';
 import QuickStudioView from '@/components/studio/QuickStudioView';
@@ -128,10 +131,13 @@ function dbToSegmentCount(db: number, total = 12): number {
 
 export default function StudioPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const params = useParams<{ id: string }>();
   const routeId = params?.id ? decodeURIComponent(params.id) : '';
+  const collabCodeFromUrl = new URLSearchParams(location.search).get('collab');
   const {
     project,
+    setProject,
     updateProject,
     loadProjectIntoSession,
     saveNow,
@@ -199,12 +205,65 @@ export default function StudioPage() {
   const [clipUploadBusy, setClipUploadBusy] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [collabOpen, setCollabOpen] = useState<boolean>(Boolean(collabCodeFromUrl));
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishArtist, setPublishArtist] = useState('');
   const [publishFormat, setPublishFormat] = useState<'mp3' | 'flac' | 'wav'>('mp3');
   const [bpmDraft, setBpmDraft] = useState<string | null>(null);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const autoFollowTimerRef = useRef<number | null>(null);
+
+  const beatsPerBarNow = getBeatsPerBar(project.analysis.time_signature);
+  const currentBarNow = Math.max(
+    1,
+    Math.min(
+      project.song_structure.total_bars || 4,
+      Math.floor((transport.currentTimeSec * (project.analysis.bpm || 120)) / (60 * Math.max(1, beatsPerBarNow))) + 1
+    )
+  );
+
+  const prevCollabProjectRef = useRef(project);
+  const skipNextCollabBroadcastRef = useRef(false);
+  const collab = useStudioCollab({
+    project,
+    displayName: authenticated ? user.display_name : 'Guest Studio',
+    collabCodeFromUrl,
+    panelOpen: collabOpen,
+    currentBar: currentBarNow,
+    activeTab,
+    activeTrack: inspectedTrackId || selectedTrack,
+    onRemoteState: useCallback(
+      (incoming: ProjectState) => {
+        skipNextCollabBroadcastRef.current = true;
+        setProject(incoming);
+        latestProjectRef.current = incoming;
+        prevCollabProjectRef.current = incoming;
+      },
+      [setProject]
+    ),
+  });
+
+  const queueBroadcastState = collab.queueBroadcastState;
+  useEffect(() => {
+    if (prevCollabProjectRef.current !== project) {
+      prevCollabProjectRef.current = project;
+      if (skipNextCollabBroadcastRef.current) {
+        skipNextCollabBroadcastRef.current = false;
+        return;
+      }
+      queueBroadcastState(project);
+    }
+  }, [project, queueBroadcastState]);
+
+  const handleSeekToBar = useCallback(
+    (barNumber: number) => {
+      const bpm = project.analysis.bpm || 120;
+      const bpb = getBeatsPerBar(project.analysis.time_signature);
+      const sec = ((Math.max(1, barNumber) - 1) * bpb * 60) / bpm;
+      engine.seek(sec);
+    },
+    [engine, project.analysis.bpm, project.analysis.time_signature]
+  );
 
   useEffect(() => {
     if (!exportMenuOpen) return;
@@ -239,19 +298,33 @@ export default function StudioPage() {
 
   // Load project from IndexedDB or Backend only when routeId changes
   useEffect(() => {
-    if (!routeId || routeId === latestProjectRef.current.project_id) {
+    if (!routeId || (!collabCodeFromUrl && routeId === latestProjectRef.current.project_id)) {
       return;
     }
     let active = true;
     void (async () => {
+      if (collabCodeFromUrl) {
+        try {
+          const remote = await getProject(routeId, collabCodeFromUrl);
+          if (active) {
+            skipNextCollabBroadcastRef.current = true;
+            loadProjectIntoSession(remote, { dirty: false });
+          }
+          return;
+        } catch {
+          // Fall back to IndexedDB if remote invite fetch fails
+        }
+      }
       const local = await getDraft(routeId);
       if (local && active) {
+        skipNextCollabBroadcastRef.current = true;
         loadProjectIntoSession(local.state, { dirty: local.dirty });
         return;
       }
       try {
-        const remote = await getProject(routeId);
+        const remote = await getProject(routeId, collabCodeFromUrl);
         if (active) {
+          skipNextCollabBroadcastRef.current = true;
           loadProjectIntoSession(remote, { dirty: false });
         }
       } catch {
@@ -261,7 +334,7 @@ export default function StudioPage() {
     return () => {
       active = false;
     };
-  }, [routeId, loadProjectIntoSession]);
+  }, [routeId, collabCodeFromUrl, loadProjectIntoSession]);
 
   // Re-sync audio buffers & engine project snapshot whenever audio refs, clips, MIDI notes, or tempo/bars change
   const audioSignature = useMemo(() => {
@@ -2127,7 +2200,7 @@ export default function StudioPage() {
             <button
               type="button"
               onClick={() => void handleStartOverdub()}
-              aria-label={isOverdubbing ? 'Dừng thu Mic' : 'Thu âm Mic Overdub'}
+              aria-label={isOverdubbing ? 'REC - Dừng thu Mic' : 'Rec - Thu âm Mic Overdub'}
               title={isOverdubbing ? 'Dừng thu Mic' : 'Record Mic Overdub'}
               className={`flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-bold transition ${isOverdubbing
                 ? 'animate-pulse bg-rose-600 text-white'
@@ -2153,7 +2226,7 @@ export default function StudioPage() {
               type="button"
               onClick={() => engine.setMetronomeEnabled(!transport.metronomeEnabled)}
               title="Metronome Click (Đếm nhịp - phím M)"
-              aria-label="Bật/Tắt Metronome"
+              aria-label="CLICK - Bật/Tắt Metronome"
               className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold transition ${transport.metronomeEnabled
                 ? 'bg-sky-500 text-slate-950'
                 : 'text-slate-400 hover:bg-white/10 hover:text-white'
@@ -2175,7 +2248,7 @@ export default function StudioPage() {
             <span className="hidden text-slate-700 sm:inline">|</span>
 
             <label htmlFor="studio-bpm-input" className="flex items-center gap-1">
-              <span className="text-[10px] text-slate-500">BPM</span>
+              <span className="text-[10px] text-slate-400">BPM</span>
               <input
                 id="studio-bpm-input"
                 name="studioBpm"
@@ -2495,6 +2568,23 @@ export default function StudioPage() {
             )}
             <span className="hidden xl:inline">
               {project.visibility === 'public' && project.share_slug ? 'Đã Share' : 'Publish'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setCollabOpen((o) => !o)}
+            title="Phòng cộng tác Realtime & Ghi chú Bar"
+            data-testid="studio-collab-btn"
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-semibold transition ${
+              collabOpen || collab.wsConnected
+                ? 'border-sky-400/50 bg-sky-500/20 text-sky-200'
+                : 'border-white/15 bg-[#232730] text-slate-300 hover:bg-white/10'
+            }`}
+          >
+            <Users className="h-3.5 w-3.5" />
+            <span className="hidden xl:inline">
+              {collab.peers.length > 0 ? `Collab (${collab.peers.length})` : 'Collab'}
             </span>
           </button>
 
@@ -3511,6 +3601,37 @@ export default function StudioPage() {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {collabOpen && (
+        <div className="fixed top-14 right-3 bottom-3 z-40 flex">
+          <StudioCollabPanel
+            open={collabOpen}
+            onClose={() => setCollabOpen(false)}
+            projectId={project.project_id}
+            currentBar={currentBarNow}
+            totalBars={project.song_structure.total_bars || 8}
+            trackNames={Object.keys(project.tracks)}
+            wsConnected={collab.wsConnected}
+            roomCode={collab.roomCode}
+            isRoomOwner={
+              !project.owner_id ||
+              project.owner_id === 'guest' ||
+              (authenticated && project.owner_id === user.user_id)
+            }
+            peers={collab.peers}
+            lastSyncNotice={collab.lastSyncNotice}
+            barComments={collab.barComments}
+            collabError={collab.collabError}
+            onEnableInvite={collab.enableInvite}
+            onCloseInvite={collab.closeInvite}
+            onAddBarComment={collab.addBarComment}
+            onToggleResolved={collab.toggleResolved}
+            onDeleteComment={collab.deleteComment}
+            onSeekToBar={handleSeekToBar}
+            onBroadcastCue={collab.broadcastCue}
+          />
         </div>
       )}
 

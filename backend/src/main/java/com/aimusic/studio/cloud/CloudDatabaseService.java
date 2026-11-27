@@ -67,6 +67,29 @@ public class CloudDatabaseService {
 
     public record QuotaRecord(String quotaKey, String userId, String dayUtc, int genCount, int exportCount, long storageBytes) {}
 
+    public record ReleaseCommentRecord(
+            String id,
+            String shareSlug,
+            String authorId,
+            String authorName,
+            double timestampSec,
+            Integer barNumber,
+            String text,
+            String createdAt
+    ) {}
+
+    public record StudioBarCommentRecord(
+            String id,
+            String projectId,
+            int barNumber,
+            String trackId,
+            String authorId,
+            String authorName,
+            String text,
+            boolean resolved,
+            String createdAt
+    ) {}
+
     private final HikariDataSource dataSource;
     private final JdbcTemplate jdbc;
     private final String backendName;
@@ -199,6 +222,36 @@ public class CloudDatabaseService {
                     jti VARCHAR(64) PRIMARY KEY,
                     expires_at BIGINT NOT NULL
                 )""");
+        jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS release_likes (
+                    share_slug VARCHAR(128) NOT NULL,
+                    actor_id VARCHAR(128) NOT NULL,
+                    created_at VARCHAR(64) NOT NULL,
+                    PRIMARY KEY (share_slug, actor_id)
+                )""");
+        jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS release_comments (
+                    id VARCHAR(64) PRIMARY KEY,
+                    share_slug VARCHAR(128) NOT NULL,
+                    author_id VARCHAR(128) NOT NULL,
+                    author_name VARCHAR(120) NOT NULL,
+                    timestamp_sec DOUBLE PRECISION NOT NULL,
+                    bar_number INT,
+                    text VARCHAR(1000) NOT NULL,
+                    created_at VARCHAR(64) NOT NULL
+                )""");
+        jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS studio_bar_comments (
+                    id VARCHAR(64) PRIMARY KEY,
+                    project_id VARCHAR(128) NOT NULL,
+                    bar_number INT NOT NULL,
+                    track_id VARCHAR(64),
+                    author_id VARCHAR(128) NOT NULL,
+                    author_name VARCHAR(120) NOT NULL,
+                    text VARCHAR(1000) NOT NULL,
+                    resolved BOOLEAN NOT NULL,
+                    created_at VARCHAR(64) NOT NULL
+                )""");
     }
 
     public void saveRevokedToken(String jti, long expiresAtEpochSec) {
@@ -315,6 +368,8 @@ public class CloudDatabaseService {
     }
 
     public void deleteProject(String projectId) {
+        findReleaseByProjectId(projectId).ifPresent(rel -> cleanupReleaseSocial(rel.shareSlug()));
+        jdbc.update("DELETE FROM studio_bar_comments WHERE project_id = ?", projectId);
         jdbc.update("DELETE FROM cloud_projects WHERE project_id = ?", projectId);
         jdbc.update("DELETE FROM published_releases WHERE project_id = ?", projectId);
     }
@@ -387,7 +442,165 @@ public class CloudDatabaseService {
     }
 
     public int deleteReleaseByProjectId(String projectId) {
+        findReleaseByProjectId(projectId).ifPresent(rel -> cleanupReleaseSocial(rel.shareSlug()));
         return jdbc.update("DELETE FROM published_releases WHERE project_id = ?", projectId);
+    }
+
+    private void cleanupReleaseSocial(String shareSlug) {
+        if (shareSlug == null || shareSlug.isBlank()) return;
+        jdbc.update("DELETE FROM release_likes WHERE share_slug = ?", shareSlug);
+        jdbc.update("DELETE FROM release_comments WHERE share_slug = ?", shareSlug);
+    }
+
+    // --- Phase 9: Release Likes & Timestamp Comments + Studio Bar Notes ---
+
+    public Map<String, Object> toggleReleaseLike(String shareSlug, String actorId) {
+        String key = (actorId != null && !actorId.isBlank()) ? actorId : "guest:local";
+        Integer existing = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM release_likes WHERE share_slug = ? AND actor_id = ?",
+                Integer.class, shareSlug, key
+        );
+        boolean liked;
+        if (existing != null && existing > 0) {
+            jdbc.update("DELETE FROM release_likes WHERE share_slug = ? AND actor_id = ?", shareSlug, key);
+            liked = false;
+        } else {
+            jdbc.update(
+                    "INSERT INTO release_likes (share_slug, actor_id, created_at) VALUES (?, ?, ?)",
+                    shareSlug, key, Instant.now().toString()
+            );
+            liked = true;
+        }
+        int total = countReleaseLikes(shareSlug);
+        return Map.of("share_slug", shareSlug, "liked", liked, "likes_count", total);
+    }
+
+    public int countReleaseLikes(String shareSlug) {
+        Integer n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM release_likes WHERE share_slug = ?",
+                Integer.class, shareSlug
+        );
+        return n != null ? n : 0;
+    }
+
+    public boolean hasActorLikedRelease(String shareSlug, String actorId) {
+        if (actorId == null || actorId.isBlank()) return false;
+        Integer n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM release_likes WHERE share_slug = ? AND actor_id = ?",
+                Integer.class, shareSlug, actorId
+        );
+        return n != null && n > 0;
+    }
+
+    public ReleaseCommentRecord addReleaseComment(
+            String shareSlug,
+            String authorId,
+            String authorName,
+            double timestampSec,
+            Integer barNumber,
+            String text
+    ) {
+        String id = "cmt_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String now = Instant.now().toString();
+        double safeTs = Math.max(0.0, timestampSec);
+        jdbc.update(
+                "INSERT INTO release_comments (id, share_slug, author_id, author_name, timestamp_sec, bar_number, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                id, shareSlug, authorId, authorName, safeTs, barNumber, text, now
+        );
+        return new ReleaseCommentRecord(id, shareSlug, authorId, authorName, safeTs, barNumber, text, now);
+    }
+
+    public List<ReleaseCommentRecord> listReleaseComments(String shareSlug) {
+        return jdbc.query(
+                "SELECT id, share_slug, author_id, author_name, timestamp_sec, bar_number, text, created_at FROM release_comments WHERE share_slug = ? ORDER BY timestamp_sec ASC, created_at ASC",
+                (rs, i) -> {
+                    int barRaw = rs.getInt("bar_number");
+                    Integer bar = rs.wasNull() ? null : barRaw;
+                    return new ReleaseCommentRecord(
+                            rs.getString("id"), rs.getString("share_slug"),
+                            rs.getString("author_id"), rs.getString("author_name"),
+                            rs.getDouble("timestamp_sec"), bar,
+                            rs.getString("text"), rs.getString("created_at")
+                    );
+                },
+                shareSlug
+        );
+    }
+
+    public Optional<ReleaseCommentRecord> findReleaseComment(String commentId) {
+        List<ReleaseCommentRecord> rows = jdbc.query(
+                "SELECT id, share_slug, author_id, author_name, timestamp_sec, bar_number, text, created_at FROM release_comments WHERE id = ?",
+                (rs, i) -> {
+                    int barRaw = rs.getInt("bar_number");
+                    Integer bar = rs.wasNull() ? null : barRaw;
+                    return new ReleaseCommentRecord(
+                            rs.getString("id"), rs.getString("share_slug"),
+                            rs.getString("author_id"), rs.getString("author_name"),
+                            rs.getDouble("timestamp_sec"), bar,
+                            rs.getString("text"), rs.getString("created_at")
+                    );
+                },
+                commentId
+        );
+        return rows.stream().findFirst();
+    }
+
+    public void deleteReleaseComment(String commentId) {
+        jdbc.update("DELETE FROM release_comments WHERE id = ?", commentId);
+    }
+
+    public StudioBarCommentRecord addStudioBarComment(
+            String projectId,
+            int barNumber,
+            String trackId,
+            String authorId,
+            String authorName,
+            String text
+    ) {
+        String id = "bcmt_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String now = Instant.now().toString();
+        int safeBar = Math.max(1, barNumber);
+        jdbc.update(
+                "INSERT INTO studio_bar_comments (id, project_id, bar_number, track_id, author_id, author_name, text, resolved, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                id, projectId, safeBar, trackId, authorId, authorName, text, false, now
+        );
+        return new StudioBarCommentRecord(id, projectId, safeBar, trackId, authorId, authorName, text, false, now);
+    }
+
+    public List<StudioBarCommentRecord> listStudioBarComments(String projectId) {
+        return jdbc.query(
+                "SELECT id, project_id, bar_number, track_id, author_id, author_name, text, resolved, created_at FROM studio_bar_comments WHERE project_id = ? ORDER BY bar_number ASC, created_at ASC",
+                (rs, i) -> new StudioBarCommentRecord(
+                        rs.getString("id"), rs.getString("project_id"),
+                        rs.getInt("bar_number"), rs.getString("track_id"),
+                        rs.getString("author_id"), rs.getString("author_name"),
+                        rs.getString("text"), rs.getBoolean("resolved"), rs.getString("created_at")
+                ),
+                projectId
+        );
+    }
+
+    public Optional<StudioBarCommentRecord> findStudioBarComment(String commentId) {
+        List<StudioBarCommentRecord> rows = jdbc.query(
+                "SELECT id, project_id, bar_number, track_id, author_id, author_name, text, resolved, created_at FROM studio_bar_comments WHERE id = ?",
+                (rs, i) -> new StudioBarCommentRecord(
+                        rs.getString("id"), rs.getString("project_id"),
+                        rs.getInt("bar_number"), rs.getString("track_id"),
+                        rs.getString("author_id"), rs.getString("author_name"),
+                        rs.getString("text"), rs.getBoolean("resolved"), rs.getString("created_at")
+                ),
+                commentId
+        );
+        return rows.stream().findFirst();
+    }
+
+    public Optional<StudioBarCommentRecord> setStudioBarCommentResolved(String commentId, boolean resolved) {
+        jdbc.update("UPDATE studio_bar_comments SET resolved = ? WHERE id = ?", resolved, commentId);
+        return findStudioBarComment(commentId);
+    }
+
+    public void deleteStudioBarComment(String commentId) {
+        jdbc.update("DELETE FROM studio_bar_comments WHERE id = ?", commentId);
     }
 
     private PublishedReleaseRecord mapRelease(java.sql.ResultSet rs) throws java.sql.SQLException {

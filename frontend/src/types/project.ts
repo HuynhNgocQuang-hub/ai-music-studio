@@ -496,6 +496,51 @@ export interface PublishReleaseResponse {
   project_state?: ProjectState;
 }
 
+export interface ReleaseComment {
+  id: string;
+  share_slug: string;
+  author_id: string;
+  author_name: string;
+  timestamp_sec: number;
+  bar_number?: number | null;
+  text: string;
+  created_at: string;
+}
+
+export interface StudioBarComment {
+  id: string;
+  project_id: string;
+  bar_number: number;
+  track_id?: string | null;
+  author_id: string;
+  author_name: string;
+  text: string;
+  resolved: boolean;
+  created_at: string;
+}
+
+export interface CollabPeerPresence {
+  client_id: string;
+  user_id: string;
+  display_name: string;
+  role: string;
+  color: string;
+  bar: number;
+  track_id: string;
+  active_tab: string;
+  joined_at: string;
+}
+
+export interface CollabSessionSummary {
+  project_id: string;
+  active: boolean;
+  peer_count: number;
+  members: CollabPeerPresence[];
+  revision: number;
+  room_code?: string;
+  invite_url?: string;
+}
+
 export interface PublishedRelease {
   share_slug: string;
   project_id: string;
@@ -510,6 +555,9 @@ export interface PublishedRelease {
   master_format: string;
   lufs_target: number;
   plays_count: number;
+  likes_count?: number;
+  liked_by_me?: boolean;
+  comments_count?: number;
   created_at: string;
   share_url: string;
   stream_url: string;
@@ -517,6 +565,7 @@ export interface PublishedRelease {
   sections?: SongSection[];
   chords?: ChordEvent[];
   lyrics?: LyricLine[];
+  comments?: ReleaseComment[];
 }
 
 export interface PaginatedReleasesResponse {

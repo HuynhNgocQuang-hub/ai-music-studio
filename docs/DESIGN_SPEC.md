@@ -1,8 +1,8 @@
 # Tài liệu Thiết kế Kiến trúc & Giao diện Hệ thống (`DESIGN_SPEC`)
 ## Dự án: AI Music Studio (Hybrid Multi-Agent DAW)
 
-- **Phiên bản:** 2.3 (Phase 1–8 Complete: Hybrid Multi-User Cloud Workspace, S3/MinIO, PostgreSQL/H2, Caddy HTTPS & Public Demo Share)
-- **Cập nhật lần cuối:** 2026-11-25
+- **Phiên bản:** 2.4 (Phase 1–9 Complete: Hybrid Multi-User Cloud Workspace, S3/MinIO, PostgreSQL/H2, Caddy HTTPS, Publishing Showcase & Realtime WebSocket Collab)
+- **Cập nhật lần cuối:** 2026-11-27
 - **Liên kết tài liệu:** [REQUIREMENTS.md](./REQUIREMENTS.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [PHASES_OVERVIEW.md](./PHASES_OVERVIEW.md)
 
 ---
@@ -131,8 +131,8 @@ erDiagram
   - `PianoRollEditor.tsx` + `webmidi.ts`: Bộ soạn nốt C1–C7, Scale highlight, Quantize, Velocity lane, Copy/Paste nốt và kết nối bàn phím **Hardware WebMIDI** (`useWebMidi`).
   - `PitchCurveEditor.tsx`: Bộ chỉnh cao độ trực quan (**Visual Pitch Curve Editor** — semitone nudge & scale snap) gắn trong tab **`Auto-Tune DSP`**.
   - `ConsoleMixerPanel.tsx`: Kênh trộn dọc 3-Band EQ, FX Send (`BUS A Reverb` + `BUS B Delay`), LED Meter và Master Bus.
-  - `StudioPage.tsx` (**Publish & FLAC Export**): Xuất **FLAC Lossless** / **MP3 ID3**, và modal xuất bản Master công khai lên S3/MinIO kèm đường dẫn `/share/:slug`.
-  - `SharePage.tsx`: Trình phát Showcase công khai (`/share` & `/share/:slug`), hiển thị cấu trúc/hợp âm/lời, đếm lượt nghe và nút **Remix trong Studio**.
+  - `StudioPage.tsx` (**Publish, Collab & FLAC Export**): Xuất **FLAC Lossless** / **MP3 ID3**, modal xuất bản Master công khai lên S3/MinIO kèm đường dẫn `/share/:slug`, và ngăn kéo **`StudioCollabPanel.tsx`** (`useStudioCollab.ts`) kết nối `/ws/collab` đồng bộ presence/state/cue + **Pinned Bar Notes**.
+  - `SharePage.tsx`: Trình phát Showcase công khai (`/share` & `/share/:slug`), hiển thị cấu trúc/hợp âm/lời, đếm lượt nghe, nút **Thích**, thanh tiến độ gắn **Timeline Comment Markers**, bình luận mốc thời gian (`mm:ss` / `Bar`) và nút **Remix trong Studio**.
   - `SettingsPage.tsx`: Cấu hình Dual LLM, Test API Key, upload **Custom `.sf2` SoundFont** (`<= 50 MB`), và theo dõi sức khỏe **PostgreSQL/H2** + **MinIO S3/Local Fallback**.
   - `AiCoachChatDrawer.tsx`: Ngăn kéo **AI Music Copilot** toàn cục trên ứng dụng (`AppShell.tsx` + `ProjectProvider.tsx`), hỗ trợ SSE Stream, Mic WAV / Speech & đính kèm Audio (`<= 10 MB`), **A/B Nghe thử hợp âm**, **Áp dụng tất cả**, **Hoàn tác 1 chạm (`Revert`)** và lưu hội thoại trong `IndexedDB` (`chat_threads`).
 

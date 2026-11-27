@@ -3,15 +3,19 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ChevronLeft,
   ChevronRight,
+  Clock,
   Disc3,
   Download,
   ExternalLink,
   Headphones,
+  Heart,
   Loader2,
+  MessageSquare,
   Music,
   Pause,
   Play,
   Search,
+  Send,
   Share2,
   Sparkles,
   Trash2,
@@ -21,15 +25,25 @@ import { TrackArtwork } from '@/components/shared/TrackArtwork';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import {
   ApiError,
+  deleteShareComment,
   getProject,
   getPublicShare,
   getPublicShareAudioUrl,
   listPublicReleases,
+  postShareComment,
+  toggleShareLike,
   unpublishProject,
 } from '@/lib/api/client';
-import type { PublishedRelease } from '@/types/project';
+import type { PublishedRelease, ReleaseComment } from '@/types/project';
 
 const SHARE_GENRES = ['', 'Pop', 'Ballad', 'Lo-fi', 'R&B', 'Hip-hop', 'EDM', 'Acoustic', 'Rock'];
+
+function formatMmSs(sec: number): string {
+  const safe = Math.max(0, Math.floor(sec));
+  const mins = Math.floor(safe / 60);
+  const rem = safe % 60;
+  return `${mins}:${rem.toString().padStart(2, '0')}`;
+}
 
 export default function SharePage() {
   const { slug } = useParams<{ slug?: string }>();
@@ -38,6 +52,7 @@ export default function SharePage() {
   const { loadProjectIntoSession } = useProjectSession();
 
   const [release, setRelease] = useState<PublishedRelease | null>(null);
+  const [comments, setComments] = useState<ReleaseComment[]>([]);
   const [gallery, setGallery] = useState<PublishedRelease[]>([]);
   const [search, setSearch] = useState('');
   const [genre, setGenre] = useState('');
@@ -47,6 +62,12 @@ export default function SharePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTimeSec, setCurrentTimeSec] = useState(0);
+  const [durationSec, setDurationSec] = useState(0);
+  const [commentText, setCommentText] = useState('');
+  const [pinnedTimestampSec, setPinnedTimestampSec] = useState<number | null>(null);
+  const [likeBusy, setLikeBusy] = useState(false);
+  const [commentBusy, setCommentBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [remixing, setRemixing] = useState(false);
   const [unpublishing, setUnpublishing] = useState(false);
@@ -70,17 +91,24 @@ export default function SharePage() {
   useEffect(() => {
     let active = true;
     setIsPlaying(false);
+    setCurrentTimeSec(0);
+    setDurationSec(0);
+    setPinnedTimestampSec(null);
 
     if (slug) {
       setLoading(true);
       setError(null);
       getPublicShare(slug)
         .then((res) => {
-          if (active) setRelease(res);
+          if (active) {
+            setRelease(res);
+            setComments(res.comments || []);
+          }
         })
         .catch((err) => {
           if (active) {
             setRelease(null);
+            setComments([]);
             setError(err instanceof ApiError ? err.detail : 'Không tìm thấy bản nhạc được chia sẻ.');
           }
         })
@@ -89,13 +117,14 @@ export default function SharePage() {
         });
     } else {
       setRelease(null);
+      setComments([]);
       void loadGallery();
     }
 
     return () => {
       active = false;
     };
-  }, [slug, loadGallery]);
+  }, [slug, loadGallery, authenticated, user.user_id]);
 
   const togglePlay = () => {
     const audio = audioRef.current;
@@ -105,6 +134,73 @@ export default function SharePage() {
     } else {
       audio.pause();
       setIsPlaying(false);
+    }
+  };
+
+  const seekAndPlayAt = (ts: number) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.currentTime = Math.max(0, ts);
+    setCurrentTimeSec(audio.currentTime);
+    void audio.play().then(() => setIsPlaying(true)).catch(() => {});
+  };
+
+  const handleToggleLike = async () => {
+    if (!release || likeBusy) return;
+    setLikeBusy(true);
+    try {
+      const res = await toggleShareLike(release.share_slug);
+      setRelease((prev) =>
+        prev ? { ...prev, liked_by_me: res.liked, likes_count: res.likes_count } : prev
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : 'Không thể cập nhật lượt thích.');
+    } finally {
+      setLikeBusy(false);
+    }
+  };
+
+  const handleSubmitComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!release || !commentText.trim() || commentBusy) return;
+    const stamp = pinnedTimestampSec ?? currentTimeSec;
+    const estimatedBar =
+      release.bpm > 0 ? Math.max(1, Math.floor((stamp * release.bpm) / 240) + 1) : undefined;
+    setCommentBusy(true);
+    try {
+      const created = await postShareComment(release.share_slug, {
+        timestamp_sec: Number(stamp.toFixed(2)),
+        bar_number: estimatedBar,
+        text: commentText.trim(),
+      });
+      setComments((prev) =>
+        [...prev, created].sort((a, b) => a.timestamp_sec - b.timestamp_sec)
+      );
+      setRelease((prev) =>
+        prev
+          ? {
+              ...prev,
+              comments_count: created.comments_count ?? (prev.comments_count ?? 0) + 1,
+            }
+          : prev
+      );
+      setCommentText('');
+      setPinnedTimestampSec(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : 'Không thể đăng bình luận.');
+    } finally {
+      setCommentBusy(false);
+    }
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    if (!release) return;
+    try {
+      const res = await deleteShareComment(release.share_slug, commentId);
+      setComments((prev) => prev.filter((c) => c.id !== commentId));
+      setRelease((prev) => (prev ? { ...prev, comments_count: res.comments_count } : prev));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : 'Không có quyền xóa bình luận này.');
     }
   };
 
@@ -285,9 +381,19 @@ export default function SharePage() {
                         {item.title}
                       </h2>
                       <p className="truncate text-xs text-slate-400">{item.artist}</p>
-                      <p className="mt-1 text-[11px] text-slate-400 tabular-nums">
-                        {item.genre} • {Math.round(item.bpm)} BPM • {item.key} {item.scale}
-                      </p>
+                      <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-400 tabular-nums">
+                        <span className="truncate">
+                          {item.genre} • {Math.round(item.bpm)} BPM • {item.key} {item.scale}
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2">
+                          <span className="inline-flex items-center gap-0.5 text-rose-300">
+                            <Heart className="h-3 w-3" /> {item.likes_count ?? 0}
+                          </span>
+                          <span className="inline-flex items-center gap-0.5 text-sky-300">
+                            <MessageSquare className="h-3 w-3" /> {item.comments_count ?? 0}
+                          </span>
+                        </span>
+                      </div>
                     </div>
                   </div>
                   <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-xs text-sky-300">
@@ -381,30 +487,73 @@ export default function SharePage() {
           </div>
         </div>
 
-        {/* Native Audio Player */}
-        <div className="mt-5 flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-[#0d1015] p-3.5">
-          <button
-            type="button"
-            onClick={togglePlay}
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-500 text-slate-950 transition hover:bg-amber-400"
-            aria-label={isPlaying ? 'Tạm dừng' : 'Phát Master'}
-          >
-            {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 translate-x-0.5" />}
-          </button>
-          <audio
-            ref={audioRef}
-            src={audioUrl}
-            controls
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-            onEnded={() => setIsPlaying(false)}
-            className="h-9 min-w-0 flex-1"
-          />
+        {/* Native Audio Player + Timestamp Comment Markers */}
+        <div className="mt-5 space-y-2.5 rounded-xl border border-white/10 bg-[#0d1015] p-3.5">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={togglePlay}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-500 text-slate-950 transition hover:bg-amber-400"
+              aria-label={isPlaying ? 'Tạm dừng' : 'Phát Master'}
+            >
+              {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 translate-x-0.5" />}
+            </button>
+            <audio
+              ref={audioRef}
+              src={audioUrl}
+              controls
+              onLoadedMetadata={(e) => setDurationSec(e.currentTarget.duration || 0)}
+              onTimeUpdate={(e) => setCurrentTimeSec(e.currentTarget.currentTime || 0)}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onEnded={() => setIsPlaying(false)}
+              className="h-9 min-w-0 flex-1"
+            />
+          </div>
+
+          {comments.length > 0 && (
+            <div className="relative h-6 rounded-md border border-white/[0.06] bg-[#141821] px-2">
+              <span className="pointer-events-none text-[10px] leading-6 text-slate-400">
+                Mốc bình luận ({comments.length}):
+              </span>
+              {comments.map((c) => {
+                const denom = durationSec > 0 ? durationSec : Math.max(c.timestamp_sec + 1, 20);
+                const pct = Math.max(4, Math.min(96, (c.timestamp_sec / denom) * 100));
+                return (
+                  <button
+                    key={`pin-${c.id}`}
+                    type="button"
+                    onClick={() => seekAndPlayAt(c.timestamp_sec)}
+                    title={`${formatMmSs(c.timestamp_sec)} — ${c.author_name}: ${c.text}`}
+                    aria-label={`Nhảy tới bình luận tại ${formatMmSs(c.timestamp_sec)}`}
+                    style={{ left: `${pct}%` }}
+                    className="absolute top-1 -translate-x-1/2 rounded-full bg-amber-400 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-950 shadow transition hover:scale-110 hover:bg-amber-300"
+                  >
+                    {formatMmSs(c.timestamp_sec)}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        {/* Share & Remix Actions */}
+        {/* Share, Like & Remix Actions */}
         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-4">
           <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={likeBusy}
+              onClick={() => void handleToggleLike()}
+              data-testid="share-like-btn"
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                release.liked_by_me
+                  ? 'border-rose-400/60 bg-rose-500/20 text-rose-200'
+                  : 'border-white/15 bg-[#20242e] text-slate-200 hover:border-rose-400/40 hover:text-rose-200'
+              }`}
+            >
+              <Heart className={`h-3.5 w-3.5 ${release.liked_by_me ? 'fill-rose-400 text-rose-400' : 'text-rose-300'}`} />
+              <span>{release.likes_count ?? 0} Thích</span>
+            </button>
             <button
               type="button"
               onClick={() => void handleCopyShareLink()}
@@ -461,7 +610,7 @@ export default function SharePage() {
               ))}
             </div>
           ) : (
-            <p className="mt-2 text-xs text-slate-500">Chưa có thông tin cấu trúc đoạn.</p>
+            <p className="mt-2 text-xs text-slate-400">Chưa có thông tin cấu trúc đoạn.</p>
           )}
           {release.chords && release.chords.length > 0 && (
             <p className="mt-3 text-xs text-amber-300">
@@ -476,7 +625,7 @@ export default function SharePage() {
             <div className="mt-2 space-y-1 text-xs text-slate-200">
               {release.lyrics.map((l, idx) => (
                 <p key={idx}>
-                  <span className="mr-1.5 text-[10px] font-bold text-slate-500">[{l.section}]</span>
+                  <span className="mr-1.5 text-[10px] font-bold text-slate-400">[{l.section}]</span>
                   {l.text}
                 </p>
               ))}
@@ -484,10 +633,108 @@ export default function SharePage() {
           ) : release.lyrics_summary ? (
             <p className="mt-2 whitespace-pre-line text-xs text-slate-300">{release.lyrics_summary}</p>
           ) : (
-            <p className="mt-2 text-xs text-slate-500">Bản phối không lời / Instrumental.</p>
+            <p className="mt-2 text-xs text-slate-400">Bản phối không lời / Instrumental.</p>
           )}
         </div>
       </div>
+
+      {/* Phase 9: Community Timestamp Comments */}
+      <section className="space-y-3 rounded-2xl border border-white/10 bg-[#16191f] p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-300">
+            <MessageSquare className="h-3.5 w-3.5 text-amber-400" />
+            <span>Bình luận theo Thời gian ({comments.length})</span>
+          </h2>
+          <span className="text-[11px] text-slate-400">
+            Bấm vào mốc thời gian để nghe đúng đoạn đó
+          </span>
+        </div>
+
+        <form onSubmit={(e) => void handleSubmitComment(e)} className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPinnedTimestampSec(currentTimeSec)}
+            title="Cố định mốc thời gian đang phát"
+            className="inline-flex items-center gap-1 rounded-lg border border-amber-400/35 bg-amber-500/10 px-2.5 py-2 font-mono text-xs font-bold text-amber-300 hover:bg-amber-500/20"
+          >
+            <Clock className="h-3.5 w-3.5" />
+            <span>{formatMmSs(pinnedTimestampSec ?? currentTimeSec)}</span>
+          </button>
+          <div className="min-w-[200px] flex-1">
+            <label htmlFor="share-comment-input" className="sr-only">
+              Viết bình luận theo mốc thời gian
+            </label>
+            <input
+              id="share-comment-input"
+              name="shareComment"
+              type="text"
+              maxLength={500}
+              value={commentText}
+              onChange={(e) => setCommentText(e.target.value)}
+              placeholder={`Nhận xét tại ${formatMmSs(pinnedTimestampSec ?? currentTimeSec)}...`}
+              className="w-full rounded-lg border border-white/15 bg-[#0d1015] px-3 py-2 text-xs text-white placeholder-slate-400 focus:border-amber-400 focus:outline-none"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={commentBusy || !commentText.trim()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50"
+          >
+            <Send className="h-3.5 w-3.5" />
+            <span>{commentBusy ? 'Đang gửi...' : 'Gửi bình luận'}</span>
+          </button>
+        </form>
+
+        {comments.length === 0 ? (
+          <p className="py-3 text-center text-xs text-slate-400">
+            Chưa có bình luận nào. Hãy nghe và để lại nhận xét tại giây đầu tiên!
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {comments.map((c) => {
+              const canDelete = isOwner || (authenticated && c.author_id === user.user_id);
+              return (
+                <div
+                  key={c.id}
+                  className="flex items-start justify-between gap-3 rounded-xl border border-white/[0.08] bg-[#11141a] px-3 py-2.5"
+                >
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => seekAndPlayAt(c.timestamp_sec)}
+                        className="rounded bg-amber-500/20 px-2 py-0.5 font-mono font-bold text-amber-300 hover:bg-amber-500/35"
+                      >
+                        @ {formatMmSs(c.timestamp_sec)}
+                      </button>
+                      {c.bar_number && (
+                        <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300">
+                          Bar {c.bar_number}
+                        </span>
+                      )}
+                      <span className="font-semibold text-white">{c.author_name}</span>
+                      <span className="text-slate-400">
+                        {new Date(c.created_at).toLocaleString()}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-200">{c.text}</p>
+                  </div>
+                  {canDelete && (
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteComment(c.id)}
+                      aria-label={`Xóa bình luận của ${c.author_name}`}
+                      className="rounded p-1 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
