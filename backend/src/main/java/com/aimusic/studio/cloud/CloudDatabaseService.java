@@ -194,6 +194,33 @@ public class CloudDatabaseService {
                     export_count INT NOT NULL,
                     storage_bytes BIGINT NOT NULL
                 )""");
+        jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS revoked_tokens (
+                    jti VARCHAR(64) PRIMARY KEY,
+                    expires_at BIGINT NOT NULL
+                )""");
+    }
+
+    public void saveRevokedToken(String jti, long expiresAtEpochSec) {
+        if (jti == null || jti.isBlank()) return;
+        int updated = jdbc.update("UPDATE revoked_tokens SET expires_at = ? WHERE jti = ?", expiresAtEpochSec, jti);
+        if (updated == 0) {
+            jdbc.update("INSERT INTO revoked_tokens (jti, expires_at) VALUES (?, ?)", jti, expiresAtEpochSec);
+        }
+    }
+
+    public boolean isTokenRevokedInDb(String jti) {
+        if (jti == null || jti.isBlank()) return false;
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM revoked_tokens WHERE jti = ?",
+                Integer.class,
+                jti
+        );
+        return count != null && count > 0;
+    }
+
+    public void pruneExpiredRevokedTokens(long nowEpochSec) {
+        jdbc.update("DELETE FROM revoked_tokens WHERE expires_at <= ?", nowEpochSec);
     }
 
     public Map<String, Object> status() {

@@ -9,6 +9,8 @@ import {
   FileArchive,
   FolderTree,
   Grid3X3,
+  LogIn,
+  LogOut,
   Maximize2,
   Mic,
   Minimize2,
@@ -28,6 +30,7 @@ import {
   Square,
   Trash2,
   Undo2,
+  UserCheck,
   Wand2,
   X,
   XCircle,
@@ -191,7 +194,7 @@ export default function StudioPage() {
   const [regenProgress, setRegenProgress] = useState<number>(0);
   const [autoTrimBusy, setAutoTrimBusy] = useState(false);
   const [autoMixBusy, setAutoMixBusy] = useState(false);
-  const { authenticated, user, refreshAuth, setAuthModalOpen } = useAuth();
+  const { authenticated, user, refreshAuth, setAuthModalOpen, logout } = useAuth();
   const [stemsBusy, setStemsBusy] = useState(false);
   const [clipUploadBusy, setClipUploadBusy] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -2507,6 +2510,41 @@ export default function StudioPage() {
             <Bot className="h-3.5 w-3.5" />
             <span className="hidden xl:inline">AI Coach</span>
           </button>
+
+          {authenticated ? (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(true)}
+                title={`Tài khoản Cloud: ${user.display_name}`}
+                className="flex items-center gap-1 rounded border border-emerald-400/50 bg-emerald-500/15 px-2 py-1 text-[11px] font-semibold text-emerald-200 transition hover:bg-emerald-500/25"
+              >
+                <UserCheck className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">{user.display_name}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void logout()}
+                title="Đăng xuất tài khoản Cloud"
+                aria-label="Đăng xuất tài khoản Cloud"
+                data-testid="studio-logout-btn"
+                className="flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-[11px] font-semibold text-rose-200 transition hover:bg-rose-500/20"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">Đăng xuất</span>
+              </button>
+            </div>
+          ) : (
+            <Link
+              to={`/login?redirect=${encodeURIComponent(`/studio/${project.project_id}`)}`}
+              title="Đăng nhập / Đăng ký tài khoản Cloud"
+              data-testid="studio-login-link"
+              className="flex items-center gap-1 rounded border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-[11px] font-semibold text-amber-200 transition hover:bg-amber-500/20"
+            >
+              <LogIn className="h-3.5 w-3.5" />
+              <span className="hidden xl:inline">Đăng nhập</span>
+            </Link>
+          )}
         </div>
       </div>
 

@@ -69,6 +69,65 @@ class CloudPhase8Tests {
 
         String tampered = token.substring(0, token.length() - 4) + "AAAA";
         assertTrue(jwtService.verifyToken(tampered).isEmpty());
+
+        assertTrue(jwtService.revokeToken(token));
+        assertTrue(jwtService.verifyToken(token).isEmpty());
+    }
+
+    @Test
+    void loginLogoutRevokesJwtAndReturnsGuestOnReLogin() throws Exception {
+        String email = "auth_flow_" + UUID.randomUUID().toString().substring(0, 6) + "@music.test";
+        MvcResult reg = mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "email", email,
+                                "password", "pass1234",
+                                "display_name", "Auth Lifecycle Tester"
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.authenticated").value(true))
+                .andReturn();
+        String token1 = objectMapper.readTree(reg.getResponse().getContentAsString()).get("token").asText();
+
+        mockMvc.perform(get("/api/auth/me").header("Authorization", "Bearer " + token1))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.authenticated").value(true))
+                .andExpect(jsonPath("$.user.email").value(email));
+
+        // Server-side logout revokes token1 immediately
+        mockMvc.perform(post("/api/auth/logout").header("Authorization", "Bearer " + token1))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("logged_out"))
+                .andExpect(jsonPath("$.authenticated").value(false))
+                .andExpect(jsonPath("$.revoked").value(true));
+
+        // Replaying logged-out token1 must return 401 Unauthorized
+        mockMvc.perform(get("/api/auth/me").header("Authorization", "Bearer " + token1))
+                .andExpect(status().isUnauthorized());
+
+        // Anonymous request (no header) still accesses Hybrid Guest mode seamlessly
+        mockMvc.perform(get("/api/auth/me"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.authenticated").value(false))
+                .andExpect(jsonPath("$.user.user_id").value("guest"));
+
+        // Re-login returns fresh valid token2
+        MvcResult reLogin = mockMvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "email", email,
+                                "password", "pass1234"
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.authenticated").value(true))
+                .andReturn();
+        String token2 = objectMapper.readTree(reLogin.getResponse().getContentAsString()).get("token").asText();
+        assertNotEquals(token1, token2);
+
+        mockMvc.perform(get("/api/auth/me").header("Authorization", "Bearer " + token2))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.authenticated").value(true))
+                .andExpect(jsonPath("$.user.display_name").value("Auth Lifecycle Tester"));
     }
 
     @Test

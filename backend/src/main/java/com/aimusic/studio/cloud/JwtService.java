@@ -3,6 +3,7 @@ package com.aimusic.studio.cloud;
 import com.aimusic.studio.config.AppProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.Mac;
@@ -17,9 +18,11 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Pure-Java HMAC-SHA256 JWT token issuer/verifier and PBKDF2 password hashing service.
+ * Pure-Java HMAC-SHA256 JWT token issuer/verifier with JTI server-side revocation and PBKDF2 password hashing.
  */
 @Service
 public class JwtService {
@@ -31,9 +34,17 @@ public class JwtService {
     private final ObjectMapper objectMapper;
     private final byte[] hmacSecret;
     private final long expirationSeconds;
+    private final CloudDatabaseService cloudDb;
+    private final ConcurrentHashMap<String, Long> revokedMemory = new ConcurrentHashMap<>();
 
-    public JwtService(ObjectMapper objectMapper, AppProperties properties) {
+    @Autowired
+    public JwtService(
+            ObjectMapper objectMapper,
+            AppProperties properties,
+            @Autowired(required = false) CloudDatabaseService cloudDb
+    ) {
         this.objectMapper = objectMapper;
+        this.cloudDb = cloudDb;
         this.expirationSeconds = Math.max(300L, properties.getJwtExpirationSeconds());
         String configured = properties.getJwtSecret();
         if (configured != null && !configured.isBlank()) {
@@ -43,6 +54,10 @@ public class JwtService {
             RNG.nextBytes(random);
             this.hmacSecret = random;
         }
+    }
+
+    public JwtService(ObjectMapper objectMapper, AppProperties properties) {
+        this(objectMapper, properties, null);
     }
 
     public String hashPassword(String rawPassword) {
@@ -75,8 +90,10 @@ public class JwtService {
     public String issueToken(UserPrincipal principal) {
         try {
             long now = Instant.now().getEpochSecond();
+            String jti = UUID.randomUUID().toString().replace("-", "");
             Map<String, Object> header = Map.of("alg", "HS256", "typ", "JWT");
             Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("jti", jti);
             payload.put("sub", principal.userId());
             payload.put("email", principal.email());
             payload.put("name", principal.displayName());
@@ -93,6 +110,57 @@ public class JwtService {
         } catch (Exception ex) {
             throw new IllegalStateException("Failed to sign JWT", ex);
         }
+    }
+
+    public boolean revokeToken(String token) {
+        if (token == null || token.isBlank()) {
+            return false;
+        }
+        String[] parts = token.trim().split("\\.");
+        if (parts.length != 3) {
+            return false;
+        }
+        try {
+            String signingInput = parts[0] + "." + parts[1];
+            byte[] expectedSig = signHmac(signingInput.getBytes(StandardCharsets.UTF_8));
+            byte[] providedSig = Base64.getUrlDecoder().decode(parts[2]);
+            if (!MessageDigest.isEqual(expectedSig, providedSig)) {
+                return false;
+            }
+            byte[] payloadBytes = Base64.getUrlDecoder().decode(parts[1]);
+            JsonNode claims = objectMapper.readTree(payloadBytes);
+            String jti = claims.path("jti").asText("");
+            long exp = claims.path("exp").asLong(Instant.now().getEpochSecond() + expirationSeconds);
+            if (jti.isBlank()) {
+                return false;
+            }
+            revokedMemory.put(jti, exp);
+            if (cloudDb != null) {
+                cloudDb.saveRevokedToken(jti, exp);
+            }
+            return true;
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
+    public boolean isTokenRevoked(String jti) {
+        if (jti == null || jti.isBlank()) {
+            return false;
+        }
+        long now = Instant.now().getEpochSecond();
+        Long memExp = revokedMemory.get(jti);
+        if (memExp != null) {
+            if (memExp > now) {
+                return true;
+            }
+            revokedMemory.remove(jti);
+        }
+        if (cloudDb != null && cloudDb.isTokenRevokedInDb(jti)) {
+            revokedMemory.put(jti, now + expirationSeconds);
+            return true;
+        }
+        return false;
     }
 
     public Optional<UserPrincipal> verifyToken(String token) {
@@ -114,6 +182,10 @@ public class JwtService {
             JsonNode claims = objectMapper.readTree(payloadBytes);
             long exp = claims.path("exp").asLong(0L);
             if (exp <= Instant.now().getEpochSecond()) {
+                return Optional.empty();
+            }
+            String jti = claims.path("jti").asText("");
+            if (isTokenRevoked(jti)) {
                 return Optional.empty();
             }
             String sub = claims.path("sub").asText("");

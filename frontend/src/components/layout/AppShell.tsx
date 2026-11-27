@@ -6,6 +6,8 @@ import {
   Disc3,
   FolderKanban,
   FolderOpen,
+  LogIn,
+  LogOut,
   Plus,
   Radio,
   RotateCcw,
@@ -24,7 +26,7 @@ import { DAW_TEMPLATES, buildProjectFromTemplate } from '@/lib/music/presets';
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
-  const { authenticated, user, quota, setAuthModalOpen } = useAuth();
+  const { authenticated, user, quota, setAuthModalOpen, logout } = useAuth();
   const {
     project,
     loadProjectIntoSession,
@@ -146,6 +148,35 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {authenticated ? <UserCheck className="h-4.5 w-4.5" /> : <Cloud className="h-4.5 w-4.5" />}
           </button>
 
+          {authenticated ? (
+            <button
+              type="button"
+              onClick={() => void logout()}
+              title="Đăng xuất tài khoản Cloud"
+              aria-label="Đăng xuất tài khoản Cloud"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-rose-500/30 bg-rose-500/10 text-rose-300 transition hover:border-rose-400/60 hover:bg-rose-500/20 hover:text-rose-200"
+            >
+              <LogOut className="h-4.5 w-4.5" />
+            </button>
+          ) : (
+            <Link
+              to={
+                pathname.startsWith('/login') || pathname.startsWith('/register')
+                  ? '/login'
+                  : `/login?redirect=${encodeURIComponent(pathname)}`
+              }
+              title="Đăng nhập / Đăng ký Cloud"
+              aria-label="Đăng nhập / Đăng ký Cloud"
+              className={`flex h-9 w-9 items-center justify-center rounded-md border transition ${
+                pathname.startsWith('/login') || pathname.startsWith('/register')
+                  ? 'border-amber-400/60 bg-amber-500/20 text-amber-300'
+                  : 'border-white/10 bg-[#1d212a] text-slate-300 hover:border-amber-400/40 hover:text-amber-200'
+              }`}
+            >
+              <LogIn className="h-4.5 w-4.5" />
+            </Link>
+          )}
+
           <button
             type="button"
             onClick={() => setCopilotOpen((o) => !o)}
@@ -191,6 +222,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   ? 'Session Vault'
                   : pathname.startsWith('/share')
                   ? 'Demo Showcase & Master Releases'
+                  : pathname.startsWith('/login') || pathname.startsWith('/register')
+                  ? 'Cloud Account & Session'
                   : 'Audio Engine & API Settings'}
               </span>
             </div>
@@ -209,9 +242,33 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <span>
                   {authenticated
                     ? `${user.display_name}${quota ? ` (${quota.generate_used}/${quota.generate_limit})` : ''}`
-                    : 'Cloud / Đăng nhập'}
+                    : 'Cloud Quota'}
                 </span>
               </button>
+              {authenticated ? (
+                <button
+                  type="button"
+                  onClick={() => void logout()}
+                  data-testid="topbar-logout-btn"
+                  className="inline-flex items-center gap-1.5 rounded border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/20"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>Đăng xuất</span>
+                </button>
+              ) : (
+                <Link
+                  to={
+                    pathname.startsWith('/login') || pathname.startsWith('/register')
+                      ? '/login'
+                      : `/login?redirect=${encodeURIComponent(pathname)}`
+                  }
+                  data-testid="topbar-login-link"
+                  className="inline-flex items-center gap-1.5 rounded border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
+                >
+                  <LogIn className="h-3.5 w-3.5" />
+                  <span>Đăng nhập</span>
+                </Link>
+              )}
               <button
                 type="button"
                 onClick={() => setCopilotOpen((o) => !o)}

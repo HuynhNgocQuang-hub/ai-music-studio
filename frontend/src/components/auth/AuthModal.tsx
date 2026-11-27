@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Cloud, Database, HardDrive, LogOut, ShieldCheck, Sparkles, UserCheck, X } from 'lucide-react';
 import { useAuth } from '@/components/providers/AuthProvider';
 import { ApiError } from '@/lib/api/client';
@@ -51,6 +52,15 @@ export default function AuthModal() {
       await oauthLogin(provider);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : 'Lỗi đăng nhập OAuth Sandbox.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setBusy(true);
+    try {
+      await logout();
     } finally {
       setBusy(false);
     }
@@ -139,21 +149,31 @@ export default function AuthModal() {
                 <strong className="text-white">{user.display_name}</strong>.
               </span>
             </div>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={logout}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-3.5 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/25"
-              >
-                <LogOut className="h-3.5 w-3.5" /> Đăng xuất về Guest
-              </button>
-              <button
-                type="button"
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Link
+                to="/login"
                 onClick={() => setAuthModalOpen(false)}
-                className="rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400"
+                className="text-[11px] text-sky-300 underline hover:text-sky-200"
               >
-                Tiếp tục làm nhạc
-              </button>
+                Trang Tài khoản (/login)
+              </Link>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void handleLogout()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/15 px-3.5 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+                >
+                  <LogOut className="h-3.5 w-3.5" /> Đăng xuất về Guest
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthModalOpen(false)}
+                  className="rounded-lg bg-amber-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400"
+                >
+                  Tiếp tục làm nhạc
+                </button>
+              </div>
             </div>
           </div>
         ) : (
@@ -188,10 +208,15 @@ export default function AuthModal() {
             <form onSubmit={handleSubmit} className="mt-3 space-y-3">
               {tab === 'register' && (
                 <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-300">Tên nghệ danh / Producer</label>
+                  <label htmlFor="auth-modal-display-name" className="mb-1 block text-[11px] font-medium text-slate-300">
+                    Tên nghệ danh / Producer
+                  </label>
                   <input
+                    id="auth-modal-display-name"
+                    name="displayName"
                     type="text"
                     required
+                    autoComplete="name"
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
                     placeholder="VD: Quang Producer"
@@ -200,10 +225,15 @@ export default function AuthModal() {
                 </div>
               )}
               <div>
-                <label className="mb-1 block text-[11px] font-medium text-slate-300">Email</label>
+                <label htmlFor="auth-modal-email" className="mb-1 block text-[11px] font-medium text-slate-300">
+                  Email
+                </label>
                 <input
+                  id="auth-modal-email"
+                  name="email"
                   type="email"
                   required
+                  autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="creator@aimusic.dev"
@@ -211,11 +241,16 @@ export default function AuthModal() {
                 />
               </div>
               <div>
-                <label className="mb-1 block text-[11px] font-medium text-slate-300">Mật khẩu (&gt;= 6 ký tự)</label>
+                <label htmlFor="auth-modal-password" className="mb-1 block text-[11px] font-medium text-slate-300">
+                  Mật khẩu (&gt;= 6 ký tự)
+                </label>
                 <input
+                  id="auth-modal-password"
+                  name="password"
                   type="password"
                   required
                   minLength={6}
+                  autoComplete={tab === 'login' ? 'current-password' : 'new-password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••"
@@ -240,9 +275,16 @@ export default function AuthModal() {
             </form>
 
             <div className="mt-3 border-t border-white/10 pt-3">
-              <p className="mb-2 text-[10px] text-slate-400">
-                Đăng nhập nhanh Local OAuth Sandbox (không cần cấu hình Google/GitHub Secret):
-              </p>
+              <div className="mb-2 flex items-center justify-between text-[10px] text-slate-400">
+                <span>Local OAuth Sandbox:</span>
+                <Link
+                  to="/login"
+                  onClick={() => setAuthModalOpen(false)}
+                  className="text-sky-300 underline hover:text-sky-200"
+                >
+                  Mở trang /login đầy đủ
+                </Link>
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"

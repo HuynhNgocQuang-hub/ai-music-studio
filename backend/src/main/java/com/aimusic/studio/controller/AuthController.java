@@ -6,6 +6,7 @@ import com.aimusic.studio.cloud.JwtService;
 import com.aimusic.studio.cloud.ObjectStorageService;
 import com.aimusic.studio.cloud.QuotaRateLimitService;
 import com.aimusic.studio.cloud.UserPrincipal;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -118,6 +119,17 @@ public class AuthController {
     public Map<String, Object> currentSession() {
         UserPrincipal principal = AuthContextHolder.get();
         return buildAuthPayload(!principal.isGuest(), null, principal);
+    }
+
+    @PostMapping("/logout")
+    public Map<String, Object> logout(HttpServletRequest request) {
+        String token = AuthContextHolder.extractToken(request);
+        boolean revoked = jwtService.revokeToken(token);
+        AuthContextHolder.set(UserPrincipal.GUEST, request != null ? request.getRemoteAddr() : "127.0.0.1");
+        Map<String, Object> out = buildAuthPayload(false, null, UserPrincipal.GUEST);
+        out.put("status", "logged_out");
+        out.put("revoked", revoked);
+        return out;
     }
 
     private Map<String, Object> buildAuthPayload(boolean authenticated, String token, UserPrincipal principal) {

@@ -2,7 +2,7 @@
 ## Dự án: AI Music Studio (Hybrid Multi-Agent DAW)
 
 - **Phiên bản tài liệu:** 1.1 (Phase 1–8 Complete: Hybrid Multi-User Cloud Pro DAW & Publishing)
-- **Cập nhật lần cuối:** 2026-11-25
+- **Cập nhật lần cuối:** 2026-11-27
 - **Liên kết liên quan:** [README.md](../README.md) | [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 
 ---
@@ -19,7 +19,7 @@
 | **Phase 6A** | **Global 22-Tool AI Copilot, SSE & Multimodal** | `DONE` | Copilot gắn trên **cả 5 trang**, **Mini-RAG `DawPlaybook`**, **22 Native Tool Actions**, Holistic Audit (*"đề xuất mọi thứ"*), SSE Stream, Audio/Mic Input `<= 10 MB`, `chat_threads` IndexedDB | `mvn -B package` `37/37`, `worker` `16/16`, Live E2E `21/21`, Chrome `recording_8..11.mp4` |
 | **Phase 6B** | **Stem Separation, Multi-Param Automation & A/B Audition** | `DONE` | Tách Stem **Vocal + Beat**, Automation đa tham số **`DYN \| VOL \| PAN \| FILT \| REVERB`** via `AudioParam.linearRampToValueAtTime`, **Nghe thử hợp âm** A/B, nâng lên **24 Tools** | `mvn -B package` `38/38`, `worker` `17/17`, `vite build` `2167` modules, Live E2E `21/21`, Chrome `recording_12.mp4` |
 | **Phase 7** | **Visual Pitch Curve, WebMIDI, Custom `.sf2` & Undo 50** | `DONE` | **Visual Pitch Curve Editor** (semitone nudge/scale snap), **Hardware WebMIDI** keyboard, nạp **Custom `.sf2` SoundFont** (`<= 50 MB`), mở rộng **Undo 50 bước** | Verified chung đợt Phase 6B + Phase 7 (`38/38` BE, `17/17` worker, `21/21` E2E, `recording_12.mp4`) |
-| **Phase 8** | **Multi-User Cloud Workspace & Publishing (Hybrid SaaS)** | `DONE` | **Hybrid Guest + JWT Auth** (`/api/auth/*`, Local OAuth Sandbox), **PostgreSQL + H2 Fallback**, **MinIO S3 + Local Fallback**, **Daily Quota Rate-Limiter (`429`)**, **Caddy HTTPS** (`Caddyfile`), **Master FLAC/ID3**, **Public Demo Showcase `/share/:slug`** & **Remix** | `mvn -B package` **`40/40`**, `vite build` **`2170` modules**, `docker compose config -q` `0`, Live HTTP Proxy PASS, Chrome Live UI (`0` console errors, `0` HTTP >= 400) |
+| **Phase 8** | **Multi-User Cloud Workspace & Publishing (Hybrid SaaS)** | `DONE` | **Hybrid Guest + JWT Auth & Logout JTI Revocation** (`/login`, `/register`, `/api/auth/{register,login,oauth/dev,logout,me}`), **PostgreSQL + H2 Fallback**, **MinIO S3 + Local Fallback**, **Daily Quota Rate-Limiter (`429`)**, **Caddy HTTPS** (`Caddyfile`), **Master FLAC/ID3**, **Public Demo Showcase `/share/:slug`** & **Remix** | `mvn -B package` **`41/41`**, `vite build` **`2171` modules**, `docker compose config -q` `0`, Live HTTP Proxy **10/10 PASS**, Chrome Live UI **7/7 PASS** (`100/100` Accessibility, `0` console errors, `0` HTTP >= 400) |
 
 ---
 
@@ -127,7 +127,7 @@ flowchart LR
 ### Phase 8 — Multi-User Cloud Workspace & Publishing (Hybrid Web SaaS) (`DONE`)
 - **Mục tiêu:** Chuyển đổi từ ứng dụng local cá nhân sang kiến trúc **Hybrid Cloud SaaS** (dùng ngay ở chế độ Guest không rào cản hoặc đăng nhập Cloud JWT), lưu bền vững đa tầng và xuất bản Master công khai.
 - **Chức năng đã triển khai:**
-  - **Hybrid Guest + HS256 JWT Auth (`JwtService`, `AuthInterceptor`, `AuthController`, `AuthProvider`, `AuthModal`):** Đăng ký/đăng nhập PBKDF2 + JWT `Authorization: Bearer`, Local OAuth Sandbox (`Google`/`GitHub`), và bảo vệ quyền sở hữu dự án riêng tư (`HTTP 403` cho user khác).
+  - **Hybrid Guest + HS256 JWT Auth & Logout Revocation (`JwtService`, `AuthInterceptor`, `AuthController`, `CloudDatabaseService`, `AuthProvider`, `AuthModal`, `LoginPage`):** Đăng ký/đăng nhập PBKDF2 + JWT `Authorization: Bearer` (qua `/login`, `/register` hoặc `AuthModal`), Local OAuth Sandbox (`Google`/`GitHub`), nút **Đăng nhập / Đăng xuất** 1 chạm trên Top Bar & Studio, thu hồi `jti` khi `POST /api/auth/logout` vào bảng `revoked_tokens` (trả `401` nếu replay token cũ), bảo vệ quyền sở hữu dự án (`HTTP 403`), và tự đồng bộ lại `HomePage`/`LibraryPage` khi đổi phiên auth.
   - **PostgreSQL + Embedded H2 Fallback (`CloudDatabaseService`) & MinIO S3 + Local Fallback (`ObjectStorageService`):** Lưu bền vững `users`, `cloud_projects` (tự động rehydrate vào Redis nếu TTL hết hạn), `published_releases`, cùng audio Master & `.aimusic` qua AWS SigV4 hoặc thư mục local dự phòng khi Docker tắt.
   - **Quota Rate-Limit (`QuotaRateLimitService`) & Caddy HTTPS (`infra/Caddyfile`):** Kiểm soát hạn mức AI Generate & Export/Publish theo ngày (`HTTP 429`), burst limit/phút, và tích hợp `postgres`, `minio`, `caddy` (`:8443`) vào `docker-compose.yml`.
   - **FLAC + ID3 Master & Public Demo Showcase (`PublishShareController`, `SharePage.tsx`):** Hỗ trợ xuất **FLAC Lossless** và nhúng **ID3/Vorbis metadata (`title`, `artist`, `genre`)**; bấm **Publish** trong Studio để tạo link công khai `/share/:slug` kèm trình phát, đếm lượt nghe và nút **Remix trong Studio**.

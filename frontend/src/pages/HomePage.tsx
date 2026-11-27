@@ -11,6 +11,7 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
+import { useAuth } from '@/components/providers/AuthProvider';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import { deleteProject, getProject, listProjects } from '@/lib/api/client';
 import { DAW_TEMPLATES, buildProjectFromTemplate, type DAWStarterTemplate } from '@/lib/music/presets';
@@ -31,6 +32,7 @@ interface SessionEntry {
 
 export default function HomePage() {
   const navigate = useNavigate();
+  const { authenticated, user } = useAuth();
   const { project, loadProjectIntoSession, acceptRestoreDraft } = useProjectSession();
 
   const [recentDrafts, setRecentDrafts] = useState<StoredDraft[]>([]);
@@ -42,7 +44,7 @@ export default function HomePage() {
     void listProjects({ page: 1, limit: 8 })
       .then((res) => setRemoteItems(res.items || []))
       .catch(() => { });
-  }, []);
+  }, [authenticated, user.user_id]);
 
   const sessions = useMemo<SessionEntry[]>(() => {
     const map = new Map<string, SessionEntry>();

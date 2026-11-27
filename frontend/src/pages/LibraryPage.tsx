@@ -32,6 +32,7 @@ import {
   listDrafts,
   type StoredDraft,
 } from '@/lib/storage/indexeddb';
+import { useAuth } from '@/components/providers/AuthProvider';
 import { useProjectSession } from '@/components/providers/ProjectProvider';
 import type { ProjectSummary } from '@/types/project';
 
@@ -45,6 +46,7 @@ function formatBytes(bytes: number): string {
 
 export default function LibraryPage() {
   const navigate = useNavigate();
+  const { authenticated, user } = useAuth();
   const { acceptRestoreDraft, loadProjectIntoSession } = useProjectSession();
 
   const [search, setSearch] = useState('');
@@ -95,7 +97,7 @@ export default function LibraryPage() {
     } finally {
       setLoadingRemote(false);
     }
-  }, [page, limit, search, genre]);
+  }, [page, limit, search, genre, authenticated, user.user_id]);
 
   useEffect(() => {
     void refreshLocalDrafts();

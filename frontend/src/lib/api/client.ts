@@ -805,6 +805,17 @@ export async function fetchAuthMe(): Promise<AuthSessionResponse> {
   });
 }
 
+export async function logoutAccount(): Promise<{ status: string; authenticated: boolean; revoked?: boolean }> {
+  try {
+    return await requestJson<{ status: string; authenticated: boolean; revoked?: boolean }>('/api/auth/logout', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  } finally {
+    clearAuthToken();
+  }
+}
+
 export async function publishProject(
   projectId: string,
   payload: PublishReleaseRequest = {}

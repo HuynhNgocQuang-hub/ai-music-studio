@@ -1156,6 +1156,40 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
     assert me_guest.status_code == 200
     assert me_guest.json()["authenticated"] is False
 
+    e2e_email = f"e2e-{uuid.uuid4().hex[:8]}@aimusic.test"
+    e2e_pass = "StudioPass!2026"
+    reg_res = api_client.post(
+        "/api/auth/register",
+        json={"email": e2e_email, "password": e2e_pass, "display_name": "E2E Auth Producer"},
+    )
+    assert reg_res.status_code == 200, reg_res.text
+    reg_token = reg_res.json()["token"]
+    assert reg_token
+
+    me_user = api_client.get("/api/auth/me", headers={"Authorization": f"Bearer {reg_token}"})
+    assert me_user.status_code == 200
+    assert me_user.json()["authenticated"] is True
+    assert me_user.json()["user"]["email"] == e2e_email
+
+    logout_res = api_client.post("/api/auth/logout", headers={"Authorization": f"Bearer {reg_token}"})
+    assert logout_res.status_code == 200, logout_res.text
+    assert logout_res.json()["authenticated"] is False
+    assert logout_res.json()["revoked"] is True
+
+    replay_res = api_client.get("/api/auth/me", headers={"Authorization": f"Bearer {reg_token}"})
+    assert replay_res.status_code == 401, replay_res.text
+
+    login_res = api_client.post(
+        "/api/auth/login",
+        json={"email": e2e_email, "password": e2e_pass},
+    )
+    assert login_res.status_code == 200, login_res.text
+    fresh_token = login_res.json()["token"]
+    assert fresh_token != reg_token
+    me_relogin = api_client.get("/api/auth/me", headers={"Authorization": f"Bearer {fresh_token}"})
+    assert me_relogin.status_code == 200
+    assert me_relogin.json()["authenticated"] is True
+
     pub_res = api_client.post(
         f"/api/projects/{pid}/publish",
         json={"format": "wav", "artist": "E2E Producer"},

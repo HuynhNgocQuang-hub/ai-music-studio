@@ -10,6 +10,7 @@ const StudioPage = lazy(() => import('@/pages/StudioPage'));
 const LibraryPage = lazy(() => import('@/pages/LibraryPage'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 const SharePage = lazy(() => import('@/pages/SharePage'));
+const LoginPage = lazy(() => import('@/pages/LoginPage'));
 
 function RouteLoadingFallback() {
   return (
@@ -33,6 +34,8 @@ export default function App() {
                 <Route path="/studio/:id" element={<StudioPage />} />
                 <Route path="/library" element={<LibraryPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/login" element={<LoginPage />} />
+                <Route path="/register" element={<LoginPage />} />
                 <Route path="/share" element={<SharePage />} />
                 <Route path="/share/:slug" element={<SharePage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

@@ -22,16 +22,17 @@ Dựa trên cấu hình thực tế (**Node.js v24**, **Java 21 + Maven 3.9+**, 
 ## 2. Kiến trúc Điều hướng, Menu & Bố cục Màn hình (UI/UX Navigation)
 
 ### 2.1. Thanh Activity Rail & Khung Ứng dụng (App Shell)
-Giao diện dùng `react-router-dom` (`BrowserRouter`, `Routes`, `Route`) với **Pro DAW Activity Rail** gọn bên trái (ẩn bớt header phụ khi vào `/studio/:id` để nhường trọn 100% chiều cao cho Timeline + Production Dock), nút tài khoản **Cloud / Đăng nhập** (`AuthModal.tsx`), nút tạo nhanh **Blank DAW** (`+`) và banner khôi phục bản nháp `IndexedDB`:
+Giao diện dùng `react-router-dom` (`BrowserRouter`, `Routes`, `Route`) với **Pro DAW Activity Rail** gọn bên trái (ẩn bớt header phụ khi vào `/studio/:id` để nhường trọn 100% chiều cao cho Timeline + Production Dock), nút tài khoản **Cloud Quota** (`AuthModal.tsx`), nút **Đăng nhập / Đăng xuất** 1 chạm trên thanh Activity Rail, Header chính và Studio Top Transport, nút tạo nhanh **Blank DAW** (`+`) và banner khôi phục bản nháp `IndexedDB`:
 
 | Menu Item | Route | Chức năng chính |
 | :--- | :--- | :--- |
-| **Trang chủ (Project Hub)** | `/` | Khởi tạo 1-click từ Starter DAW Templates (`Pop`, `Lo-fi`, `Trap 808`, `House`, `Ballad`, `Blank Studio`) & Recent Sessions (mở/xóa). |
+| **Trang chủ (Project Hub)** | `/` | Khởi tạo 1-click từ Starter DAW Templates (`Pop`, `Lo-fi`, `Trap 808`, `House`, `Ballad`, `Blank Studio`) & Recent Sessions (tự đồng bộ lại khi Login/Logout). |
 | **1. AI Hum-to-Music** | `/create` | Luồng từng bước (Wizard 4 bước) ghi âm/upload vocal để AI phối khí & tạo bài hoàn chỉnh. |
-| **2. Phòng thu DAW** | `/studio/:id` | Không gian Pro DAW đầy đủ (Arrangement, Multi-Param Automation, Stem Separation, Pitch Curve, Step Sequencer, Piano Roll + WebMIDI, Console Mixer EQ/FX Bus, Lyrics CRUD, AI Coach, **Publish & FLAC Export**). |
-| **3. Kho Session (`.aimusic`)** | `/library` | Quản lý Local Draft (`IndexedDB`) & Server/Cloud Sessions (tạo mới, nhân bản, xóa, badge `Public`, phân trang `12/24/48`, import `.aimusic`). |
+| **2. Phòng thu DAW** | `/studio/:id` | Không gian Pro DAW đầy đủ (Arrangement, Multi-Param Automation, Stem Separation, Pitch Curve, Step Sequencer, Piano Roll + WebMIDI, Console Mixer EQ/FX Bus, Lyrics CRUD, AI Coach, **Publish & FLAC Export**, nút **Đăng nhập/Đăng xuất** trên Top Transport). |
+| **3. Kho Session (`.aimusic`)** | `/library` | Quản lý Local Draft (`IndexedDB`) & Server/Cloud Sessions (tạo mới, nhân bản, xóa, badge `Public`, phân trang `12/24/48`, import `.aimusic`, tự reload khi đổi tài khoản). |
 | **4. Cộng đồng Demo** | `/share` & `/share/:slug` | Trang Showcase & Trình phát **Master Release** công khai (`-14 LUFS`, MP3/FLAC/WAV), hiển thị hợp âm, lời, lượt nghe, tải Master & nút **Remix trong Studio**. |
 | **5. Audio Engine & API** | `/settings` | Cấu hình Gemini/OpenAI Key, phân vai Agent, Test API Key, nạp **Custom `.sf2` SoundFont**, kiểm tra Cloud DB/S3/Redis/FluidSynth & quản lý tài khoản Quota. |
+| **6. Tài khoản Cloud** | `/login` & `/register` | Trang Đăng nhập / Đăng ký riêng biệt (`LoginPage.tsx`), hỗ trợ `?redirect=...`, Local OAuth Sandbox (`Google`/`GitHub`), xem Quota & **Đăng xuất (thu hồi JWT)**. |
 
 > **Chuyển trang thông minh (Seamless Handoff):** Từ trang `/create` sau khi AI tạo xong bản nghe thử (Bước 4), người dùng bấm **"Mở trong Studio"** $\rightarrow$ điều hướng sang `/studio/:id` bằng `useNavigate()` mà giữ nguyên toàn bộ State trong `ProjectProvider`.
 
@@ -132,8 +133,9 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 ### 3.4. Nhóm Persistence, Auth, Cloud Quota, Share & Export
 | Method & Endpoint | Mục đích | Payload / Output chính |
 | :--- | :--- | :--- |
-| `POST /api/auth/register` / `/login` | Đăng ký & đăng nhập tài khoản Cloud (PBKDF2 + HS256 JWT) | `{ email, password, display_name }` $\rightarrow$ `{ authenticated, token, user, quota, cloud }` |
+| `POST /api/auth/register` / `/login` | Đăng ký & đăng nhập tài khoản Cloud (PBKDF2 + HS256 JWT có `jti` claim) | `{ email, password, display_name }` $\rightarrow$ `{ authenticated, token, user, quota, cloud }` |
 | `POST /api/auth/oauth/dev` / `GET /api/auth/me` | Đăng nhập Local OAuth Sandbox (`google`/`github`) & đọc thông tin phiên + Quota | `{ authenticated, user, quota, cloud }` (hoặc `Guest` nếu chưa đăng nhập) |
+| `POST /api/auth/logout` | Đăng xuất server-side, thu hồi JWT `jti` vào bảng `revoked_tokens` + cache (`401` nếu replay token cũ, vẫn mở Guest khi không gửi token) | `{ status: "logged_out", authenticated: false, revoked, user, quota, cloud }` |
 | `GET /api/projects` | Lấy danh sách dự án (Redis + `CloudDatabaseService`) có **phân trang, lọc & scope (`all\|mine\|public`)** | Query: `?page=1&limit=12&search=&genre=&scope=` $\rightarrow$ `{ items, total, page, total_pages }` |
 | `GET /api/projects/{id}` | Lấy chi tiết 1 `ProjectState` theo ID (tự rehydrate từ CloudDB nếu hết TTL; `403` nếu private của user khác) | `ProjectState JSON` |
 | `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` (`owner_id`, `automation`, EQ, FX) lên Redis + CloudDB (`403` nếu không sở hữu) | Body: `ProjectState JSON` |

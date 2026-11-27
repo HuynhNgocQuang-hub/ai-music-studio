@@ -77,7 +77,7 @@ Mở trình duyệt tại `http://localhost:3000` (mọi request `/api/*` đư�
 - **Pro DAW Workstation & Khung Clip FL Studio 12 (`/studio/:id`):** Top Transport cố định (`Play/Pause/Stop/Rec`, `Loop`, `Metronome`, `BPM`, `Key/Scale/Time Signature 4/4|3/4|6/8`, **Undo/Redo 50 bước**, `Select/Split/Snap`, **`Quick | Pro DAW`**, **`Publish` Demo**), Playlist chuẩn FL Studio (**Audio Waveform** polygon đối xứng, **Multi-Param Automation Envelope `DYN | VOL | PAN | FILT | REVERB`** phát qua Web Audio `linearRampToValueAtTime`, **MIDI Pattern** chia theo Section + biến thể `#2`), và Bottom Dock (`Step Sequencer`, `Piano Roll + Hardware WebMIDI`, `Console Mixer`, `Auto-Tune DSP + Visual Pitch Curve Editor`, `Lyrics & Karaoke`).
 - **AI Music Copilot Toàn cục & Toàn năng (`AiCoachChatDrawer.tsx`):** Hoạt động xuyên suốt các trang với **4 chế độ (`Producer` | `Hòa âm` | `Viết lời` | `Mix / Tune`)**, **Mini-RAG `DawPlaybook`**, **SSE Token Streaming** (`/api/coach/chat/stream`), **Multimodal Audio/Voice** (`/api/coach/chat/audio` `<= 10 MB`, `Gửi kèm Vocal`, Mic WAV/Web Speech), **A/B Nghe thử hợp âm**, **24 Native Tool Actions**, **Kiểm tra & Đề xuất tổng thể**, **Áp dụng tất cả**, **Hoàn tác 1 chạm**, và lưu lịch sử qua `IndexedDB chat_threads`.
 - **Stem Separation, DSP Mixer, Custom `.sf2`, FLAC & ID3 Master Export:** Tách stem **Vocal + Beat** (`POST /api/studio/separate-stems`), nạp **Custom `.sf2` SoundFont** tùy chọn (`<= 50 MB`, kiểm tra `RIFF/sfbk`), Auto-Tune **Formant Cepstral + Visual Pitch Curve Editor**, **3-Band EQ (`low_db`, `mid_db`, `high_db`)**, **Vocal Carve 2.2 kHz**, và **Send FX Bus** — xuất `WAV`, `MP3 (320k / 192k + ID3 tags)`, **`FLAC Lossless`**, `Stems`, `.mid` và `.aimusic` với Master Limiter (`<= -1.0 dBFS`, `-14 LUFS`).
-- **Hybrid Multi-User Cloud SaaS, Quota & Public Demo Showcase (`Phase 8`):** Hỗ trợ dùng ngay ở chế độ **Guest** hoặc đăng ký/đăng nhập **JWT (`Authorization: Bearer` + Local OAuth Sandbox)**, đồng bộ bền vững lên **PostgreSQL / H2 Fallback** + **MinIO S3 / Local Fallback**, kiểm soát **Daily Quota Rate-Limit (`HTTP 429`)**, xuất bản link công khai `/share/:slug` (**Demo Player + Remix trong Studio**), và **Caddy HTTPS Reverse Proxy** (`:8443`).
+- **Hybrid Multi-User Cloud SaaS, Login/Logout & Public Demo Showcase (`Phase 8`):** Hỗ trợ dùng ngay ở chế độ **Guest** hoặc đăng ký/đăng nhập **JWT** trên `/login` & `/register` (`Authorization: Bearer`, Local OAuth Sandbox, nút **Đăng nhập/Đăng xuất** trên Top Bar & Studio, `POST /api/auth/logout` thu hồi `jti` chặn replay `401`), đồng bộ bền vững lên **PostgreSQL / H2 Fallback** + **MinIO S3 / Local Fallback**, kiểm soát **Daily Quota Rate-Limit (`HTTP 429`)**, xuất bản link công khai `/share/:slug` (**Demo Player + Remix trong Studio**), và **Caddy HTTPS Reverse Proxy** (`:8443`).
 - **Bảo mật & Ổn định TTL (`Phase 5`):** Bind Docker ports về `127.0.0.1`, `CorsConfig` + `SecurityHeadersFilter`, redact key trong `LlmAdapter`, giới hạn upload (`55MB` / `413` trên worker), chống Zip Bomb + collision-safe import (`.aimusic` `overwrite=false`), từ chối `total_bars > 256` (`HTTP 400`), và **Auto-Rehydrate audio từ `IndexedDB` / `CloudDB`**.
 - **Session Vault (`/library`) & Settings (`/settings`):** Tìm kiếm, lọc, phân trang, badge **Public**, xóa 2 bước nội tuyến, cấu hình Dual LLM, upload `.sf2` SoundFont, kiểm tra trạng thái Cloud DB/S3 & nút **Test API Key**.
 
@@ -87,13 +87,13 @@ Mở trình duyệt tại `http://localhost:3000` (mọi request `/api/*` đư�
 # Kiểm tra cấu hình Docker Compose nhóm music (redis, postgres, minio, audio-worker, backend, caddy)
 docker compose -p music config -q
 
-# Chạy unit, MockMvc, security & Phase 8 Cloud/JWT/Publish tests cho Spring Boot Backend (40/40 pass)
+# Chạy unit, MockMvc, security & Phase 8 Cloud/JWT Login-Logout tests cho Spring Boot Backend (41/41 pass)
 cd backend && mvn -B package
 
 # Chạy unit & DSP/DoS/FLAC tests cho Python Audio DSP Worker trong Docker (17/17 pass ở Phase 7; 18 tests gồm FLAC export sẵn sàng khi Docker bật)
 docker compose -p music exec -T audio-worker pytest -v tests/test_worker.py
 
-# Kiểm tra TypeScript & build production cho React Vite Frontend (2170 modules)
+# Kiểm tra TypeScript & build production cho React Vite Frontend (2171 modules)
 cd frontend && npx tsc --noEmit && npm run build
 
 # Chạy Live Full-Stack E2E (yêu cầu Redis :16379, audio-worker :8001, Backend :8000 đang chạy - Phase 1..7 21/21 pass + Phase 8 Live Checks)

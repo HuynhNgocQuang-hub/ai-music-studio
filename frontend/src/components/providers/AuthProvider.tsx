@@ -1,9 +1,11 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
+  ApiError,
   clearAuthToken,
   fetchAuthMe,
   getAuthToken,
   loginAccount,
+  logoutAccount,
   oauthDevLogin,
   registerAccount,
   setAuthToken,
@@ -21,7 +23,7 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<AuthSessionResponse>;
   register: (email: string, password: string, displayName: string) => Promise<AuthSessionResponse>;
   oauthLogin: (provider: 'google' | 'github') => Promise<AuthSessionResponse>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshAuth: () => Promise<void>;
 }
 
@@ -60,8 +62,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearAuthToken();
       }
       applySession(res);
-    } catch {
-      // Backend may be offline during initial dev boot; keep guest state seamlessly
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && getAuthToken()) {
+        clearAuthToken();
+        setAuthenticated(false);
+        setUser(GUEST_USER);
+        try {
+          const guestRes = await fetchAuthMe();
+          applySession(guestRes);
+        } catch {
+          // ignore if backend offline
+        }
+      }
     } finally {
       setLoading(false);
     }
@@ -98,11 +110,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [applySession]
   );
 
-  const logout = useCallback(() => {
-    clearAuthToken();
+  const logout = useCallback(async () => {
+    try {
+      await logoutAccount();
+    } catch {
+      clearAuthToken();
+    }
     setAuthenticated(false);
     setUser(GUEST_USER);
-    void refreshAuth();
+    await refreshAuth();
   }, [refreshAuth]);
 
   return (
