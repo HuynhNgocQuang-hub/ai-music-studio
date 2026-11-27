@@ -1248,5 +1248,18 @@ def test_full_spectrum_copilot_stream_and_audio(api_client):
 
     assert api_client.delete(f"/api/share/{slug2}/comments/{scmt_id}").status_code == 200
     assert api_client.delete(f"/api/studio/{pid}/collab/session").status_code == 200
+
+    # Phase 10B: Custom LUFS target (-9 Club), Trending Showcase sort & Creator leaderboard
+    pub_lufs = api_client.post(
+        f"/api/projects/{pid}/publish",
+        json={"format": "wav", "artist": "E2E Producer", "target_lufs": -9.0},
+    )
+    assert pub_lufs.status_code == 200, pub_lufs.text
+    assert pub_lufs.json()["lufs_target"] == -9.0
+    slug_p10 = pub_lufs.json()["share_slug"]
+    assert api_client.get("/api/creators").status_code == 200
+    trending_res = api_client.get("/api/share?sort=trending&scope=all")
+    assert trending_res.status_code == 200 and trending_res.json()["total"] >= 1
+
     assert api_client.delete(f"/api/projects/{pid}").status_code == 200
-    assert api_client.get(f"/api/share/{slug2}").status_code == 404
+    assert api_client.get(f"/api/share/{slug_p10}").status_code == 404

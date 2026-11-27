@@ -420,6 +420,28 @@ export default function ConsoleMixerPanel({
           <p className="text-[10px] text-slate-300 tabular-nums">
             Ceiling: {project.mastering.limiter_ceiling_db} dBFS
           </p>
+          <div className="pt-0.5">
+            <label htmlFor="mixer-master-lufs" className="sr-only">
+              Target Loudness LUFS
+            </label>
+            <select
+              id="mixer-master-lufs"
+              name="masterTargetLufs"
+              value={String(project.mastering.target_lufs ?? -14)}
+              onChange={(e) => {
+                const nextLufs = Number(e.target.value);
+                onMutateWithUndo((p) => ({
+                  ...p,
+                  mastering: { ...p.mastering, target_lufs: nextLufs },
+                }));
+              }}
+              className="w-full rounded border border-emerald-400/25 bg-[#0b0d11] px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-200"
+            >
+              <option value="-9">-9 LUFS (Club / EDM)</option>
+              <option value="-14">-14 LUFS (Streaming Chuẩn)</option>
+              <option value="-16">-16 LUFS (Apple / Dynamic)</option>
+            </select>
+          </div>
         </div>
 
         <div className="my-1.5 flex items-center justify-center gap-3 rounded-md border border-emerald-500/20 bg-[#080a10] px-3 py-1.5">

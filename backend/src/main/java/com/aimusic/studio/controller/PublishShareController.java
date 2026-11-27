@@ -110,6 +110,13 @@ public class PublishShareController {
         String genre = body != null && body.get("genre") instanceof String g && !g.isBlank()
                 ? g.trim() : (project.getConfig() != null ? project.getConfig().getGenre() : "Pop");
         boolean applyMastering = !(body != null && Boolean.FALSE.equals(body.get("apply_mastering")));
+        if (body != null && body.get("target_lufs") instanceof Number tl) {
+            double clampedLufs = Math.max(-20.0, Math.min(-8.0, tl.doubleValue()));
+            if (project.getMastering() == null) {
+                project.setMastering(new com.aimusic.studio.model.MasteringSettings());
+            }
+            project.getMastering().setTargetLufs(clampedLufs);
+        }
 
         int sr = properties.getSampleRate();
         Map<String, byte[]> audioAssets = store.collectAudioAssets(project);
@@ -233,9 +240,16 @@ public class PublishShareController {
             @RequestParam(value = "page", defaultValue = "1") int page,
             @RequestParam(value = "limit", defaultValue = "12") int limit,
             @RequestParam(value = "search", defaultValue = "") String search,
-            @RequestParam(value = "genre", defaultValue = "") String genre
+            @RequestParam(value = "genre", defaultValue = "") String genre,
+            @RequestParam(value = "sort", defaultValue = "recent") String sort,
+            @RequestParam(value = "scope", defaultValue = "all") String scope,
+            @RequestParam(value = "creator", defaultValue = "") String creator
     ) {
-        List<CloudDatabaseService.PublishedReleaseRecord> all = cloudDb.listReleases(search, genre);
+        String actorKey = AuthContextHolder.getActorQuotaKey();
+        java.util.Set<String> followingIds = "following".equalsIgnoreCase(scope)
+                ? cloudDb.listFollowingIds(actorKey)
+                : null;
+        List<CloudDatabaseService.PublishedReleaseRecord> all = cloudDb.listReleases(search, genre, sort, creator, followingIds);
         int total = all.size();
         int safeLimit = Math.max(1, Math.min(limit, 50));
         int totalPages = total > 0 ? Math.max(1, (int) Math.ceil((double) total / safeLimit)) : 1;
@@ -387,6 +401,7 @@ public class PublishShareController {
         map.put("likes_count", cloudDb.countReleaseLikes(r.shareSlug()));
         map.put("liked_by_me", cloudDb.hasActorLikedRelease(r.shareSlug(), actorKey));
         map.put("comments_count", comments.size());
+        map.put("creator_followed", r.ownerId() != null && !r.ownerId().isBlank() && cloudDb.isFollowingCreator(actorKey, r.ownerId()));
         map.put("created_at", r.createdAt());
         map.put("share_url", "/share/" + r.shareSlug());
         map.put("stream_url", "/api/share/" + r.shareSlug() + "/audio");

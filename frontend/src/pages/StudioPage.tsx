@@ -1931,6 +1931,7 @@ export default function StudioPage() {
         artist: publishArtist.trim() || (authenticated ? user.display_name : 'AI Music Studio'),
         genre: current.config.genre,
         apply_mastering: current.mastering.auto_mix_enabled,
+        target_lufs: current.mastering.target_lufs,
       });
       if (res.project_state) {
         updateProject(() => res.project_state!);
@@ -3685,7 +3686,7 @@ export default function StudioPage() {
                   htmlFor="studio-publish-format"
                   className="mb-1 block text-[11px] font-medium text-slate-300"
                 >
-                  Định dạng Master (-14 LUFS / Peak &lt;= -1.0 dBFS)
+                  Định dạng Master ({project.mastering.target_lufs} LUFS / Peak &lt;= -1.0 dBFS)
                 </label>
                 <select
                   id="studio-publish-format"
@@ -3697,6 +3698,32 @@ export default function StudioPage() {
                   <option value="mp3">MP3 320kbps + ID3 Tags (Nhẹ &amp; Streaming)</option>
                   <option value="flac">FLAC Lossless + Tags (Chất lượng gốc)</option>
                   <option value="wav">WAV 44.1kHz PCM 16-bit</option>
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="studio-publish-lufs"
+                  className="mb-1 block text-[11px] font-medium text-slate-300"
+                >
+                  Mục tiêu Âm lượng (Target LUFS)
+                </label>
+                <select
+                  id="studio-publish-lufs"
+                  name="publishTargetLufs"
+                  value={String(project.mastering.target_lufs ?? -14)}
+                  onChange={(e) => {
+                    const nextLufs = Number(e.target.value);
+                    updateProject((p) => ({
+                      ...p,
+                      mastering: { ...p.mastering, target_lufs: nextLufs },
+                    }));
+                  }}
+                  className="w-full rounded-lg border border-white/15 bg-[#0b0d11] px-3 py-2 text-xs text-white"
+                >
+                  <option value="-9">-9.0 LUFS (Club / EDM Mạnh mẽ)</option>
+                  <option value="-14">-14.0 LUFS (Spotify / YouTube Chuẩn)</option>
+                  <option value="-16">-16.0 LUFS (Apple Music / Động rộng)</option>
                 </select>
               </div>
 

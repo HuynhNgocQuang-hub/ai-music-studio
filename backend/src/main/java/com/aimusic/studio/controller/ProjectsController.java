@@ -290,6 +290,10 @@ public class ProjectsController {
         String genre = (req.getGenre() != null && !req.getGenre().isBlank())
                 ? req.getGenre().trim()
                 : (project.getConfig() != null ? project.getConfig().getGenre() : "Pop");
+        if (req.getTargetLufs() != null && project.getMastering() != null) {
+            double clamped = Math.max(-20.0, Math.min(-8.0, req.getTargetLufs()));
+            project.getMastering().setTargetLufs(clamped);
+        }
 
         Map<String, byte[]> audioAssets = collectAudioAssets(project);
         String bitrate = req.getBitrate();

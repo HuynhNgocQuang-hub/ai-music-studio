@@ -1,6 +1,6 @@
 # E2E & Contract Verification (`tests/e2e/`)
 
-Automated integration, security, and contract verification suite for **AI Music Studio (Phase 1–9)**, aligned with:
+Automated integration, security, and contract verification suite for **AI Music Studio (Phase 1–10B)**, aligned with:
 - [`docs/SRS.md`](../../docs/SRS.md)
 - [`docs/MULTI_AGENT_ARCHITECTURE.md`](../../docs/MULTI_AGENT_ARCHITECTURE.md)
 - [`docs/API_AND_UI_SPEC.md`](../../docs/API_AND_UI_SPEC.md)
@@ -32,11 +32,12 @@ Automated integration, security, and contract verification suite for **AI Music 
 - `test_phase4_crud_eq_send_fx_and_delete`
 - `test_security_headers_validation_and_dos_guards` (`nosniff`/`DENY`/`no-referrer`, Zip Bomb/path traversal, collision-safe `.aimusic` import, `total_bars > 256` -> `400`)
 - `test_end_to_end_full_lifecycle_workflow` (Upload -> Denoise -> Analyze -> AutoTune -> Generate SSE -> Overdub -> Export/Import)
-- `test_full_spectrum_copilot_stream_and_audio` (Global `/api/coach/chat` on `/`, SSE `/api/coach/chat/stream`, WAV `/api/coach/chat/audio` DSP telemetry & 10 MB `413` guard + Phase 6B/7 `/api/studio/separate-stems`, `TrackState.automation` sync, `/api/audio/soundfont` + Phase 8 `/api/health` cloud block, `/api/auth/{me,register,logout,login}` JWT revocation `401` check, `/api/projects?scope=public`, `/api/share?search=...`, `/api/projects/{id}/publish`, `/api/share/{slug}`, Phase 9 `/api/studio/{id}/collab/session`, `/api/studio/{id}/comments`, `/api/share/{slug}/like`, `/api/share/{slug}/comments`, and cascading `DELETE` cleanup)
+- `test_full_spectrum_copilot_stream_and_audio` (Global `/api/coach/chat` on `/`, SSE `/api/coach/chat/stream`, WAV `/api/coach/chat/audio` DSP telemetry & 10 MB `413` guard + Phase 6B/7 `/api/studio/separate-stems`, `TrackState.automation` sync, `/api/audio/soundfont` + Phase 8 `/api/health` cloud block, `/api/auth/{me,register,logout,login}` JWT revocation `401` check, `/api/projects?scope=public`, `/api/share?search=...`, `/api/projects/{id}/publish`, `/api/share/{slug}`, Phase 9 `/api/studio/{id}/collab/session`, `/api/studio/{id}/comments`, `/api/share/{slug}/like`, `/api/share/{slug}/comments`, Phase 10B `target_lufs=-9.0` publish, `/api/creators`, `/api/share?sort=trending`, and cascading `DELETE` cleanup)
 
-### Backend & Worker Phase 8–9 Unit / MockMvc Additions
+### Backend & Worker Phase 8–10B Unit / MockMvc Additions
 - `backend/src/test/java/com/aimusic/studio/CloudPhase8Tests.java` (3 tests): JWT tamper, PBKDF2 hashing & `jti` revocation; `loginLogoutRevokesJwtAndReturnsGuestOnReLogin` (`/api/auth/register` -> `/api/auth/logout` -> `401` replay guard -> Guest fallback -> `/api/auth/login` fresh token); `403` cross-user isolation across `Projects`, `Audio`, `Jobs`, `Studio` even after Redis eviction; CloudDB + ObjectStorage S3 audio auto-rehydration; Remix `owner_id` anti-spoof protection; `scope=public` & `/api/share` search filters; cascading delete cleanup; and daily quota `429` enforcement.
 - `backend/src/test/java/com/aimusic/studio/CollabPhase9Tests.java` (2 tests): Spring Boot `RANDOM_PORT` + MockMvc + `StandardWebSocketClient` verifying `/ws/collab` multi-peer snapshot & presence, >16 KB `state_sync` WebSocket frame transmission (`2 MB` Tomcat buffer), invite `room_code` enforcement, `bar_comment_event` broadcast, `/api/share/{slug}/like` toggle, chronological `timestamp_sec` Showcase comments, `403` delete guard, and cascade project cleanup.
+- `backend/src/test/java/com/aimusic/studio/CreatorFollowAndLufsTests.java` (1 test): Guest `401` profile guard, authenticated `PATCH /api/creators/me`, `-9`/`-16` LUFS Publish & Export overrides, self-follow `400` guard, `/api/creators/{id}/follow`, Following Feed (`scope=following`), Trending Showcase sorting (`sort=trending`), and `/api/creators` leaderboard.
 - `audio-worker/tests/test_worker.py::test_flac_master_export_and_metadata_tags`: Lossless FLAC (`fLaC` header) export with `-1.0 dBFS` limiter & ID3/Vorbis tag fields.
 
 ## Running the Suite

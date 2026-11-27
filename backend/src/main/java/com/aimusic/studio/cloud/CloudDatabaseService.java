@@ -15,11 +15,15 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -32,6 +36,20 @@ public class CloudDatabaseService {
     private static final Logger log = LoggerFactory.getLogger(CloudDatabaseService.class);
 
     public record UserRecord(String id, String email, String displayName, String passwordHash, String role, String createdAt) {}
+
+    public record UserProfileRecord(String id, String displayName, String role, String bio, String createdAt) {}
+
+    public record CreatorSummaryRecord(
+            String userId,
+            String displayName,
+            String bio,
+            String role,
+            int followersCount,
+            int followingCount,
+            int releasesCount,
+            int totalPlays,
+            int totalLikes
+    ) {}
 
     public record CloudProjectRecord(
             String projectId,
@@ -175,6 +193,17 @@ public class CloudDatabaseService {
                     password_hash VARCHAR(255) NOT NULL,
                     role VARCHAR(32) NOT NULL,
                     created_at VARCHAR(64) NOT NULL
+                )""");
+        try {
+            jdbc.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bio VARCHAR(500)");
+        } catch (Exception ignored) {
+        }
+        jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS creator_follows (
+                    follower_id VARCHAR(64) NOT NULL,
+                    creator_id VARCHAR(64) NOT NULL,
+                    created_at VARCHAR(64) NOT NULL,
+                    PRIMARY KEY (follower_id, creator_id)
                 )""");
         jdbc.execute("""
                 CREATE TABLE IF NOT EXISTS cloud_projects (
@@ -416,14 +445,31 @@ public class CloudDatabaseService {
     }
 
     public List<PublishedReleaseRecord> listReleases(String search, String genre) {
+        return listReleases(search, genre, "recent", null, null);
+    }
+
+    public List<PublishedReleaseRecord> listReleases(
+            String search,
+            String genre,
+            String sort,
+            String ownerId,
+            Set<String> followingIds
+    ) {
         List<PublishedReleaseRecord> all = jdbc.query(
                 "SELECT * FROM published_releases ORDER BY created_at DESC",
                 (rs, i) -> mapRelease(rs)
         );
         String q = search != null ? search.trim().toLowerCase(Locale.ROOT) : "";
         String g = genre != null ? genre.trim().toLowerCase(Locale.ROOT) : "";
+        String creatorFilter = ownerId != null ? ownerId.trim() : "";
         List<PublishedReleaseRecord> out = new ArrayList<>();
         for (PublishedReleaseRecord r : all) {
+            if (!creatorFilter.isEmpty() && !creatorFilter.equals(r.ownerId())) {
+                continue;
+            }
+            if (followingIds != null && !followingIds.contains(r.ownerId())) {
+                continue;
+            }
             if (!q.isEmpty() && !r.title().toLowerCase(Locale.ROOT).contains(q)
                     && !r.artist().toLowerCase(Locale.ROOT).contains(q)
                     && !r.genre().toLowerCase(Locale.ROOT).contains(q)) {
@@ -433,6 +479,22 @@ public class CloudDatabaseService {
                 continue;
             }
             out.add(r);
+        }
+
+        String normSort = sort != null ? sort.trim().toLowerCase(Locale.ROOT) : "recent";
+        if ("trending".equals(normSort) || "likes".equals(normSort) || "plays".equals(normSort)) {
+            Map<String, Integer> likesCache = new HashMap<>();
+            jdbc.query("SELECT share_slug, COUNT(*) AS cnt FROM release_likes GROUP BY share_slug", rs -> {
+                likesCache.put(rs.getString("share_slug"), rs.getInt("cnt"));
+            });
+            out.sort(Comparator.comparingInt((PublishedReleaseRecord r) -> {
+                int likes = likesCache.getOrDefault(r.shareSlug(), 0);
+                return switch (normSort) {
+                    case "likes" -> likes * 100 + r.playsCount();
+                    case "plays" -> r.playsCount() * 100 + likes;
+                    default -> (likes * 3) + r.playsCount();
+                };
+            }).reversed().thenComparing(PublishedReleaseRecord::createdAt, Comparator.reverseOrder()));
         }
         return out;
     }
@@ -601,6 +663,135 @@ public class CloudDatabaseService {
 
     public void deleteStudioBarComment(String commentId) {
         jdbc.update("DELETE FROM studio_bar_comments WHERE id = ?", commentId);
+    }
+
+    // --- Phase 10B: Creator Profiles & Follow Graph ---
+
+    public Optional<UserProfileRecord> getUserProfile(String userId) {
+        if (userId == null || userId.isBlank()) return Optional.empty();
+        List<UserProfileRecord> rows = jdbc.query(
+                "SELECT id, display_name, role, bio, created_at FROM users WHERE id = ?",
+                (rs, i) -> new UserProfileRecord(
+                        rs.getString("id"), rs.getString("display_name"),
+                        rs.getString("role"), rs.getString("bio"), rs.getString("created_at")
+                ),
+                userId
+        );
+        return rows.stream().findFirst();
+    }
+
+    public Optional<UserProfileRecord> updateUserProfile(String userId, String displayName, String bio) {
+        Optional<UserProfileRecord> existing = getUserProfile(userId);
+        if (existing.isEmpty()) return Optional.empty();
+        UserProfileRecord prev = existing.get();
+        String nextName = (displayName != null && !displayName.isBlank())
+                ? displayName.trim().substring(0, Math.min(displayName.trim().length(), 100))
+                : prev.displayName();
+        String nextBio = bio != null
+                ? bio.trim().substring(0, Math.min(bio.trim().length(), 400))
+                : prev.bio();
+        jdbc.update("UPDATE users SET display_name = ?, bio = ? WHERE id = ?", nextName, nextBio, userId);
+        return getUserProfile(userId);
+    }
+
+    public Map<String, Object> toggleCreatorFollow(String followerActorKey, String creatorId) {
+        String key = (followerActorKey != null && !followerActorKey.isBlank()) ? followerActorKey : "guest:local";
+        Integer existing = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM creator_follows WHERE follower_id = ? AND creator_id = ?",
+                Integer.class, key, creatorId
+        );
+        boolean following;
+        if (existing != null && existing > 0) {
+            jdbc.update("DELETE FROM creator_follows WHERE follower_id = ? AND creator_id = ?", key, creatorId);
+            following = false;
+        } else {
+            jdbc.update(
+                    "INSERT INTO creator_follows (follower_id, creator_id, created_at) VALUES (?, ?, ?)",
+                    key, creatorId, Instant.now().toString()
+            );
+            following = true;
+        }
+        return Map.of(
+                "creator_id", creatorId,
+                "following", following,
+                "followers_count", countFollowers(creatorId)
+        );
+    }
+
+    public boolean isFollowingCreator(String followerActorKey, String creatorId) {
+        if (followerActorKey == null || followerActorKey.isBlank() || creatorId == null || creatorId.isBlank()) {
+            return false;
+        }
+        Integer n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM creator_follows WHERE follower_id = ? AND creator_id = ?",
+                Integer.class, followerActorKey, creatorId
+        );
+        return n != null && n > 0;
+    }
+
+    public int countFollowers(String creatorId) {
+        Integer n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM creator_follows WHERE creator_id = ?",
+                Integer.class, creatorId
+        );
+        return n != null ? n : 0;
+    }
+
+    public int countFollowing(String followerActorKey) {
+        Integer n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM creator_follows WHERE follower_id = ?",
+                Integer.class, followerActorKey
+        );
+        return n != null ? n : 0;
+    }
+
+    public Set<String> listFollowingIds(String followerActorKey) {
+        if (followerActorKey == null || followerActorKey.isBlank()) return Set.of();
+        List<String> ids = jdbc.queryForList(
+                "SELECT creator_id FROM creator_follows WHERE follower_id = ?",
+                String.class, followerActorKey
+        );
+        return new HashSet<>(ids);
+    }
+
+    public Optional<CreatorSummaryRecord> getCreatorSummary(String creatorId) {
+        if (creatorId == null || creatorId.isBlank()) return Optional.empty();
+        Optional<UserProfileRecord> userOpt = getUserProfile(creatorId);
+        List<PublishedReleaseRecord> releases = listReleases("", "", "recent", creatorId, null);
+        if (userOpt.isEmpty() && releases.isEmpty()) {
+            return Optional.empty();
+        }
+        String name = userOpt.map(UserProfileRecord::displayName)
+                .orElseGet(() -> releases.stream().map(PublishedReleaseRecord::artist).filter(a -> a != null && !a.isBlank()).findFirst().orElse("AI Producer"));
+        String bio = userOpt.map(u -> u.bio() != null ? u.bio() : "").orElse("");
+        String role = userOpt.map(UserProfileRecord::role).orElse("creator");
+        int totalPlays = releases.stream().mapToInt(PublishedReleaseRecord::playsCount).sum();
+        int totalLikes = releases.stream().mapToInt(r -> countReleaseLikes(r.shareSlug())).sum();
+        int followers = countFollowers(creatorId);
+        int following = countFollowing("user:" + creatorId);
+        return Optional.of(new CreatorSummaryRecord(
+                creatorId, name, bio, role, followers, following, releases.size(), totalPlays, totalLikes
+        ));
+    }
+
+    public List<CreatorSummaryRecord> listTopCreators(int limit) {
+        List<PublishedReleaseRecord> all = listReleases("", "", "recent", null, null);
+        Map<String, List<PublishedReleaseRecord>> byOwner = new LinkedHashMap<>();
+        for (PublishedReleaseRecord r : all) {
+            String owner = (r.ownerId() != null && !r.ownerId().isBlank()) ? r.ownerId() : "guest";
+            byOwner.computeIfAbsent(owner, k -> new ArrayList<>()).add(r);
+        }
+        List<CreatorSummaryRecord> summaries = new ArrayList<>();
+        for (String ownerId : byOwner.keySet()) {
+            getCreatorSummary(ownerId).ifPresent(summaries::add);
+        }
+        summaries.sort(Comparator.comparingInt((CreatorSummaryRecord c) ->
+                (c.totalLikes() * 3) + c.totalPlays() + (c.followersCount() * 5)
+        ).reversed());
+        if (summaries.size() > limit) {
+            return summaries.subList(0, limit);
+        }
+        return summaries;
     }
 
     private PublishedReleaseRecord mapRelease(java.sql.ResultSet rs) throws java.sql.SQLException {

@@ -12,6 +12,8 @@ import type {
   CoachChatResponse,
   CoachSuggestedAction,
   CollabSessionSummary,
+  CreatorFollowResponse,
+  CreatorProfile,
   DenoiseRequest,
   DenoiseResponse,
   HealthResponse,
@@ -24,6 +26,7 @@ import type {
   LyricsSuggestRequest,
   LyricsSuggestResponse,
   OverdubFitCheckResponse,
+  PaginatedCreatorsResponse,
   PaginatedProjectsResponse,
   PaginatedReleasesResponse,
   ProjectState,
@@ -746,7 +749,7 @@ export async function exportAudio(
   applyMastering = true,
   mode: 'ai_mix' | 'dry_beat' | 'autotune_beat' | 'preserve' | 'enhance' = 'ai_mix',
   bitrate: '192k' | '320k' = '320k',
-  metadata?: { title?: string; artist?: string; album?: string; genre?: string }
+  metadata?: { title?: string; artist?: string; album?: string; genre?: string; target_lufs?: number }
 ): Promise<Blob> {
   return requestBlob(`/api/projects/${encodeURIComponent(projectId)}/export/audio`, {
     method: 'POST',
@@ -853,12 +856,18 @@ export async function listPublicReleases(params: {
   limit?: number;
   search?: string;
   genre?: string;
+  sort?: 'recent' | 'trending' | 'likes' | 'plays';
+  scope?: 'all' | 'following';
+  creator?: string;
 } = {}): Promise<PaginatedReleasesResponse> {
   const query = new URLSearchParams();
   query.set('page', String(params.page ?? 1));
   query.set('limit', String(params.limit ?? 12));
   if (params.search) query.set('search', params.search);
   if (params.genre) query.set('genre', params.genre);
+  if (params.sort) query.set('sort', params.sort);
+  if (params.scope) query.set('scope', params.scope);
+  if (params.creator) query.set('creator', params.creator);
   return requestJson<PaginatedReleasesResponse>(`/api/share?${query.toString()}`, {
     method: 'GET',
   });
@@ -1023,4 +1032,36 @@ export function buildCollabWsUrl(params: {
   const token = getAuthToken();
   if (token) qs.set('token', token);
   return `${wsOrigin.replace(/\/+$/, '')}/ws/collab?${qs.toString()}`;
+}
+
+// ============================================================
+// 3.7 Phase 10B: Producer Profiles & Follow Feed
+// ============================================================
+export async function listCreators(limit = 12): Promise<PaginatedCreatorsResponse> {
+  return requestJson<PaginatedCreatorsResponse>(`/api/creators?limit=${Math.max(1, Math.min(50, limit))}`, {
+    method: 'GET',
+  });
+}
+
+export async function getCreatorProfile(creatorId: string): Promise<CreatorProfile> {
+  return requestJson<CreatorProfile>(`/api/creators/${encodeURIComponent(creatorId)}`, {
+    method: 'GET',
+  });
+}
+
+export async function updateMyCreatorProfile(payload: {
+  display_name?: string;
+  bio?: string;
+}): Promise<CreatorProfile> {
+  return requestJson<CreatorProfile>('/api/creators/me', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function toggleFollowCreator(creatorId: string): Promise<CreatorFollowResponse> {
+  return requestJson<CreatorFollowResponse>(`/api/creators/${encodeURIComponent(creatorId)}/follow`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 }

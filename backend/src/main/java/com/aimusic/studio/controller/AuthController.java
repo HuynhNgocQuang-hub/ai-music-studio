@@ -141,7 +141,20 @@ public class AuthController {
         Map<String, Object> userMap = new LinkedHashMap<>();
         userMap.put("user_id", principal.userId());
         userMap.put("email", principal.email());
-        userMap.put("display_name", principal.displayName());
+        String resolvedName = principal.displayName();
+        if (!principal.isGuest()) {
+            var profOpt = db.getUserProfile(principal.userId());
+            if (profOpt.isPresent()) {
+                var prof = profOpt.get();
+                if (prof.displayName() != null && !prof.displayName().isBlank()) {
+                    resolvedName = prof.displayName();
+                }
+                if (prof.bio() != null && !prof.bio().isBlank()) {
+                    userMap.put("bio", prof.bio());
+                }
+            }
+        }
+        userMap.put("display_name", resolvedName);
         userMap.put("role", principal.role());
         out.put("user", userMap);
         String actorKey = principal.isGuest() ? AuthContextHolder.getActorQuotaKey() : ("user:" + principal.userId());

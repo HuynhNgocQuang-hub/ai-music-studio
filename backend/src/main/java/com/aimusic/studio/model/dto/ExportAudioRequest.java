@@ -28,6 +28,9 @@ public class ExportAudioRequest {
     @JsonProperty("genre")
     private String genre;
 
+    @JsonProperty("target_lufs")
+    private Double targetLufs;
+
     public String getFormat() { return format; }
     public void setFormat(String format) { this.format = format != null ? format : "wav"; }
 
@@ -57,4 +60,7 @@ public class ExportAudioRequest {
 
     public String getGenre() { return genre; }
     public void setGenre(String genre) { this.genre = genre; }
+
+    public Double getTargetLufs() { return targetLufs; }
+    public void setTargetLufs(Double targetLufs) { this.targetLufs = targetLufs; }
 }

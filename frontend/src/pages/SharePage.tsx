@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
+  Check,
   ChevronLeft,
   ChevronRight,
   Clock,
   Disc3,
   Download,
   ExternalLink,
+  Flame,
   Headphones,
   Heart,
   Loader2,
@@ -19,6 +21,8 @@ import {
   Share2,
   Sparkles,
   Trash2,
+  UserPlus,
+  Users,
 } from 'lucide-react';
 import { useAuth } from '@/components/providers/AuthProvider';
 import { TrackArtwork } from '@/components/shared/TrackArtwork';
@@ -29,12 +33,14 @@ import {
   getProject,
   getPublicShare,
   getPublicShareAudioUrl,
+  listCreators,
   listPublicReleases,
   postShareComment,
+  toggleFollowCreator,
   toggleShareLike,
   unpublishProject,
 } from '@/lib/api/client';
-import type { PublishedRelease, ReleaseComment } from '@/types/project';
+import type { CreatorProfile, PublishedRelease, ReleaseComment } from '@/types/project';
 
 const SHARE_GENRES = ['', 'Pop', 'Ballad', 'Lo-fi', 'R&B', 'Hip-hop', 'EDM', 'Acoustic', 'Rock'];
 
@@ -54,8 +60,11 @@ export default function SharePage() {
   const [release, setRelease] = useState<PublishedRelease | null>(null);
   const [comments, setComments] = useState<ReleaseComment[]>([]);
   const [gallery, setGallery] = useState<PublishedRelease[]>([]);
+  const [topCreators, setTopCreators] = useState<CreatorProfile[]>([]);
   const [search, setSearch] = useState('');
   const [genre, setGenre] = useState('');
+  const [sort, setSort] = useState<'recent' | 'trending' | 'likes' | 'plays'>('recent');
+  const [feedScope, setFeedScope] = useState<'all' | 'following'>('all');
   const [page, setPage] = useState(1);
   const [totalReleases, setTotalReleases] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -67,6 +76,7 @@ export default function SharePage() {
   const [commentText, setCommentText] = useState('');
   const [pinnedTimestampSec, setPinnedTimestampSec] = useState<number | null>(null);
   const [likeBusy, setLikeBusy] = useState(false);
+  const [followBusy, setFollowBusy] = useState(false);
   const [commentBusy, setCommentBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [remixing, setRemixing] = useState(false);
@@ -77,16 +87,20 @@ export default function SharePage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await listPublicReleases({ page, limit: 12, search, genre });
+      const [res, creatorsRes] = await Promise.all([
+        listPublicReleases({ page, limit: 12, search, genre, sort, scope: feedScope }),
+        listCreators(8).catch(() => ({ items: [], total: 0 })),
+      ]);
       setGallery(res.items || []);
       setTotalReleases(res.total || 0);
       setTotalPages(Math.max(1, res.total_pages || 1));
+      setTopCreators(creatorsRes.items || []);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : 'Không thể tải danh sách bản phát hành.');
     } finally {
       setLoading(false);
     }
-  }, [page, search, genre]);
+  }, [page, search, genre, sort, feedScope]);
 
   useEffect(() => {
     let active = true;
@@ -157,6 +171,30 @@ export default function SharePage() {
       setError(err instanceof ApiError ? err.detail : 'Không thể cập nhật lượt thích.');
     } finally {
       setLikeBusy(false);
+    }
+  };
+
+  const handleToggleFollowCreator = async (targetCreatorId: string) => {
+    if (!targetCreatorId || followBusy) return;
+    setFollowBusy(true);
+    try {
+      const res = await toggleFollowCreator(targetCreatorId);
+      setRelease((prev) =>
+        prev && prev.owner_id === targetCreatorId
+          ? { ...prev, creator_followed: res.following }
+          : prev
+      );
+      setTopCreators((prev) =>
+        prev.map((c) =>
+          c.user_id === targetCreatorId
+            ? { ...c, followed_by_me: res.following, followers_count: res.followers_count }
+            : c
+        )
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.detail : 'Không thể cập nhật trạng thái theo dõi.');
+    } finally {
+      setFollowBusy(false);
     }
   };
 
@@ -257,7 +295,7 @@ export default function SharePage() {
     }
   };
 
-  if (loading && !slug && gallery.length === 0 && !search && !genre) {
+  if (loading && !slug && gallery.length === 0 && !search && !genre && feedScope === 'all' && sort === 'recent') {
     return (
       <div className="flex min-h-[300px] items-center justify-center gap-2 text-sm text-slate-300">
         <Loader2 className="h-5 w-5 animate-spin text-amber-400" />
@@ -282,57 +320,145 @@ export default function SharePage() {
           <div>
             <h1 className="font-display text-2xl font-bold text-white">Cộng đồng Demo &amp; Xuất bản</h1>
             <p className="text-xs text-slate-400">
-              {totalReleases} bản phối Master (<code>-14 LUFS</code>, MP3 / FLAC / WAV) được chia sẻ công khai.
+              {totalReleases} bản phối Master (MP3 / FLAC / WAV) được chia sẻ công khai.
             </p>
           </div>
-          <Link
-            to="/studio"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400"
-          >
-            <Sparkles className="h-3.5 w-3.5" /> Mở Studio xuất bản bài
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to="/creators"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#1b1f27] px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10"
+            >
+              <Users className="h-3.5 w-3.5 text-amber-400" /> Bảng Producer
+            </Link>
+            <Link
+              to="/studio"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400"
+            >
+              <Sparkles className="h-3.5 w-3.5" /> Mở Studio xuất bản bài
+            </Link>
+          </div>
         </div>
 
-        {/* Search & Genre Filter Bar */}
-        <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-white/10 bg-[#16191f] p-3">
-          <div className="relative min-w-[200px] flex-1">
-            <label htmlFor="share-search-input" className="sr-only">
-              Tìm demo công khai
+        {/* Feed Scope, Search, Genre & Sort Bar */}
+        <div className="space-y-2.5 rounded-xl border border-white/10 bg-[#16191f] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-2.5">
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedScope('all');
+                  setPage(1);
+                }}
+                data-testid="share-scope-all"
+                className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${
+                  feedScope === 'all'
+                    ? 'bg-amber-500 text-slate-950'
+                    : 'bg-[#0d1015] text-slate-300 hover:bg-white/10'
+                }`}
+              >
+                Khám phá tất cả
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedScope('following');
+                  setPage(1);
+                }}
+                data-testid="share-scope-following"
+                className={`inline-flex items-center gap-1 rounded-lg px-3 py-1 text-xs font-semibold transition ${
+                  feedScope === 'following'
+                    ? 'bg-emerald-500 text-slate-950'
+                    : 'bg-[#0d1015] text-slate-300 hover:bg-white/10'
+                }`}
+              >
+                <Users className="h-3.5 w-3.5" /> Đang theo dõi
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <label htmlFor="share-sort-filter" className="text-[11px] font-medium text-slate-300">
+                <span className="inline-flex items-center gap-1">
+                  <Flame className="h-3.5 w-3.5 text-amber-400" /> Sắp xếp:
+                </span>
+              </label>
+              <select
+                id="share-sort-filter"
+                name="shareSort"
+                value={sort}
+                onChange={(e) => {
+                  setSort(e.target.value as 'recent' | 'trending' | 'likes' | 'plays');
+                  setPage(1);
+                }}
+                className="rounded-lg border border-white/10 bg-[#0d1015] px-2.5 py-1 text-xs text-white"
+              >
+                <option value="recent">Mới nhất</option>
+                <option value="trending">Xu hướng (Trending)</option>
+                <option value="likes">Nhiều Thích nhất</option>
+                <option value="plays">Nghe nhiều nhất</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="relative min-w-[200px] flex-1">
+              <label htmlFor="share-search-input" className="sr-only">
+                Tìm demo công khai
+              </label>
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+              <input
+                id="share-search-input"
+                name="shareSearch"
+                type="search"
+                value={search}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setPage(1);
+                }}
+                placeholder="Tìm theo tên bài hát hoặc nghệ sĩ..."
+                className="w-full rounded-lg border border-white/10 bg-[#0d1015] py-1.5 pl-9 pr-3 text-xs text-white placeholder-slate-400 focus:border-amber-400 focus:outline-none"
+              />
+            </div>
+            <label htmlFor="share-genre-filter" className="sr-only">
+              Lọc thể loại
             </label>
-            <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
-            <input
-              id="share-search-input"
-              name="shareSearch"
-              type="search"
-              value={search}
+            <select
+              id="share-genre-filter"
+              name="shareGenre"
+              value={genre}
               onChange={(e) => {
-                setSearch(e.target.value);
+                setGenre(e.target.value);
                 setPage(1);
               }}
-              placeholder="Tìm theo tên bài hát hoặc nghệ sĩ..."
-              className="w-full rounded-lg border border-white/10 bg-[#0d1015] py-1.5 pl-9 pr-3 text-xs text-white placeholder-slate-500 focus:border-amber-400 focus:outline-none"
-            />
+              className="rounded-lg border border-white/10 bg-[#0d1015] px-3 py-1.5 text-xs text-white"
+            >
+              {SHARE_GENRES.map((g) => (
+                <option key={g || 'all'} value={g}>
+                  {g ? `Genre: ${g}` : 'Tất cả thể loại'}
+                </option>
+              ))}
+            </select>
           </div>
-          <label htmlFor="share-genre-filter" className="sr-only">
-            Lọc thể loại
-          </label>
-          <select
-            id="share-genre-filter"
-            name="shareGenre"
-            value={genre}
-            onChange={(e) => {
-              setGenre(e.target.value);
-              setPage(1);
-            }}
-            className="rounded-lg border border-white/10 bg-[#0d1015] px-3 py-1.5 text-xs text-white"
-          >
-            {SHARE_GENRES.map((g) => (
-              <option key={g || 'all'} value={g}>
-                {g ? `Genre: ${g}` : 'Tất cả thể loại'}
-              </option>
-            ))}
-          </select>
         </div>
+
+        {/* Top Producers Spotlight Strip */}
+        {topCreators.length > 0 && feedScope === 'all' && (
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            <span className="shrink-0 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              Producer nổi bật:
+            </span>
+            {topCreators.map((c) => (
+              <Link
+                key={c.user_id}
+                to={`/creators/${encodeURIComponent(c.user_id)}`}
+                className="inline-flex shrink-0 items-center gap-2 rounded-full border border-white/10 bg-[#16191f] px-3 py-1 text-xs text-slate-200 transition hover:border-amber-400/50 hover:text-amber-300"
+              >
+                <span className="font-semibold">{c.display_name}</span>
+                <span className="font-mono text-[10px] text-slate-400">
+                  {c.followers_count} follow · {c.total_likes} thích
+                </span>
+              </Link>
+            ))}
+          </div>
+        )}
 
         {error && (
           <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 px-4 py-3 text-xs text-rose-200">
@@ -342,12 +468,18 @@ export default function SharePage() {
 
         {gallery.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-[#16191f] py-16 text-center">
-            <Disc3 className="h-10 w-10 text-slate-600" />
+            <Disc3 className="h-10 w-10 text-slate-500" />
             <p className="mt-3 text-sm font-semibold text-white">
-              {search || genre ? 'Không có bản demo phù hợp bộ lọc' : 'Chưa có bản demo công khai nào'}
+              {feedScope === 'following'
+                ? 'Chưa có bài mới từ Producer bạn theo dõi'
+                : search || genre
+                ? 'Không có bản demo phù hợp bộ lọc'
+                : 'Chưa có bản demo công khai nào'}
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              {search || genre
+              {feedScope === 'following'
+                ? 'Hãy bấm Theo dõi một Producer trên Showcase hoặc Bảng Producer để xem Feed tại đây.'
+                : search || genre
                 ? 'Hãy thử từ khóa khác hoặc đặt lại bộ lọc.'
                 : 'Mở Studio và bấm nút Publish để tạo link chia sẻ đầu tiên!'}
             </p>
@@ -356,18 +488,23 @@ export default function SharePage() {
           <>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {gallery.map((item) => (
-                <Link
+                <article
                   key={item.share_slug}
-                  to={`/share/${encodeURIComponent(item.share_slug)}`}
                   className="group flex flex-col justify-between rounded-2xl border border-white/10 bg-[#16191f] p-4 transition hover:border-amber-400/50"
                 >
                   <div className="flex items-start gap-3">
-                    <TrackArtwork title={item.title} genre={item.genre} seed={item.share_slug} size="md" />
+                    <Link
+                      to={`/share/${encodeURIComponent(item.share_slug)}`}
+                      aria-label={`Nghe ${item.title}`}
+                      className="shrink-0"
+                    >
+                      <TrackArtwork title={item.title} genre={item.genre} seed={item.share_slug} size="md" />
+                    </Link>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1">
                           <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-300">
-                            {item.master_format}
+                            {item.master_format} • {item.lufs_target} LUFS
                           </span>
                           {authenticated && item.owner_id === user.user_id && (
                             <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
@@ -377,10 +514,26 @@ export default function SharePage() {
                         </div>
                         <span className="text-[11px] text-slate-400">{item.plays_count} lượt nghe</span>
                       </div>
-                      <h2 className="mt-1 truncate text-sm font-bold text-white group-hover:text-amber-300">
-                        {item.title}
+                      <h2 className="mt-0.5 text-sm font-bold text-white">
+                        <Link
+                          to={`/share/${encodeURIComponent(item.share_slug)}`}
+                          className="inline-flex min-h-[24px] max-w-full items-center truncate hover:text-amber-300"
+                        >
+                          {item.title}
+                        </Link>
                       </h2>
-                      <p className="truncate text-xs text-slate-400">{item.artist}</p>
+                      <div className="text-xs">
+                        {item.owner_id ? (
+                          <Link
+                            to={`/creators/${encodeURIComponent(item.owner_id)}`}
+                            className="inline-flex min-h-[24px] max-w-full items-center truncate text-slate-300 hover:text-amber-300 hover:underline"
+                          >
+                            {item.artist}
+                          </Link>
+                        ) : (
+                          <span className="inline-flex min-h-[24px] items-center text-slate-400">{item.artist}</span>
+                        )}
+                      </div>
                       <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-400 tabular-nums">
                         <span className="truncate">
                           {item.genre} • {Math.round(item.bpm)} BPM • {item.key} {item.scale}
@@ -396,11 +549,14 @@ export default function SharePage() {
                       </div>
                     </div>
                   </div>
-                  <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-xs text-sky-300">
+                  <Link
+                    to={`/share/${encodeURIComponent(item.share_slug)}`}
+                    className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5 text-xs text-sky-300 hover:text-sky-200"
+                  >
                     <span>Nghe Master Demo</span>
                     <ExternalLink className="h-3.5 w-3.5" />
-                  </div>
-                </Link>
+                  </Link>
+                </article>
               ))}
             </div>
 
@@ -453,6 +609,7 @@ export default function SharePage() {
 
   const audioUrl = getPublicShareAudioUrl(release.share_slug);
   const isOwner = authenticated && release.owner_id === user.user_id;
+  const canFollowOwner = Boolean(release.owner_id) && !(authenticated && release.owner_id === user.user_id) && !( !authenticated && release.owner_id === 'guest' );
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -480,7 +637,35 @@ export default function SharePage() {
               </span>
             </div>
             <h1 className="font-display text-2xl font-extrabold text-white">{release.title}</h1>
-            <p className="text-sm font-medium text-amber-300">{release.artist}</p>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {release.owner_id ? (
+                <Link
+                  to={`/creators/${encodeURIComponent(release.owner_id)}`}
+                  data-testid="share-creator-link"
+                  className="text-sm font-semibold text-amber-300 hover:text-amber-200 hover:underline"
+                >
+                  {release.artist}
+                </Link>
+              ) : (
+                <p className="text-sm font-medium text-amber-300">{release.artist}</p>
+              )}
+              {canFollowOwner && release.owner_id && (
+                <button
+                  type="button"
+                  disabled={followBusy}
+                  onClick={() => void handleToggleFollowCreator(release.owner_id!)}
+                  data-testid="share-follow-btn"
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                    release.creator_followed
+                      ? 'border-emerald-400/50 bg-emerald-500/20 text-emerald-200'
+                      : 'border-amber-400/50 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25'
+                  }`}
+                >
+                  {release.creator_followed ? <Check className="h-3 w-3" /> : <UserPlus className="h-3 w-3" />}
+                  <span>{release.creator_followed ? 'Đang theo dõi' : 'Theo dõi'}</span>
+                </button>
+              )}
+            </div>
             <p className="text-xs text-slate-400 tabular-nums">
               {release.genre} • {Math.round(release.bpm)} BPM • {release.key} {release.scale} • {release.total_bars} bars
             </p>

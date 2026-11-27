@@ -1,7 +1,7 @@
-# Tổng quan Toàn bộ Các Phase Phát triển (Phase 1 – Phase 9)
+# Tổng quan Toàn bộ Các Phase Phát triển (Phase 1 – Phase 10B)
 ## Dự án: AI Music Studio (Hybrid Multi-Agent DAW)
 
-- **Phiên bản tài liệu:** 1.2 (Phase 1–9 Complete: Hybrid Multi-User Cloud Pro DAW, Publishing & Realtime WebSocket Collab Showcase)
+- **Phiên bản tài liệu:** 1.3 (Phase 1–10B Complete: Hybrid Cloud Pro DAW, WebSocket Collab, Creator Profiles, Follow Feed & Mastering LUFS)
 - **Cập nhật lần cuối:** 2026-11-27
 - **Liên kết liên quan:** [README.md](../README.md) | [REQUIREMENTS.md](./REQUIREMENTS.md) | [DESIGN_SPEC.md](./DESIGN_SPEC.md) | [SRS.md](./SRS.md) | [API_AND_UI_SPEC.md](./API_AND_UI_SPEC.md) | [MULTI_AGENT_ARCHITECTURE.md](./MULTI_AGENT_ARCHITECTURE.md) | [TASK_BOARD.md](./TASK_BOARD.md)
 
@@ -21,6 +21,7 @@
 | **Phase 7** | **Visual Pitch Curve, WebMIDI, Custom `.sf2` & Undo 50** | `DONE` | **Visual Pitch Curve Editor** (semitone nudge/scale snap), **Hardware WebMIDI** keyboard, nạp **Custom `.sf2` SoundFont** (`<= 50 MB`), mở rộng **Undo 50 bước** | Verified chung đợt Phase 6B + Phase 7 (`38/38` BE, `17/17` worker, `21/21` E2E, `recording_12.mp4`) |
 | **Phase 8** | **Multi-User Cloud Workspace & Publishing (Hybrid SaaS)** | `DONE` | **Hybrid Guest + JWT Auth & Logout JTI Revocation**, **S3 Audio Auto-Rehydration & Full Controller `403` Ownership**, **Workspace Scope (`all\|mine\|public`)**, **PostgreSQL + H2 Fallback**, **MinIO S3 + Local Fallback**, **Daily Quota Progress & Rate-Limit (`429`)**, **Caddy HTTPS**, **Master FLAC/ID3**, **Public Showcase Filters `/share/:slug`** & **Multi-User Remix** | `mvn -B package` **`41/41`**, `vite build` **`2171` modules**, `docker compose config -q` `0`, Live HTTP Proxy **16/16 PASS** (`10` auth + `6` Phase 8), Chrome Live E2E (`100/100` Accessibility trên `/login`, `/library`, `/share`, `/settings`, `0` console/HTTP errors) |
 | **Phase 9** | **Realtime Studio Collaboration & Community Showcase** | `DONE` | **WebSocket `/ws/collab`** (`2 MB` buffer, Vite `/ws`, Caddy `/ws/*`) với JWT + invite `room_code`, live presence/cursor, anti-echo `state_sync` & `transport_cue`; **Studio Pinned Bar Notes** (`studio_bar_comments`); **Showcase `/share/:slug` Likes (`release_likes`) & Timestamp Comments (`release_comments`)** kèm timeline markers tương tác | `mvn -B package` **`43/43`** (`CollabPhase9Tests` >16KB WS test PASS), `vite build` **`2173` modules**, Live WS+HTTP Proxy `live_phase9_test.mjs` **8/8 PASS**, Chrome Live E2E (`4d7a9921`): 2-tab `LIVE` sync + Showcase Likes/Comments **PASS**, Lighthouse Accessibility **100/100** (`/studio` & `/share/:slug`), `0` errors/warnings |
+| **Phase 10B** | **Creator Profiles, Follow Feed, Trending Showcase & Mastering LUFS** | `DONE` | **Producer Profiles `/creators/:id`** & Directory `/creators` (`users.bio`, `PATCH /api/creators/me`); **Follow Graph** (`creator_follows`, Feed `Đang theo dõi`, nút `Theo dõi`); **Trending Showcase Sort** (`recent \| trending \| likes \| plays`); **Mastering LUFS Targets** (`-9 Club \| -14 Streaming \| -16 Apple`) trên Console Mixer, Publish & Export | `mvn -B package` **`44/44`** (`CreatorFollowAndLufsTests` PASS), `vite build` **`2174` modules**, Live HTTP Proxy `live_phase10b_test.mjs` **7/7 PASS**, Chrome E2E (`3fcb5d96` + `f77a4067`): **ALL PASS**, `/creators/:id` & `/share` Lighthouse Accessibility **`100/100`**, **`0` errors/warnings, `0` HTTP `>= 400`** |
 
 ---
 
@@ -37,6 +38,7 @@ flowchart LR
     P6B --> P7["Phase 7: Pro DSP & Hardware<br/>Pitch Curve + WebMIDI + Custom .sf2 + Undo x50"]
     P7 --> P8["Phase 8: Hybrid Cloud SaaS<br/>JWT Auth + Postgres/H2 + MinIO S3 + Quota + Demo Share"]
     P8 --> P9["Phase 9: Realtime Collab & Showcase<br/>WS /ws/collab + Bar Notes + Likes & Timestamp Comments"]
+    P9 --> P10B["Phase 10B: Creators, Follow Feed & LUFS<br/>/creators/:id + Trending + Following Feed + -9/-14/-16 LUFS"]
 ```
 
 ---
@@ -142,3 +144,12 @@ flowchart LR
   - **Spring WebSocket `/ws/collab` (`WebSocketConfig.java`, `CollabRoomService.java`, `CollabWebSocketHandler.java`, Vite `/ws`, Caddy `/ws/*`):** Cấu hình frame buffer **`2 MB`**, xác thực JWT + invite `room_code`, đồng bộ danh sách peer + cursor (`bar`, `track_id`, màu peer), phát **`state_sync`** chống echo (`skipNextCollabBroadcastRef`), **`transport_cue`**, và hỗ trợ `GET/POST/DELETE /api/studio/{id}/collab/session`.
   - **Studio Collab Drawer & Pinned Bar Notes (`CollabController.java`, `useStudioCollab.ts`, `StudioCollabPanel.tsx`):** Ngăn kéo `Collab` trên Top Transport để tạo/copy/thu hồi link `?collab=col_...`, gửi `Cue Bar X`, ghim/lọc/đánh dấu xong/xóa **Ghi chú theo Ô nhịp** (`studio_bar_comments` via REST + WS `bar_comment_event`), và chuẩn hóa Lighthouse Accessibility `/studio` lên **`100/100`**.
   - **Showcase Likes & Timestamp Comments (`CloudDatabaseService.java`, `PublishShareController.java`, `SharePage.tsx`):** Thêm bảng **`release_likes`** & **`release_comments`**, nút **Thích** (`POST /api/share/{slug}/like`), form bình luận gắn mốc giây & ô nhịp (`mm:ss` / `Bar`), vạch đánh dấu tương tác ngay trên thanh tiến độ `<audio>`, click nhảy tới đúng giây đó, bảo vệ `403` khi xóa & dọn cascade khi xóa project.
+
+---
+
+### Phase 10B — Creator Profiles, Follow Feed, Trending Showcase & Mastering LUFS Targets (`DONE`)
+- **Mục tiêu:** Biến Showcase công khai thành mạng cộng đồng Producer hoàn chỉnh (hồ sơ cá nhân, theo dõi lẫn nhau, Feed riêng & bảng Trending) và trao quyền chọn mục tiêu âm lượng Mastering chuẩn công nghiệp ngay trên Studio.
+- **Chức năng chính:**
+  - **Creator Profiles & Directory ([CreatorController.java](file:///d:/Music/backend/src/main/java/com/aimusic/studio/controller/CreatorController.java), [CreatorProfilePage.tsx](file:///d:/Music/frontend/src/pages/CreatorProfilePage.tsx)):** Trang bảng xếp hạng `/creators` & hồ sơ `/creators/:creatorId` (thống kê Followers, Following, Bản phát hành, Tổng lượt phát, Tổng lượt thích), tùy biến tên & Bio (`PATCH /api/creators/me`, chặn Guest `401`), liên kết nhanh `Hồ sơ` từ Top Bar ([AppShell.tsx](file:///d:/Music/frontend/src/components/layout/AppShell.tsx)).
+  - **Follow Graph & Feed Đang theo dõi ([CloudDatabaseService.java](file:///d:/Music/backend/src/main/java/com/aimusic/studio/cloud/CloudDatabaseService.java), [SharePage.tsx](file:///d:/Music/frontend/src/pages/SharePage.tsx)):** Bảng `creator_follows`, nút **Theo dõi / Đang theo dõi** trên `/creators/:id` & `/share/:slug` (chặn tự follow `400`), chuyển Feed **`Khám phá tất cả | Đang theo dõi`** (`scope=following`), thanh Top Producers spotlight, và sửa lỗi `TrackArtwork.tsx` (`>>>` unsigned shift).
+  - **Trending Sort & Mastering LUFS Targets ([PublishShareController.java](file:///d:/Music/backend/src/main/java/com/aimusic/studio/controller/PublishShareController.java), [ExportAudioRequest.java](file:///d:/Music/backend/src/main/java/com/aimusic/studio/model/dto/ExportAudioRequest.java), [ConsoleMixerPanel.tsx](file:///d:/Music/frontend/src/components/studio/ConsoleMixerPanel.tsx), [StudioPage.tsx](file:///d:/Music/frontend/src/pages/StudioPage.tsx)):** Hỗ trợ `sort=recent|trending|likes|plays` (Trending weighted `likes * 3 + plays`) và tùy chọn **`-9.0 LUFS` (Club/EDM) | `-14.0 LUFS` (Streaming) | `-16.0 LUFS` (Apple)** trực tiếp trên Console Mixer, Publish modal và Export.

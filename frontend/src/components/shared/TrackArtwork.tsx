@@ -182,7 +182,7 @@ export function TrackArtwork({
         {variant === 5 && (
           <>
             {Array.from({ length: 7 }, (_, i) => {
-              const barH = 26 + ((h >> (i * 3)) % 56);
+              const barH = 26 + ((h >>> (i * 3)) % 56);
               return (
                 <rect
                   key={i}

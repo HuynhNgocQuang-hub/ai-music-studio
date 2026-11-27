@@ -446,6 +446,7 @@ export interface AuthUser {
   email: string;
   display_name: string;
   role: string;
+  bio?: string;
 }
 
 export interface AuthQuota {
@@ -478,6 +479,7 @@ export interface PublishReleaseRequest {
   artist?: string;
   genre?: string;
   apply_mastering?: boolean;
+  target_lufs?: number;
 }
 
 export interface PublishReleaseResponse {
@@ -558,6 +560,7 @@ export interface PublishedRelease {
   likes_count?: number;
   liked_by_me?: boolean;
   comments_count?: number;
+  creator_followed?: boolean;
   created_at: string;
   share_url: string;
   stream_url: string;
@@ -574,6 +577,31 @@ export interface PaginatedReleasesResponse {
   page: number;
   limit: number;
   total_pages: number;
+}
+
+export interface CreatorProfile {
+  user_id: string;
+  display_name: string;
+  bio: string;
+  role: string;
+  followers_count: number;
+  following_count: number;
+  releases_count: number;
+  total_plays: number;
+  total_likes: number;
+  followed_by_me: boolean;
+  releases?: PublishedRelease[];
+}
+
+export interface PaginatedCreatorsResponse {
+  items: CreatorProfile[];
+  total: number;
+}
+
+export interface CreatorFollowResponse {
+  creator_id: string;
+  following: boolean;
+  followers_count: number;
 }
 
 export interface LlmTestResponse {

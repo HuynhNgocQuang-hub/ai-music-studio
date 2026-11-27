@@ -15,6 +15,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   UserCheck,
+  Users,
   X,
 } from 'lucide-react';
 import AuthModal from '@/components/auth/AuthModal';
@@ -69,6 +70,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       href: '/share',
       active: pathname.startsWith('/share'),
       icon: Radio,
+    },
+    {
+      label: 'Bảng Producer & Theo dõi',
+      href: '/creators',
+      active: pathname.startsWith('/creators'),
+      icon: Users,
     },
     {
       label: 'Audio Engine & API',
@@ -222,6 +229,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   ? 'Session Vault'
                   : pathname.startsWith('/share')
                   ? 'Demo Showcase & Master Releases'
+                  : pathname.startsWith('/creators')
+                  ? 'Producer Profiles & Following'
                   : pathname.startsWith('/login') || pathname.startsWith('/register')
                   ? 'Cloud Account & Session'
                   : 'Audio Engine & API Settings'}
@@ -229,6 +238,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
 
             <div className="flex items-center gap-2">
+              {authenticated && (
+                <Link
+                  to={`/creators/${encodeURIComponent(user.user_id)}`}
+                  data-testid="topbar-creator-profile-link"
+                  className="hidden items-center gap-1 rounded border border-white/15 bg-[#232730] px-2.5 py-1 text-xs font-semibold text-amber-200 transition hover:border-amber-400/50 hover:text-amber-100 md:inline-flex"
+                >
+                  <Users className="h-3.5 w-3.5" />
+                  <span>Hồ sơ</span>
+                </Link>
+              )}
               <button
                 type="button"
                 onClick={() => setAuthModalOpen(true)}

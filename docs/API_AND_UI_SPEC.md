@@ -141,8 +141,11 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 | `PUT /api/projects/{id}/sync` | Đồng bộ `ProjectState` (`owner_id`, `automation`, EQ, FX) lên Redis + CloudDB (`403` nếu không sở hữu) | Body: `ProjectState JSON` |
 | `POST /api/projects/{id}/undo` | Khôi phục snapshot trước đó từ Undo stack (**50 bước**) | `ProjectState JSON` |
 | `DELETE /api/projects/{id}` | Xóa Project khỏi Redis, CloudDB & Object Storage (`403` nếu không phải chủ sở hữu) | `{ status: "deleted", project_id }` |
-| `POST/DELETE /api/projects/{id}/publish` | Xuất bản Master (`-14 LUFS`, `mp3`/`flac`/`wav` kèm ID3 tags) lên S3/MinIO + tạo/thu hồi link `/share/{slug}` | `{ share_slug, share_url, stream_url, format, lufs_target, object_storage_backend }` |
-| `GET /api/share` / `/{slug}` / `/{slug}/audio` | Liệt kê Showcase cộng đồng (kèm `likes_count`, `liked_by_me`, `comments_count`), đọc metadata + `comments[]` tăng `plays_count` & stream Master audio | JSON / Binary audio stream (`audio/mpeg`, `audio/flac`, `audio/wav`) |
+| `POST/DELETE /api/projects/{id}/publish` | Xuất bản Master (`mp3`/`flac`/`wav` kèm ID3 tags, hỗ trợ `target_lufs` `-20..-8`) lên S3/MinIO + tạo/thu hồi link `/share/{slug}` | `{ share_slug, share_url, stream_url, format, lufs_target, object_storage_backend }` |
+| `GET /api/share` / `/{slug}` / `/{slug}/audio` | Liệt kê Showcase cộng đồng (hỗ trợ `?sort=recent\|trending\|likes\|plays&scope=all\|following&creator=&search=&genre=`), đọc metadata + `comments[]` tăng `plays_count` & stream Master audio | JSON / Binary audio stream (`audio/mpeg`, `audio/flac`, `audio/wav`) |
+| `GET /api/creators` / `/{id}` | Bảng xếp hạng Producer nổi bật & trang hồ sơ cá nhân (`/creators/:id`) gồm bio, tổng likes/plays, followers & danh sách bản phát hành | `{ items: CreatorProfile[] }` / `CreatorProfile` |
+| `PATCH /api/creators/me` | Cập nhật nghệ danh (`display_name`) & tiểu sử (`bio`) của tài khoản Cloud đang đăng nhập (`401` nếu Guest) | `CreatorProfile` |
+| `POST /api/creators/{id}/follow` | Bật/tắt theo dõi Producer (`creator_follows`, chặn tự follow `400`), dùng cho Feed `scope=following` | `{ creator_id, following, followers_count }` |
 | `POST /api/share/{slug}/like` | Bật/tắt lượt thích (`release_likes`) trên trang Showcase công khai `/share/:slug` | `{ likes_count, liked_by_me }` |
 | `GET / POST / DELETE /api/share/{slug}/comments` | Đọc, đăng bình luận gắn mốc thời gian (`timestamp_sec`, `bar_number`, sắp theo giây) & xóa bình luận (chủ comment hoặc chủ release, guard `403`) | `{ items: ReleaseComment[], comments_count }` |
 | `GET / POST / DELETE /api/studio/{id}/collab/session` | Kiểm tra phòng cộng tác, tạo mã mời `?collab=col_...` (`POST`) hoặc thu hồi link & đóng phòng WS (`DELETE`) | `{ active, room_code, members[] }` |
@@ -150,7 +153,7 @@ Bố cục **4 vùng chuẩn DAW** được code-split qua `React.lazy` + `Suspe
 | `WS /ws/collab` | WebSocket cộng tác Studio realtime (`?projectId=&room=&token=&clientId=`, buffer `2 MB`): `room_snapshot`, `presence` (`bar`, `track_id`, `active_tab`, `color`), `state_sync`, `transport_cue`, `bar_comment_event`, `ping`/`pong` | Frame JSON realtime hai chiều giữa các peer cùng phòng |
 | `POST /api/projects/{id}/export/aimusic` | Đóng gói dự án thành file nhẹ `.aimusic` | Trả về binary stream `.aimusic` |
 | `POST /api/projects/import` | Nạp file `.aimusic` vào Redis, CloudDB & Studio (mặc định UI `overwrite=false`, kiểm tra Zip Bomb & path traversal) | Form-data `.aimusic` + `overwrite` $\rightarrow$ `ProjectState` |
-| `POST /api/projects/{id}/export/audio` | Render & Auto-Master (tiêu thụ daily Quota `429`; chặn `total_bars > 256` -> `400`) xuất `wav` / `mp3` (`192k` \| `320k` + ID3) / `flac` / `stems` (`.zip`) | `{ format: "wav" \| "mp3" \| "flac" \| "stems", bitrate, title?, artist?, genre?, apply_mastering, mode }` |
+| `POST /api/projects/{id}/export/audio` | Render & Auto-Master (hỗ trợ `target_lufs` `-20..-8`, tiêu thụ daily Quota `429`; chặn `total_bars > 256` -> `400`) xuất `wav` / `mp3` (`192k` \| `320k` + ID3) / `flac` / `stems` (`.zip`) | `{ format: "wav" \| "mp3" \| "flac" \| "stems", bitrate, target_lufs?, title?, artist?, genre?, apply_mastering, mode }` |
 | `POST /api/projects/{id}/export/midi` | Xuất file `.mid` đa track kèm Meta Events | Trả về binary `.mid` |
 
 ### 3.5. Hợp đồng Nội bộ Spring Boot $\leftrightarrow$ `audio-worker` (Cổng `8001`)
