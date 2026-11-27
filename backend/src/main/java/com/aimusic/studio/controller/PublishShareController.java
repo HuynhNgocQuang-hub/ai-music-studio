@@ -1,14 +1,14 @@
 package com.aimusic.studio.controller;
 
-import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
+import com.aimusic.studio.audio.MasterAudioExportService;
 import com.aimusic.studio.cloud.AuthContextHolder;
 import com.aimusic.studio.cloud.CloudDatabaseService;
 import com.aimusic.studio.cloud.CloudProjectAccessService;
 import com.aimusic.studio.cloud.ObjectStorageService;
 import com.aimusic.studio.cloud.QuotaRateLimitService;
+import com.aimusic.studio.cloud.ReleaseDtoMapper;
 import com.aimusic.studio.cloud.UserPrincipal;
-import com.aimusic.studio.config.AppProperties;
 import com.aimusic.studio.model.LyricLine;
 import com.aimusic.studio.model.ProjectState;
 import com.aimusic.studio.model.TrackState;
@@ -32,38 +32,39 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @RestController
 public class PublishShareController {
 
     private final ProjectStateStore store;
-    private final AudioWorkerClient audioWorkerClient;
     private final JavaAudioFallbackService audioFallback;
-    private final AppProperties properties;
+    private final MasterAudioExportService masterAudioExportService;
     private final CloudDatabaseService cloudDb;
     private final ObjectStorageService objectStorage;
     private final QuotaRateLimitService quotaService;
     private final CloudProjectAccessService projectAccess;
+    private final ReleaseDtoMapper releaseDtoMapper;
 
     public PublishShareController(
             ProjectStateStore store,
-            AudioWorkerClient audioWorkerClient,
             JavaAudioFallbackService audioFallback,
-            AppProperties properties,
+            MasterAudioExportService masterAudioExportService,
             CloudDatabaseService cloudDb,
             ObjectStorageService objectStorage,
             QuotaRateLimitService quotaService,
-            CloudProjectAccessService projectAccess
+            CloudProjectAccessService projectAccess,
+            ReleaseDtoMapper releaseDtoMapper
     ) {
         this.store = store;
-        this.audioWorkerClient = audioWorkerClient;
         this.audioFallback = audioFallback;
-        this.properties = properties;
+        this.masterAudioExportService = masterAudioExportService;
         this.cloudDb = cloudDb;
         this.objectStorage = objectStorage;
         this.quotaService = quotaService;
         this.projectAccess = projectAccess;
+        this.releaseDtoMapper = releaseDtoMapper;
     }
 
     @PostMapping("/api/projects/{projectId}/publish")
@@ -118,39 +119,15 @@ public class PublishShareController {
             project.getMastering().setTargetLufs(clampedLufs);
         }
 
-        int sr = properties.getSampleRate();
-        Map<String, byte[]> audioAssets = store.collectAudioAssets(project);
-        byte[] masterBytes;
-        String resolvedFormat = format;
-
-        Optional<byte[]> workerAudio = audioWorkerClient.exportAudio(
-                project, audioAssets, format, "ai_mix", applyMastering, sr, bitrate,
-                title, artist, "AI Music Studio", genre
+        MasterAudioExportService.ExportResult exported = masterAudioExportService.renderMasterAudio(
+                project,
+                new MasterAudioExportService.ExportRequestParams(
+                        format, "ai_mix", applyMastering, bitrate,
+                        title, artist, "AI Music Studio", genre, true
+                )
         );
-        if (workerAudio.isPresent()) {
-            masterBytes = workerAudio.get();
-        } else {
-            JavaAudioFallbackService.RenderedMix rendered = audioFallback.renderProjectMix(
-                    project, store, "ai_mix", applyMastering, sr);
-            if ("mp3".equals(format)) {
-                try {
-                    masterBytes = audioFallback.exportMp3ViaFfmpeg(rendered.stereo(), rendered.sampleRate(), bitrate, title, artist, genre);
-                } catch (Exception ex) {
-                    masterBytes = audioFallback.encodeWavStereo(rendered.stereo(), rendered.sampleRate());
-                    resolvedFormat = "wav";
-                }
-            } else if ("flac".equals(format)) {
-                try {
-                    masterBytes = audioFallback.exportFlacViaFfmpeg(rendered.stereo(), rendered.sampleRate(), title, artist, genre);
-                } catch (Exception ex) {
-                    masterBytes = audioFallback.encodeWavStereo(rendered.stereo(), rendered.sampleRate());
-                    resolvedFormat = "wav";
-                }
-            } else {
-                masterBytes = audioFallback.encodeWavStereo(rendered.stereo(), rendered.sampleRate());
-                resolvedFormat = "wav";
-            }
-        }
+        byte[] masterBytes = exported.audioBytes();
+        String resolvedFormat = exported.resolvedFormat();
 
         byte[] aimusicBytes = audioFallback.exportAimusicBundle(project, store);
         quotaService.consumeExportQuota(principal, AuthContextHolder.getActorQuotaKey(), masterBytes.length + aimusicBytes.length);
@@ -246,7 +223,7 @@ public class PublishShareController {
             @RequestParam(value = "creator", defaultValue = "") String creator
     ) {
         String actorKey = AuthContextHolder.getActorQuotaKey();
-        java.util.Set<String> followingIds = "following".equalsIgnoreCase(scope)
+        Set<String> followingIds = "following".equalsIgnoreCase(scope)
                 ? cloudDb.listFollowingIds(actorKey)
                 : null;
         List<CloudDatabaseService.PublishedReleaseRecord> all = cloudDb.listReleases(search, genre, sort, creator, followingIds);
@@ -258,7 +235,7 @@ public class PublishShareController {
         int end = Math.min(total, start + safeLimit);
         List<Map<String, Object>> items = new ArrayList<>();
         for (int i = start; i < end; i++) {
-            items.add(toReleaseMap(all.get(i), null));
+            items.add(releaseDtoMapper.toShareReleaseMap(all.get(i), null, actorKey));
         }
         return Map.of(
                 "items", items,
@@ -277,7 +254,7 @@ public class PublishShareController {
         cloudDb.incrementReleasePlays(slug);
         CloudDatabaseService.PublishedReleaseRecord refreshed = cloudDb.findReleaseBySlug(slug).orElse(rel);
         ProjectState state = loadOrRehydrateProject(rel.projectId()).orElse(null);
-        return toReleaseMap(refreshed, state);
+        return releaseDtoMapper.toShareReleaseMap(refreshed, state, AuthContextHolder.getActorQuotaKey());
     }
 
     @PostMapping("/api/share/{slug}/like")
@@ -294,7 +271,7 @@ public class PublishShareController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                         "Published demo '" + slug + "' not found."));
         List<Map<String, Object>> items = cloudDb.listReleaseComments(slug).stream()
-                .map(PublishShareController::toCommentMap)
+                .map(ReleaseDtoMapper::toCommentMap)
                 .toList();
         return Map.of("share_slug", slug, "items", items, "count", items.size());
     }
@@ -325,7 +302,7 @@ public class PublishShareController {
         CloudDatabaseService.ReleaseCommentRecord rec = cloudDb.addReleaseComment(
                 slug, authorId, authorName, ts, bar, text
         );
-        Map<String, Object> out = new LinkedHashMap<>(toCommentMap(rec));
+        Map<String, Object> out = new LinkedHashMap<>(ReleaseDtoMapper.toCommentMap(rec));
         out.put("comments_count", cloudDb.listReleaseComments(slug).size());
         return out;
     }
@@ -379,56 +356,6 @@ public class PublishShareController {
 
     private void persistProjectRecord(ProjectState p, String storageKey) {
         projectAccess.mirrorToCloud(p, storageKey);
-    }
-
-    private Map<String, Object> toReleaseMap(CloudDatabaseService.PublishedReleaseRecord r, ProjectState state) {
-        String actorKey = AuthContextHolder.getActorQuotaKey();
-        List<CloudDatabaseService.ReleaseCommentRecord> comments = cloudDb.listReleaseComments(r.shareSlug());
-        Map<String, Object> map = new LinkedHashMap<>();
-        map.put("share_slug", r.shareSlug());
-        map.put("project_id", r.projectId());
-        map.put("owner_id", r.ownerId());
-        map.put("title", r.title());
-        map.put("artist", r.artist());
-        map.put("genre", r.genre());
-        map.put("bpm", r.bpm());
-        map.put("key", r.detectedKey());
-        map.put("scale", r.scale());
-        map.put("total_bars", r.totalBars());
-        map.put("master_format", r.masterFormat());
-        map.put("lufs_target", r.lufsTarget());
-        map.put("plays_count", r.playsCount());
-        map.put("likes_count", cloudDb.countReleaseLikes(r.shareSlug()));
-        map.put("liked_by_me", cloudDb.hasActorLikedRelease(r.shareSlug(), actorKey));
-        map.put("comments_count", comments.size());
-        map.put("creator_followed", r.ownerId() != null && !r.ownerId().isBlank() && cloudDb.isFollowingCreator(actorKey, r.ownerId()));
-        map.put("created_at", r.createdAt());
-        map.put("share_url", "/share/" + r.shareSlug());
-        map.put("stream_url", "/api/share/" + r.shareSlug() + "/audio");
-        map.put("lyrics_summary", r.lyricsSummary());
-        if (state != null) {
-            map.put("sections", state.getSongStructure() != null ? state.getSongStructure().getSections() : List.of());
-            map.put("chords", state.getSongStructure() != null ? state.getSongStructure().getChords() : List.of());
-            map.put("lyrics", state.getLyrics() != null ? state.getLyrics().getLines() : List.of());
-            map.put("comments", comments.stream().map(PublishShareController::toCommentMap).toList());
-            if (state.getRemixedFrom() != null && !state.getRemixedFrom().isEmpty()) {
-                map.put("remixed_from", state.getRemixedFrom());
-            }
-        }
-        return map;
-    }
-
-    private static Map<String, Object> toCommentMap(CloudDatabaseService.ReleaseCommentRecord c) {
-        Map<String, Object> map = new LinkedHashMap<>();
-        map.put("id", c.id());
-        map.put("share_slug", c.shareSlug());
-        map.put("author_id", c.authorId());
-        map.put("author_name", c.authorName());
-        map.put("timestamp_sec", c.timestampSec());
-        map.put("bar_number", c.barNumber());
-        map.put("text", c.text());
-        map.put("created_at", c.createdAt());
-        return map;
     }
 
     private static String buildLyricsSummary(ProjectState project) {

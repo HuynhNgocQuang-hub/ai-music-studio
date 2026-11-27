@@ -3,6 +3,7 @@ package com.aimusic.studio.controller;
 import com.aimusic.studio.cloud.AuthContextHolder;
 import com.aimusic.studio.cloud.CloudDatabaseService;
 import com.aimusic.studio.cloud.CloudProjectAccessService;
+import com.aimusic.studio.cloud.ProjectVersionRepository;
 import com.aimusic.studio.cloud.UserPrincipal;
 import com.aimusic.studio.collab.CollabRoomService;
 import com.aimusic.studio.model.ProjectState;
@@ -30,20 +31,20 @@ import java.util.Map;
 @RequestMapping("/api/projects/{projectId}/versions")
 public class ProjectVersionController {
 
-    private final CloudDatabaseService cloudDb;
+    private final ProjectVersionRepository versionRepo;
     private final CloudProjectAccessService projectAccess;
     private final ProjectStateStore store;
     private final CollabRoomService roomService;
     private final ObjectMapper objectMapper;
 
     public ProjectVersionController(
-            CloudDatabaseService cloudDb,
+            ProjectVersionRepository versionRepo,
             CloudProjectAccessService projectAccess,
             ProjectStateStore store,
             CollabRoomService roomService,
             ObjectMapper objectMapper
     ) {
-        this.cloudDb = cloudDb;
+        this.versionRepo = versionRepo;
         this.projectAccess = projectAccess;
         this.store = store;
         this.roomService = roomService;
@@ -59,7 +60,7 @@ public class ProjectVersionController {
             projectAccess.findOrRehydrate(projectId).ifPresent(p ->
                     projectAccess.requireReadAccess(p, "You do not have permission to view checkpoints for this project."));
         }
-        List<Map<String, Object>> items = cloudDb.listProjectVersions(projectId).stream()
+        List<Map<String, Object>> items = versionRepo.listProjectVersions(projectId).stream()
                 .map(ProjectVersionController::toSummaryMap)
                 .toList();
         return Map.of("project_id", projectId, "items", items);
@@ -90,7 +91,7 @@ public class ProjectVersionController {
             }
         }
 
-        int existingCount = cloudDb.listProjectVersions(projectId).size();
+        int existingCount = versionRepo.listProjectVersions(projectId).size();
         String rawLabel = body != null && body.get("label") instanceof String s ? s.trim() : "";
         String label = !rawLabel.isBlank()
                 ? rawLabel.substring(0, Math.min(rawLabel.length(), 120))
@@ -109,7 +110,7 @@ public class ProjectVersionController {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to serialize checkpoint state.");
         }
 
-        CloudDatabaseService.ProjectVersionRecord created = cloudDb.createProjectVersion(
+        CloudDatabaseService.ProjectVersionRecord created = versionRepo.createProjectVersion(
                 projectId, label, authorId, authorName, bpm, totalBars, stateJson
         );
         return toSummaryMap(created);
@@ -127,7 +128,7 @@ public class ProjectVersionController {
             projectAccess.requireWriteAccess(current, "You do not have permission to restore checkpoints for this project.");
         }
 
-        CloudDatabaseService.ProjectVersionRecord rec = cloudDb.findProjectVersion(versionId)
+        CloudDatabaseService.ProjectVersionRecord rec = versionRepo.findProjectVersion(versionId)
                 .filter(v -> projectId.equals(v.projectId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Checkpoint not found."));
 
@@ -173,10 +174,10 @@ public class ProjectVersionController {
         ProjectState current = projectAccess.findOrRehydrate(projectId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Project '" + projectId + "' not found."));
         projectAccess.requireWriteAccess(current, "Only the project owner can delete checkpoints.");
-        CloudDatabaseService.ProjectVersionRecord rec = cloudDb.findProjectVersion(versionId)
+        CloudDatabaseService.ProjectVersionRecord rec = versionRepo.findProjectVersion(versionId)
                 .filter(v -> projectId.equals(v.projectId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Checkpoint not found."));
-        cloudDb.deleteProjectVersion(rec.id());
+        versionRepo.deleteProjectVersion(rec.id());
         return Map.of("status", "deleted", "version_id", versionId);
     }
 

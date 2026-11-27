@@ -1565,10 +1565,12 @@ export default function TimelineEditor({
                           onToggleTrackFlag(trackId, 'mute');
                         }}
                         title="Mute track"
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition ${
+                        aria-label={`Mute track ${trackId}`}
+                        aria-pressed={track.mute}
+                        className={`inline-flex min-h-[24px] min-w-[24px] items-center justify-center rounded px-1.5 py-0.5 text-[10px] font-bold transition ${
                           track.mute
                             ? 'bg-rose-500 text-white'
-                            : 'bg-white/[0.08] text-slate-400 hover:text-white'
+                            : 'bg-white/[0.08] text-slate-300 hover:text-white'
                         }`}
                       >
                         M
@@ -1580,10 +1582,12 @@ export default function TimelineEditor({
                           onToggleTrackFlag(trackId, 'solo');
                         }}
                         title="Solo track"
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition ${
+                        aria-label={`Solo track ${trackId}`}
+                        aria-pressed={track.solo}
+                        className={`inline-flex min-h-[24px] min-w-[24px] items-center justify-center rounded px-1.5 py-0.5 text-[10px] font-bold transition ${
                           track.solo
                             ? 'bg-amber-400 text-slate-950'
-                            : 'bg-white/[0.08] text-slate-400 hover:text-white'
+                            : 'bg-white/[0.08] text-slate-300 hover:text-white'
                         }`}
                       >
                         S
@@ -1596,10 +1600,11 @@ export default function TimelineEditor({
                         }}
                         title={track.locked ? 'Đã khóa track' : 'Khóa track'}
                         aria-label={track.locked ? `Mở khóa track ${trackId}` : `Khóa track ${trackId}`}
-                        className={`rounded p-0.5 transition ${
+                        aria-pressed={track.locked}
+                        className={`inline-flex min-h-[24px] min-w-[24px] items-center justify-center rounded p-1 transition ${
                           track.locked
                             ? 'bg-sky-500 text-slate-950'
-                            : 'bg-white/[0.08] text-slate-400 hover:text-white'
+                            : 'bg-white/[0.08] text-slate-300 hover:text-white'
                         }`}
                       >
                         {track.locked ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}

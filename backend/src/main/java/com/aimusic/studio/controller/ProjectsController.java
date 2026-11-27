@@ -2,6 +2,7 @@ package com.aimusic.studio.controller;
 
 import com.aimusic.studio.audio.AudioWorkerClient;
 import com.aimusic.studio.audio.JavaAudioFallbackService;
+import com.aimusic.studio.audio.MasterAudioExportService;
 import com.aimusic.studio.cloud.AuthContextHolder;
 import com.aimusic.studio.cloud.CloudDatabaseService;
 import com.aimusic.studio.cloud.CloudProjectAccessService;
@@ -59,6 +60,7 @@ public class ProjectsController {
     private final ObjectMapper objectMapper;
     private final CloudProjectAccessService projectAccess;
     private final CollabRoomService collabRoomService;
+    private final MasterAudioExportService masterAudioExportService;
 
     public ProjectsController(
             ProjectStateStore store,
@@ -66,7 +68,7 @@ public class ProjectsController {
             JavaAudioFallbackService audioFallback,
             AppProperties properties
     ) {
-        this(store, audioWorkerClient, audioFallback, properties, null, null, null, new ObjectMapper(), null, null);
+        this(store, audioWorkerClient, audioFallback, properties, null, null, null, new ObjectMapper(), null, null, null);
     }
 
     @Autowired
@@ -80,7 +82,8 @@ public class ProjectsController {
             @Autowired(required = false) QuotaRateLimitService quotaService,
             @Autowired(required = false) ObjectMapper objectMapper,
             @Autowired(required = false) CloudProjectAccessService projectAccess,
-            @Autowired(required = false) CollabRoomService collabRoomService
+            @Autowired(required = false) CollabRoomService collabRoomService,
+            @Autowired(required = false) MasterAudioExportService masterAudioExportService
     ) {
         this.store = store;
         this.audioWorkerClient = audioWorkerClient;
@@ -93,6 +96,8 @@ public class ProjectsController {
         this.projectAccess = projectAccess != null ? projectAccess
                 : new CloudProjectAccessService(store, cloudDb, this.objectMapper);
         this.collabRoomService = collabRoomService;
+        this.masterAudioExportService = masterAudioExportService != null ? masterAudioExportService
+                : new MasterAudioExportService(audioWorkerClient, audioFallback, properties, store);
     }
 
     @GetMapping
@@ -281,7 +286,6 @@ public class ProjectsController {
         }
 
         String format = req.getFormat().toLowerCase(Locale.ROOT);
-        int sr = properties.getSampleRate();
         String title = (req.getTitle() != null && !req.getTitle().isBlank())
                 ? req.getTitle().trim() : project.getTitle();
         String artist = (req.getArtist() != null && !req.getArtist().isBlank())
@@ -295,25 +299,14 @@ public class ProjectsController {
             project.getMastering().setTargetLufs(clamped);
         }
 
-        Map<String, byte[]> audioAssets = collectAudioAssets(project);
-        String bitrate = req.getBitrate();
-        Optional<byte[]> workerExport = audioWorkerClient.exportAudio(
-                project, audioAssets, format, req.getMode(), req.isApplyMastering(), sr, bitrate,
-                title, artist, req.getAlbum(), genre);
-        if (workerExport.isPresent()) {
-            return buildExportResponse(projectId, format, workerExport.get());
-        }
-
-        JavaAudioFallbackService.RenderedMix rendered = audioFallback.renderProjectMix(
-                project, store, req.getMode(), req.isApplyMastering(), sr);
-
-        byte[] data = switch (format) {
-            case "mp3" -> audioFallback.exportMp3ViaFfmpeg(rendered.stereo(), rendered.sampleRate(), bitrate, title, artist, genre);
-            case "flac" -> audioFallback.exportFlacViaFfmpeg(rendered.stereo(), rendered.sampleRate(), title, artist, genre);
-            case "stems" -> audioFallback.exportStemsZip(rendered.stems(), rendered.sampleRate());
-            default -> audioFallback.encodeWavStereo(rendered.stereo(), rendered.sampleRate());
-        };
-        return buildExportResponse(projectId, format, data);
+        MasterAudioExportService.ExportResult exported = masterAudioExportService.renderMasterAudio(
+                project,
+                new MasterAudioExportService.ExportRequestParams(
+                        format, req.getMode(), req.isApplyMastering(), req.getBitrate(),
+                        title, artist, req.getAlbum(), genre, false
+                )
+        );
+        return buildExportResponse(projectId, format, exported.audioBytes());
     }
 
     @PostMapping("/{projectId}/export/midi")

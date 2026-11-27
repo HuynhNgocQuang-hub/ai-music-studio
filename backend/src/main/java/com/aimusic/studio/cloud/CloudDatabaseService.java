@@ -124,6 +124,8 @@ public class CloudDatabaseService {
     private final JdbcTemplate jdbc;
     private final String backendName;
     private final boolean postgresConnected;
+    private final ProjectVersionRepository versionRepository;
+    private final CreatorSocialRepository creatorSocialRepository;
 
     public CloudDatabaseService(AppProperties properties) {
         String configuredUrl = properties.getDatabaseUrl() != null ? properties.getDatabaseUrl().trim() : "";
@@ -179,6 +181,23 @@ public class CloudDatabaseService {
         this.dataSource = new HikariDataSource(cfg);
         this.jdbc = new JdbcTemplate(this.dataSource);
         initSchema();
+        this.versionRepository = new ProjectVersionRepository(this.jdbc);
+        this.creatorSocialRepository = new CreatorSocialRepository(this.jdbc, new CreatorSocialRepository.ReleaseQueryPort() {
+            @Override
+            public List<PublishedReleaseRecord> listReleases(
+                    String search, String genre, String sort, String ownerId, Set<String> allowedOwnerIds) {
+                return CloudDatabaseService.this.listReleases(search, genre, sort, ownerId, allowedOwnerIds);
+            }
+
+            @Override
+            public int countReleaseLikes(String shareSlug) {
+                return CloudDatabaseService.this.countReleaseLikes(shareSlug);
+            }
+        });
+    }
+
+    public JdbcTemplate getJdbcTemplate() {
+        return jdbc;
     }
 
     private boolean probePostgres(String url, String user, String pass) {
@@ -690,7 +709,7 @@ public class CloudDatabaseService {
         jdbc.update("DELETE FROM studio_bar_comments WHERE id = ?", commentId);
     }
 
-    // --- Phase 10A: Named Project Version Checkpoints ---
+    // --- Phase 10A: Named Project Version Checkpoints (delegated to ProjectVersionRepository) ---
 
     public ProjectVersionRecord createProjectVersion(
             String projectId,
@@ -701,174 +720,57 @@ public class CloudDatabaseService {
             int totalBars,
             String stateJson
     ) {
-        String id = "ver_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        String now = Instant.now().toString();
-        jdbc.update(
-                "INSERT INTO project_versions (id, project_id, label, author_id, author_name, bpm, total_bars, state_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                id, projectId, label, authorId, authorName, bpm, totalBars, stateJson, now
-        );
-        return new ProjectVersionRecord(id, projectId, label, authorId, authorName, bpm, totalBars, stateJson, now);
+        return versionRepository.createProjectVersion(projectId, label, authorId, authorName, bpm, totalBars, stateJson);
     }
 
     public List<ProjectVersionRecord> listProjectVersions(String projectId) {
-        return jdbc.query(
-                "SELECT id, project_id, label, author_id, author_name, bpm, total_bars, state_json, created_at FROM project_versions WHERE project_id = ? ORDER BY created_at DESC",
-                (rs, i) -> new ProjectVersionRecord(
-                        rs.getString("id"), rs.getString("project_id"),
-                        rs.getString("label"), rs.getString("author_id"), rs.getString("author_name"),
-                        rs.getDouble("bpm"), rs.getInt("total_bars"),
-                        rs.getString("state_json"), rs.getString("created_at")
-                ),
-                projectId
-        );
+        return versionRepository.listProjectVersions(projectId);
     }
 
     public Optional<ProjectVersionRecord> findProjectVersion(String versionId) {
-        if (versionId == null || versionId.isBlank()) return Optional.empty();
-        List<ProjectVersionRecord> rows = jdbc.query(
-                "SELECT id, project_id, label, author_id, author_name, bpm, total_bars, state_json, created_at FROM project_versions WHERE id = ?",
-                (rs, i) -> new ProjectVersionRecord(
-                        rs.getString("id"), rs.getString("project_id"),
-                        rs.getString("label"), rs.getString("author_id"), rs.getString("author_name"),
-                        rs.getDouble("bpm"), rs.getInt("total_bars"),
-                        rs.getString("state_json"), rs.getString("created_at")
-                ),
-                versionId
-        );
-        return rows.stream().findFirst();
+        return versionRepository.findProjectVersion(versionId);
     }
 
     public void deleteProjectVersion(String versionId) {
-        jdbc.update("DELETE FROM project_versions WHERE id = ?", versionId);
+        versionRepository.deleteProjectVersion(versionId);
     }
 
-    // --- Phase 10B: Creator Profiles & Follow Graph ---
+    // --- Phase 10B: Creator Profiles & Follow Graph (delegated to CreatorSocialRepository) ---
 
     public Optional<UserProfileRecord> getUserProfile(String userId) {
-        if (userId == null || userId.isBlank()) return Optional.empty();
-        List<UserProfileRecord> rows = jdbc.query(
-                "SELECT id, display_name, role, bio, created_at FROM users WHERE id = ?",
-                (rs, i) -> new UserProfileRecord(
-                        rs.getString("id"), rs.getString("display_name"),
-                        rs.getString("role"), rs.getString("bio"), rs.getString("created_at")
-                ),
-                userId
-        );
-        return rows.stream().findFirst();
+        return creatorSocialRepository.getUserProfile(userId);
     }
 
     public Optional<UserProfileRecord> updateUserProfile(String userId, String displayName, String bio) {
-        Optional<UserProfileRecord> existing = getUserProfile(userId);
-        if (existing.isEmpty()) return Optional.empty();
-        UserProfileRecord prev = existing.get();
-        String nextName = (displayName != null && !displayName.isBlank())
-                ? displayName.trim().substring(0, Math.min(displayName.trim().length(), 100))
-                : prev.displayName();
-        String nextBio = bio != null
-                ? bio.trim().substring(0, Math.min(bio.trim().length(), 400))
-                : prev.bio();
-        jdbc.update("UPDATE users SET display_name = ?, bio = ? WHERE id = ?", nextName, nextBio, userId);
-        return getUserProfile(userId);
+        return creatorSocialRepository.updateUserProfile(userId, displayName, bio);
     }
 
     public Map<String, Object> toggleCreatorFollow(String followerActorKey, String creatorId) {
-        String key = (followerActorKey != null && !followerActorKey.isBlank()) ? followerActorKey : "guest:local";
-        Integer existing = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM creator_follows WHERE follower_id = ? AND creator_id = ?",
-                Integer.class, key, creatorId
-        );
-        boolean following;
-        if (existing != null && existing > 0) {
-            jdbc.update("DELETE FROM creator_follows WHERE follower_id = ? AND creator_id = ?", key, creatorId);
-            following = false;
-        } else {
-            jdbc.update(
-                    "INSERT INTO creator_follows (follower_id, creator_id, created_at) VALUES (?, ?, ?)",
-                    key, creatorId, Instant.now().toString()
-            );
-            following = true;
-        }
-        return Map.of(
-                "creator_id", creatorId,
-                "following", following,
-                "followers_count", countFollowers(creatorId)
-        );
+        return creatorSocialRepository.toggleCreatorFollow(followerActorKey, creatorId);
     }
 
     public boolean isFollowingCreator(String followerActorKey, String creatorId) {
-        if (followerActorKey == null || followerActorKey.isBlank() || creatorId == null || creatorId.isBlank()) {
-            return false;
-        }
-        Integer n = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM creator_follows WHERE follower_id = ? AND creator_id = ?",
-                Integer.class, followerActorKey, creatorId
-        );
-        return n != null && n > 0;
+        return creatorSocialRepository.isFollowingCreator(followerActorKey, creatorId);
     }
 
     public int countFollowers(String creatorId) {
-        Integer n = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM creator_follows WHERE creator_id = ?",
-                Integer.class, creatorId
-        );
-        return n != null ? n : 0;
+        return creatorSocialRepository.countFollowers(creatorId);
     }
 
     public int countFollowing(String followerActorKey) {
-        Integer n = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM creator_follows WHERE follower_id = ?",
-                Integer.class, followerActorKey
-        );
-        return n != null ? n : 0;
+        return creatorSocialRepository.countFollowing(followerActorKey);
     }
 
     public Set<String> listFollowingIds(String followerActorKey) {
-        if (followerActorKey == null || followerActorKey.isBlank()) return Set.of();
-        List<String> ids = jdbc.queryForList(
-                "SELECT creator_id FROM creator_follows WHERE follower_id = ?",
-                String.class, followerActorKey
-        );
-        return new HashSet<>(ids);
+        return creatorSocialRepository.listFollowingIds(followerActorKey);
     }
 
     public Optional<CreatorSummaryRecord> getCreatorSummary(String creatorId) {
-        if (creatorId == null || creatorId.isBlank()) return Optional.empty();
-        Optional<UserProfileRecord> userOpt = getUserProfile(creatorId);
-        List<PublishedReleaseRecord> releases = listReleases("", "", "recent", creatorId, null);
-        if (userOpt.isEmpty() && releases.isEmpty()) {
-            return Optional.empty();
-        }
-        String name = userOpt.map(UserProfileRecord::displayName)
-                .orElseGet(() -> releases.stream().map(PublishedReleaseRecord::artist).filter(a -> a != null && !a.isBlank()).findFirst().orElse("AI Producer"));
-        String bio = userOpt.map(u -> u.bio() != null ? u.bio() : "").orElse("");
-        String role = userOpt.map(UserProfileRecord::role).orElse("creator");
-        int totalPlays = releases.stream().mapToInt(PublishedReleaseRecord::playsCount).sum();
-        int totalLikes = releases.stream().mapToInt(r -> countReleaseLikes(r.shareSlug())).sum();
-        int followers = countFollowers(creatorId);
-        int following = countFollowing("user:" + creatorId);
-        return Optional.of(new CreatorSummaryRecord(
-                creatorId, name, bio, role, followers, following, releases.size(), totalPlays, totalLikes
-        ));
+        return creatorSocialRepository.getCreatorSummary(creatorId);
     }
 
     public List<CreatorSummaryRecord> listTopCreators(int limit) {
-        List<PublishedReleaseRecord> all = listReleases("", "", "recent", null, null);
-        Map<String, List<PublishedReleaseRecord>> byOwner = new LinkedHashMap<>();
-        for (PublishedReleaseRecord r : all) {
-            String owner = (r.ownerId() != null && !r.ownerId().isBlank()) ? r.ownerId() : "guest";
-            byOwner.computeIfAbsent(owner, k -> new ArrayList<>()).add(r);
-        }
-        List<CreatorSummaryRecord> summaries = new ArrayList<>();
-        for (String ownerId : byOwner.keySet()) {
-            getCreatorSummary(ownerId).ifPresent(summaries::add);
-        }
-        summaries.sort(Comparator.comparingInt((CreatorSummaryRecord c) ->
-                (c.totalLikes() * 3) + c.totalPlays() + (c.followersCount() * 5)
-        ).reversed());
-        if (summaries.size() > limit) {
-            return summaries.subList(0, limit);
-        }
-        return summaries;
+        return creatorSocialRepository.listTopCreators(limit);
     }
 
     private PublishedReleaseRecord mapRelease(java.sql.ResultSet rs) throws java.sql.SQLException {

@@ -21,11 +21,16 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * WebSocket handler for /ws/collab enabling realtime multi-user presence, cursor/bar tracking,
- * transport cues, and ProjectState synchronization inside Studio.
+ * WebSocket handler for /ws/collab dispatching realtime studio frames through a Strategy handler map
+ * covering presence, cursor tracking, soft track locks, room chat, transport cues, and ProjectState sync.
  */
 @Component
 public class CollabWebSocketHandler extends TextWebSocketHandler {
+
+    @FunctionalInterface
+    private interface FrameHandler {
+        void handle(WebSocketSession session, SessionContext ctx, Map<String, Object> msg);
+    }
 
     private record SessionContext(String projectId, String clientId, String userId, String displayName, String role) {}
 
@@ -35,6 +40,7 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
     private final ProjectStateStore store;
     private final ObjectMapper objectMapper;
     private final ConcurrentHashMap<String, SessionContext> sessionContexts = new ConcurrentHashMap<>();
+    private final Map<String, FrameHandler> frameHandlers;
 
     public CollabWebSocketHandler(
             CollabRoomService roomService,
@@ -48,6 +54,14 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         this.projectAccess = projectAccess;
         this.store = store;
         this.objectMapper = objectMapper;
+        this.frameHandlers = Map.of(
+                "ping", (session, ctx, msg) -> roomService.sendDirect(session, Map.of("type", "pong")),
+                "cursor", this::handleCursorFrame,
+                "track_lock", this::handleTrackLockFrame,
+                "room_chat", this::handleRoomChatFrame,
+                "transport_cue", this::handleTransportCueFrame,
+                "state_sync", this::handleStateSyncFrame
+        );
     }
 
     @Override
@@ -145,97 +159,101 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         String type = msg.get("type") != null ? msg.get("type").toString() : "";
-        switch (type) {
-            case "ping" -> roomService.sendDirect(session, Map.of("type", "pong"));
-            case "cursor" -> {
-                roomService.findRoom(ctx.projectId()).ifPresent(room -> {
-                    CollabRoomService.PeerPresence p = room.peers.get(session.getId());
-                    if (p != null) {
-                        if (msg.get("bar") instanceof Number n) p.bar = Math.max(1, n.intValue());
-                        if (msg.get("track_id") instanceof String t && !t.isBlank()) p.trackId = t;
-                        if (msg.get("active_tab") instanceof String tab && !tab.isBlank()) p.activeTab = tab;
-                    }
-                });
+        FrameHandler handler = frameHandlers.get(type);
+        if (handler != null) {
+            handler.handle(session, ctx, msg);
+        }
+    }
+
+    private void handleCursorFrame(WebSocketSession session, SessionContext ctx, Map<String, Object> msg) {
+        roomService.findRoom(ctx.projectId()).ifPresent(room -> {
+            CollabRoomService.PeerPresence p = room.peers.get(session.getId());
+            if (p != null) {
+                if (msg.get("bar") instanceof Number n) p.bar = Math.max(1, n.intValue());
+                if (msg.get("track_id") instanceof String t && !t.isBlank()) p.trackId = t;
+                if (msg.get("active_tab") instanceof String tab && !tab.isBlank()) p.activeTab = tab;
+            }
+        });
+        roomService.broadcast(ctx.projectId(), Map.of(
+                "type", "presence",
+                "project_id", ctx.projectId(),
+                "members", roomService.listMembers(ctx.projectId())
+        ), null);
+    }
+
+    private void handleTrackLockFrame(WebSocketSession session, SessionContext ctx, Map<String, Object> msg) {
+        String trackId = msg.get("track_id") instanceof String s ? s.trim() : "";
+        boolean locked = Boolean.TRUE.equals(msg.get("locked"));
+        roomService.findRoom(ctx.projectId()).ifPresent(room -> {
+            CollabRoomService.PeerPresence peer = room.peers.get(session.getId());
+            if (peer == null) return;
+            Optional<String> err = roomService.trySetTrackLock(ctx.projectId(), peer, trackId, locked);
+            if (err.isPresent()) {
+                roomService.sendDirect(session, Map.of("type", "error", "detail", err.get()));
+            } else {
                 roomService.broadcast(ctx.projectId(), Map.of(
-                        "type", "presence",
+                        "type", "track_locks",
                         "project_id", ctx.projectId(),
-                        "members", roomService.listMembers(ctx.projectId())
+                        "track_locks", roomService.listTrackLocks(ctx.projectId())
                 ), null);
             }
-            case "track_lock" -> {
-                String trackId = msg.get("track_id") instanceof String s ? s.trim() : "";
-                boolean locked = Boolean.TRUE.equals(msg.get("locked"));
-                roomService.findRoom(ctx.projectId()).ifPresent(room -> {
-                    CollabRoomService.PeerPresence peer = room.peers.get(session.getId());
-                    if (peer == null) return;
-                    Optional<String> err = roomService.trySetTrackLock(ctx.projectId(), peer, trackId, locked);
-                    if (err.isPresent()) {
-                        roomService.sendDirect(session, Map.of("type", "error", "detail", err.get()));
-                    } else {
-                        roomService.broadcast(ctx.projectId(), Map.of(
-                                "type", "track_locks",
-                                "project_id", ctx.projectId(),
-                                "track_locks", roomService.listTrackLocks(ctx.projectId())
-                        ), null);
-                    }
-                });
-            }
-            case "room_chat" -> {
-                String rawText = msg.get("text") instanceof String s ? s.trim() : "";
-                if (rawText.isBlank()) return;
-                if (rawText.length() > 400) rawText = rawText.substring(0, 400);
-                final String safeText = rawText;
-                roomService.findRoom(ctx.projectId()).ifPresent(room -> {
-                    CollabRoomService.PeerPresence peer = room.peers.get(session.getId());
-                    if (peer == null) return;
-                    Map<String, Object> chatMsg = roomService.appendChatMessage(ctx.projectId(), peer, safeText);
-                    roomService.broadcast(ctx.projectId(), Map.of(
-                            "type", "room_chat",
-                            "project_id", ctx.projectId(),
-                            "message", chatMsg
-                    ), null);
-                });
-            }
-            case "transport_cue" -> {
-                Map<String, Object> cue = new LinkedHashMap<>();
-                cue.put("type", "transport_cue");
-                cue.put("project_id", ctx.projectId());
-                cue.put("client_id", ctx.clientId());
-                cue.put("display_name", ctx.displayName());
-                cue.put("playing", Boolean.TRUE.equals(msg.get("playing")));
-                if (msg.get("bar") instanceof Number n) cue.put("bar", n.intValue());
-                roomService.broadcast(ctx.projectId(), cue, session.getId());
-            }
-            case "state_sync" -> {
-                Object stateObj = msg.get("state");
-                if (stateObj == null) return;
-                long rev = roomService.bumpRevision(ctx.projectId());
-                try {
-                    ProjectState incoming = objectMapper.convertValue(stateObj, ProjectState.class);
-                    Optional<ProjectState> existing = projectAccess.findOrRehydrate(ctx.projectId());
-                    incoming.setProjectId(ctx.projectId());
-                    existing.ifPresent(prev -> {
-                        incoming.setOwnerId(prev.getOwnerId());
-                        incoming.setVisibility(prev.getVisibility());
-                        incoming.setShareSlug(prev.getShareSlug());
-                        incoming.setPublishedAt(prev.getPublishedAt());
-                    });
-                    ProjectState saved = store.saveProject(incoming);
-                    projectAccess.mirrorToCloud(saved, null);
+        });
+    }
 
-                    Map<String, Object> out = new LinkedHashMap<>();
-                    out.put("type", "state_sync");
-                    out.put("project_id", ctx.projectId());
-                    out.put("client_id", ctx.clientId());
-                    out.put("display_name", ctx.displayName());
-                    out.put("revision", rev);
-                    out.put("state", saved);
-                    roomService.broadcast(ctx.projectId(), out, session.getId());
-                } catch (Exception ignored) {
-                }
-            }
-            default -> {
-            }
+    private void handleRoomChatFrame(WebSocketSession session, SessionContext ctx, Map<String, Object> msg) {
+        String rawText = msg.get("text") instanceof String s ? s.trim() : "";
+        if (rawText.isBlank()) return;
+        if (rawText.length() > 400) rawText = rawText.substring(0, 400);
+        final String safeText = rawText;
+        roomService.findRoom(ctx.projectId()).ifPresent(room -> {
+            CollabRoomService.PeerPresence peer = room.peers.get(session.getId());
+            if (peer == null) return;
+            Map<String, Object> chatMsg = roomService.appendChatMessage(ctx.projectId(), peer, safeText);
+            roomService.broadcast(ctx.projectId(), Map.of(
+                    "type", "room_chat",
+                    "project_id", ctx.projectId(),
+                    "message", chatMsg
+            ), null);
+        });
+    }
+
+    private void handleTransportCueFrame(WebSocketSession session, SessionContext ctx, Map<String, Object> msg) {
+        Map<String, Object> cue = new LinkedHashMap<>();
+        cue.put("type", "transport_cue");
+        cue.put("project_id", ctx.projectId());
+        cue.put("client_id", ctx.clientId());
+        cue.put("display_name", ctx.displayName());
+        cue.put("playing", Boolean.TRUE.equals(msg.get("playing")));
+        if (msg.get("bar") instanceof Number n) cue.put("bar", n.intValue());
+        roomService.broadcast(ctx.projectId(), cue, session.getId());
+    }
+
+    private void handleStateSyncFrame(WebSocketSession session, SessionContext ctx, Map<String, Object> msg) {
+        Object stateObj = msg.get("state");
+        if (stateObj == null) return;
+        long rev = roomService.bumpRevision(ctx.projectId());
+        try {
+            ProjectState incoming = objectMapper.convertValue(stateObj, ProjectState.class);
+            Optional<ProjectState> existing = projectAccess.findOrRehydrate(ctx.projectId());
+            incoming.setProjectId(ctx.projectId());
+            existing.ifPresent(prev -> {
+                incoming.setOwnerId(prev.getOwnerId());
+                incoming.setVisibility(prev.getVisibility());
+                incoming.setShareSlug(prev.getShareSlug());
+                incoming.setPublishedAt(prev.getPublishedAt());
+            });
+            ProjectState saved = store.saveProject(incoming);
+            projectAccess.mirrorToCloud(saved, null);
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("type", "state_sync");
+            out.put("project_id", ctx.projectId());
+            out.put("client_id", ctx.clientId());
+            out.put("display_name", ctx.displayName());
+            out.put("revision", rev);
+            out.put("state", saved);
+            roomService.broadcast(ctx.projectId(), out, session.getId());
+        } catch (Exception ignored) {
         }
     }
 
