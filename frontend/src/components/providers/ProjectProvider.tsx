@@ -320,10 +320,13 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         act.action === 'separate_stems' ||
         act.action === 'regenerate_track' ||
         act.action === 'regenerate_song' ||
-        act.action === 'export_project'
+        act.action === 'export_project' ||
+        act.action === 'save_checkpoint' ||
+        act.action === 'open_publish_modal' ||
+        act.action === 'open_collab_drawer'
       ) {
         navigate(`/studio/${encodeURIComponent(prevSnapshot.project_id)}`);
-        return { notice: `Đã mở Studio cho "${prevSnapshot.title || prevSnapshot.project_id}" — hãy bấm lại nút này hoặc nút tương ứng trên Studio để thực thi Audio trực tiếp.` };
+        return { notice: `Đã mở Studio cho "${prevSnapshot.title || prevSnapshot.project_id}" — nhấn lại đề xuất để thực thi ngay trên Studio.` };
       }
 
       const next = updateProject((prev) => {
@@ -463,10 +466,16 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
           };
         }
 
+        const nextTitle =
+          typeof payload.title === 'string' && payload.title.trim()
+            ? payload.title.trim()
+            : prev.title;
         return {
           ...prev,
+          title: nextTitle,
           config: {
             ...prev.config,
+            title: nextTitle,
             ...(typeof payload.genre === 'string' ? { genre: payload.genre } : {}),
             ...(typeof payload.mood === 'string' ? { mood: payload.mood } : {}),
           },

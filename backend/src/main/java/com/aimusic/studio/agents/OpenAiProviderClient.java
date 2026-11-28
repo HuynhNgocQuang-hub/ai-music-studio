@@ -83,17 +83,40 @@ public class OpenAiProviderClient implements LlmProviderClient {
             String apiKey,
             AppProperties properties
     ) throws Exception {
+        return generateConversationWithTools(
+                List.of(), prompt, systemPrompt, audioBytes, audioMime, toolDeclarations, apiKey, properties);
+    }
+
+    @Override
+    public LlmAdapter.ToolLlmResponse generateConversationWithTools(
+            List<LlmAdapter.ChatTurn> history,
+            String prompt,
+            String systemPrompt,
+            byte[] audioBytes,
+            String audioMime,
+            List<Map<String, Object>> toolDeclarations,
+            String apiKey,
+            AppProperties properties
+    ) throws Exception {
         String model = resolveModel(properties);
         List<Map<String, Object>> messages = new ArrayList<>();
         if (systemPrompt != null && !systemPrompt.isBlank()) {
             messages.add(Map.of("role", "system", "content", systemPrompt));
+        }
+        if (history != null) {
+            for (LlmAdapter.ChatTurn turn : history) {
+                if (turn == null || turn.content() == null || turn.content().isBlank()) continue;
+                String role = "assistant".equalsIgnoreCase(turn.role()) || "model".equalsIgnoreCase(turn.role())
+                        ? "assistant" : "user";
+                messages.add(Map.of("role", role, "content", turn.content().trim()));
+            }
         }
         messages.add(Map.of("role", "user", "content", prompt));
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model);
         body.put("messages", messages);
-        body.put("temperature", 0.35);
+        body.put("temperature", 0.42);
         if (toolDeclarations != null && !toolDeclarations.isEmpty()) {
             List<Map<String, Object>> wrapped = new ArrayList<>();
             for (Map<String, Object> decl : toolDeclarations) {

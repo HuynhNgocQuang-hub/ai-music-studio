@@ -27,7 +27,7 @@ public interface LlmProviderClient {
     ) throws Exception;
 
     /**
-     * Execute a tool-calling (and optional multimodal audio) completion request.
+     * Execute a single-turn tool-calling (and optional multimodal audio) completion request.
      */
     LlmAdapter.ToolLlmResponse generateWithTools(
             String prompt,
@@ -38,4 +38,20 @@ public interface LlmProviderClient {
             String apiKey,
             AppProperties properties
     ) throws Exception;
+
+    /**
+     * Execute a multi-turn conversational tool-calling request preserving user/assistant turns.
+     */
+    default LlmAdapter.ToolLlmResponse generateConversationWithTools(
+            List<LlmAdapter.ChatTurn> history,
+            String prompt,
+            String systemPrompt,
+            byte[] audioBytes,
+            String audioMime,
+            List<Map<String, Object>> toolDeclarations,
+            String apiKey,
+            AppProperties properties
+    ) throws Exception {
+        return generateWithTools(prompt, systemPrompt, audioBytes, audioMime, toolDeclarations, apiKey, properties);
+    }
 }

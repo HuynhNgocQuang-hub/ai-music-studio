@@ -417,6 +417,7 @@ export async function streamCoachChat(
   payload: CoachChatRequest,
   handlers: {
     onChunk: (deltaText: string) => void;
+    onStatus?: (data: { stage?: string; text?: string }) => void;
     onActions?: (data: { provider?: string; suggested_actions: CoachSuggestedAction[] }) => void;
     onDone?: (res: CoachChatResponse) => void;
     signal?: AbortSignal;
@@ -464,7 +465,12 @@ export async function streamCoachChat(
     if (!rawData) return;
     try {
       const parsed = JSON.parse(rawData) as Record<string, unknown>;
-      if (evt === 'chunk' && typeof parsed.text === 'string') {
+      if (evt === 'status' && typeof parsed.text === 'string') {
+        handlers.onStatus?.({
+          stage: typeof parsed.stage === 'string' ? parsed.stage : undefined,
+          text: parsed.text,
+        });
+      } else if (evt === 'chunk' && typeof parsed.text === 'string') {
         accReply += parsed.text;
         handlers.onChunk(parsed.text);
       } else if (evt === 'actions') {
@@ -526,6 +532,8 @@ export async function chatWithCoachAudio(params: {
   message: string;
   mode?: CoachAssistantMode;
   route?: string;
+  history?: Array<{ role: string; content: string; timestamp?: string }>;
+  project_state?: ProjectState;
   file?: Blob;
   filename?: string;
 }): Promise<CoachChatResponse> {
@@ -534,6 +542,12 @@ export async function chatWithCoachAudio(params: {
   form.append('message', params.message);
   if (params.mode) form.append('mode', params.mode);
   if (params.route) form.append('route', params.route);
+  if (params.history && params.history.length > 0) {
+    form.append('history', JSON.stringify(params.history.slice(-10)));
+  }
+  if (params.project_state) {
+    form.append('project_state', JSON.stringify(params.project_state));
+  }
   if (params.file) {
     form.append('file', params.file, params.filename || 'chat_audio.wav');
   }

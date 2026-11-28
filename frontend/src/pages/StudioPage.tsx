@@ -1580,6 +1580,26 @@ export default function StudioPage() {
         return { notice: `Đã ${shouldAppend ? 'thêm' : 'cập nhật'} ${incoming.length} câu lời.`, revertable: true };
       }
     }
+    if (act.action === 'save_checkpoint') {
+      const lbl = typeof payload.label === 'string' && payload.label.trim()
+        ? payload.label.trim()
+        : `Copilot Checkpoint (${Math.round(current.analysis.bpm)} BPM)`;
+      await saveNow(true);
+      await collab.saveCheckpoint(lbl, latestProjectRef.current);
+      setCollabDrawerTab('versions');
+      setCollabOpen(true);
+      return { notice: `Đã lưu Checkpoint "${lbl}" trên CloudDB.`, revertable: false };
+    }
+    if (act.action === 'open_publish_modal') {
+      setPublishModalOpen(true);
+      return { notice: 'Đã mở hộp thoại Publish Master & Chia sẻ Demo.', revertable: false };
+    }
+    if (act.action === 'open_collab_drawer') {
+      const requestedTab = payload.tab === 'chat_lock' || payload.tab === 'versions' ? payload.tab : 'collab';
+      setCollabDrawerTab(requestedTab);
+      setCollabOpen(true);
+      return { notice: 'Đã mở bảng Cộng tác Realtime & Phiên bản.', revertable: false };
+    }
     if (act.action === 'suggest_lyrics') {
       const res = await suggestLyrics({
         project_id: current.project_id,
@@ -1587,10 +1607,11 @@ export default function StudioPage() {
         topic: typeof payload.topic === 'string' ? payload.topic : lyricTopic || 'Ký ức & Hy vọng',
         section: typeof payload.section === 'string' ? payload.section : 'Chorus',
       });
-      mutateWithUndo((prev) => ({
+      const nextLyricsState = mutateWithUndo((prev) => ({
         ...prev,
         lyrics: { ...prev.lyrics, lines: res.lines },
       }));
+      await saveNow(true, nextLyricsState);
       setStudioMode('pro');
       setDockOpen(true);
       setActiveTab('lyrics');
@@ -1721,6 +1742,13 @@ export default function StudioPage() {
       }
       if (typeof payload.genre === 'string') nextConfig.genre = payload.genre;
       if (typeof payload.mood === 'string') nextConfig.mood = payload.mood;
+      const nextTitle =
+        typeof payload.title === 'string' && payload.title.trim()
+          ? payload.title.trim()
+          : prev.title;
+      if (typeof payload.title === 'string' && payload.title.trim()) {
+        nextConfig.title = payload.title.trim();
+      }
 
       if (typeof payload.bpm === 'number' && Number.isFinite(payload.bpm)) {
         const clampedBpm = Math.max(40, Math.min(220, Math.round(payload.bpm)));
@@ -1745,6 +1773,7 @@ export default function StudioPage() {
 
       return {
         ...prev,
+        title: nextTitle,
         config: nextConfig,
         analysis: nextAnalysis,
         autotune_settings: nextAutotune,
@@ -3625,7 +3654,7 @@ export default function StudioPage() {
                           );
                         })}
                         {project.lyrics.lines.length === 0 && (
-                          <p className="text-xs text-slate-500">
+                          <p className="text-xs text-slate-300">
                             Chưa có lời. Nhập chủ đề rồi bấm &quot;AI Gợi ý lời&quot; hoặc bấm &quot;+ Thêm dòng&quot; để tự viết lời theo từng Bar.
                           </p>
                         )}

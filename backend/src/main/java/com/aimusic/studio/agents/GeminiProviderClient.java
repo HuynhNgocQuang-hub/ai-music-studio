@@ -12,8 +12,8 @@ import org.springframework.stereotype.Component;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
-import java.net.http.HttpResponse;
 import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -86,25 +86,32 @@ public class GeminiProviderClient implements LlmProviderClient {
             String apiKey,
             AppProperties properties
     ) throws Exception {
-        List<Map<String, Object>> parts = new ArrayList<>();
-        if (audioBytes != null && audioBytes.length > 0 && audioBytes.length <= 6_000_000) {
-            String safeMime = (audioMime != null && !audioMime.isBlank()) ? audioMime : "audio/wav";
-            parts.add(Map.of("inlineData", Map.of(
-                    "mimeType", safeMime,
-                    "data", Base64.getEncoder().encodeToString(audioBytes)
-            )));
-        }
-        parts.add(Map.of("text", prompt));
+        return generateConversationWithTools(
+                List.of(), prompt, systemPrompt, audioBytes, audioMime, toolDeclarations, apiKey, properties);
+    }
+
+    @Override
+    public LlmAdapter.ToolLlmResponse generateConversationWithTools(
+            List<LlmAdapter.ChatTurn> history,
+            String prompt,
+            String systemPrompt,
+            byte[] audioBytes,
+            String audioMime,
+            List<Map<String, Object>> toolDeclarations,
+            String apiKey,
+            AppProperties properties
+    ) throws Exception {
+        List<Map<String, Object>> contents = buildAlternatingContents(history, prompt, audioBytes, audioMime);
 
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("contents", List.of(Map.of("role", "user", "parts", parts)));
+        body.put("contents", contents);
         if (systemPrompt != null && !systemPrompt.isBlank()) {
             body.put("systemInstruction", Map.of("parts", List.of(Map.of("text", systemPrompt))));
         }
         if (toolDeclarations != null && !toolDeclarations.isEmpty()) {
             body.put("tools", List.of(Map.of("functionDeclarations", toolDeclarations)));
         }
-        body.put("generationConfig", Map.of("temperature", 0.35));
+        body.put("generationConfig", Map.of("temperature", 0.42));
 
         ModelResponse mr = executeWithFallbackModel(resolveModel(properties), apiKey, body);
         JsonNode root = objectMapper.readTree(mr.body());
@@ -131,6 +138,56 @@ public class GeminiProviderClient implements LlmProviderClient {
         return new LlmAdapter.ToolLlmResponse(LlmAdapter.Provider.GEMINI, mr.model(), replyText.toString().trim(), calls, false);
     }
 
+    private static List<Map<String, Object>> buildAlternatingContents(
+            List<LlmAdapter.ChatTurn> history,
+            String currentPrompt,
+            byte[] audioBytes,
+            String audioMime
+    ) {
+        List<Map<String, Object>> contents = new ArrayList<>();
+        String lastRole = null;
+        if (history != null) {
+            for (LlmAdapter.ChatTurn turn : history) {
+                if (turn == null || turn.content() == null || turn.content().isBlank()) continue;
+                String geminiRole = "assistant".equalsIgnoreCase(turn.role()) || "model".equalsIgnoreCase(turn.role())
+                        ? "model" : "user";
+                if (contents.isEmpty() && !"user".equals(geminiRole)) {
+                    continue;
+                }
+                String text = turn.content().trim();
+                if (geminiRole.equals(lastRole) && !contents.isEmpty()) {
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> prevParts = (List<Map<String, Object>>) contents.get(contents.size() - 1).get("parts");
+                    prevParts.add(Map.of("text", text));
+                } else {
+                    List<Map<String, Object>> turnParts = new ArrayList<>();
+                    turnParts.add(Map.of("text", text));
+                    contents.add(Map.of("role", geminiRole, "parts", turnParts));
+                    lastRole = geminiRole;
+                }
+            }
+        }
+
+        List<Map<String, Object>> currentParts = new ArrayList<>();
+        if (audioBytes != null && audioBytes.length > 0 && audioBytes.length <= 6_000_000) {
+            String safeMime = (audioMime != null && !audioMime.isBlank()) ? audioMime : "audio/wav";
+            currentParts.add(Map.of("inlineData", Map.of(
+                    "mimeType", safeMime,
+                    "data", Base64.getEncoder().encodeToString(audioBytes)
+            )));
+        }
+        currentParts.add(Map.of("text", currentPrompt));
+
+        if ("user".equals(lastRole) && !contents.isEmpty()) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> prevParts = (List<Map<String, Object>>) contents.get(contents.size() - 1).get("parts");
+            prevParts.addAll(currentParts);
+        } else {
+            contents.add(Map.of("role", "user", "parts", currentParts));
+        }
+        return contents;
+    }
+
     private record ModelResponse(String model, String body) {}
 
     private static String resolveModel(AppProperties properties) {
@@ -142,7 +199,7 @@ public class GeminiProviderClient implements LlmProviderClient {
         String jsonBody = objectMapper.writeValueAsString(body);
         HttpResponse<String> resp = sendGeminiRequest(model, apiKey, jsonBody);
         String resolvedModel = model;
-        if (resp.statusCode() == 404 && !DEFAULT_MODEL.equalsIgnoreCase(model)) {
+        if (resp.statusCode() == 404 && !"gemini-3.8-flash".equalsIgnoreCase(model)) {
             log.warn("Gemini model '{}' returned HTTP 404; retrying with '{}'.", model, DEFAULT_MODEL);
             resolvedModel = DEFAULT_MODEL;
             resp = sendGeminiRequest(DEFAULT_MODEL, apiKey, jsonBody);

@@ -1,17 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import {
-  CheckCheck,
-  Mic,
-  MicOff,
-  Paperclip,
-  RotateCcw,
-  Send,
-  Sparkles,
-  Undo2,
-  Volume2,
-  X,
-} from 'lucide-react';
+import { Maximize2, Minimize2, RotateCcw, Sparkles, X } from 'lucide-react';
 import {
   ApiError,
   chatWithCoachAudio,
@@ -27,6 +16,8 @@ import type {
   CoachSuggestedAction,
   ProjectState,
 } from '@/types/project';
+import CoachComposerBar from './coach/CoachComposerBar';
+import CoachMessageBubble from './coach/CoachMessageBubble';
 
 const CHAT_MODES: Array<{
   id: CoachAssistantMode;
@@ -34,42 +25,53 @@ const CHAT_MODES: Array<{
   desc: string;
   prompts: string[];
 }> = [
-    {
-      id: 'producer',
-      label: 'Producer',
-      desc: 'Toàn diện • Cấu trúc & Vận hành',
-      prompts: [
-        'AI làm được gì & Đề xuất mọi thứ',
-        'Đẩy năng lượng Chorus lên 95%',
-        'Xuất file MP3 320kbps',
-      ],
-    },
-    {
-      id: 'arrangement',
-      label: 'Hòa âm',
-      desc: 'Chords, Nhịp & MIDI Tracks',
-      prompts: ['Đổi hợp âm vi - IV - I - V', 'Chuyển sang nhịp 6/8', 'Tạo lại track Drums'],
-    },
-    {
-      id: 'lyricist',
-      label: 'Viết lời',
-      desc: 'Lyrics, Hook & Vần điệu',
-      prompts: ['Gợi ý lời cho điệp khúc', 'Viết lại câu Chorus bắt tai'],
-    },
-    {
-      id: 'mix',
-      label: 'Mix / Tune',
-      desc: 'EQ 3 băng, FX & Auto-Tune',
-      prompts: ['Vocal hơi chói và khô', 'Cân bằng Mix chống vỡ tiếng', 'Bật Auto-Tune mức Vừa'],
-    },
-  ];
+  {
+    id: 'producer',
+    label: 'Producer',
+    desc: 'Toàn diện • Mix, Cấu trúc & Cloud',
+    prompts: [
+      'Phân tích & đề xuất mọi thứ cho bài này',
+      'Đẩy năng lượng Chorus lên 95%',
+      'Lưu Checkpoint hiện tại',
+    ],
+  },
+  {
+    id: 'arrangement',
+    label: 'Hòa âm',
+    desc: 'Chords, Nhịp & MIDI Tracks',
+    prompts: [
+      'Gợi ý vòng hợp âm hợp giọng bài này',
+      'Chuyển sang nhịp 6/8',
+      'Nạp điệu trống Trap',
+    ],
+  },
+  {
+    id: 'lyricist',
+    label: 'Viết lời',
+    desc: 'Lyrics, Hook & Vần điệu',
+    prompts: [
+      'Viết 4 câu lời Chorus về mưa đêm Sài Gòn',
+      'Gợi ý lời cho đoạn Verse',
+    ],
+  },
+  {
+    id: 'mix',
+    label: 'Mix / Tune',
+    desc: 'EQ 3 băng, FX, Stems & LUFS',
+    prompts: [
+      'Vocal hơi chói và thiếu reverb',
+      'Cân bằng Mix chống vỡ tiếng',
+      'Đặt Mastering -9 LUFS',
+    ],
+  },
+];
 
 function getRouteQuickPrompts(pathname: string, modeSpec: (typeof CHAT_MODES)[number]): string[] {
   if (pathname === '/' || pathname.startsWith('/library')) {
     return [
       'AI làm được gì & Đề xuất mọi thứ',
       'Tạo beat Lo-fi nhẹ',
-      'Tạo beat Trap / 808',
+      'Mở Cộng đồng Demo (/share)',
     ];
   }
   if (pathname.startsWith('/create')) {
@@ -77,6 +79,13 @@ function getRouteQuickPrompts(pathname: string, modeSpec: (typeof CHAT_MODES)[nu
       'AI làm được gì & Đề xuất mọi thứ',
       'Làm sao thu Mic không bị ồn?',
       'Nên chọn Preserve hay Enhance?',
+    ];
+  }
+  if (pathname.startsWith('/share') || pathname.startsWith('/creators')) {
+    return [
+      'Hướng dẫn Publish Master & Remix bài này',
+      'Mở Phòng thu DAW',
+      'Xem bảng xếp hạng Producer',
     ];
   }
   if (pathname.startsWith('/settings')) {
@@ -90,13 +99,17 @@ function getDefaultGreeting(pathname: string): CoachMessage {
     return {
       role: 'assistant',
       content:
-        'Xin chào! Tôi là AI Music Copilot đa chế độ. Tôi đọc được toàn bộ Mix/EQ, Hợp âm, Lời, Dynamics & Overdub Fit Check của bài này — bạn có thể gõ, nói bằng Mic hoặc đính kèm đoạn Audio để tôi phân tích & áp dụng 1 chạm!',
+        '### Xin chào! Tôi là **AI Music Copilot v2**\n'
+        + 'Tôi đọc trực tiếp **Mix/EQ**, **Hợp âm chuẩn điệu**, **Lời**, **Dynamics**, **Mastering LUFS** & **Overdub Fit Check** của bài hát này.\n'
+        + '- Gõ tự nhiên *(VD: `"Chuyển tone sang Dm, 124 BPM"` hoặc `"Viết Chorus về mưa đêm"`)*\n'
+        + '- Hoặc gõ `/` để mở danh sách lệnh nhanh — mọi thay đổi đều áp dụng & **Hoàn tác 1 chạm**!',
     };
   }
   return {
     role: 'assistant',
     content:
-      'Xin chào! Tôi là AI Music Copilot toàn hệ thống. Dù bạn đang chọn Template, thu Mic ở Wizard, quản lý Session hay chẩn đoán API Key ở Settings, hãy hỏi hoặc ra lệnh bất kỳ!',
+      '### Xin chào! Tôi là **AI Music Copilot v2**\n'
+      + 'Tôi đồng hành xuyên suốt mọi màn hình: tạo Template ở Home, hướng dẫn thu Mic ở Wizard, quản lý Session/Cloud, chẩn đoán API Key ở Settings và hỗ trợ Producer Showcase.',
   };
 }
 
@@ -121,12 +134,13 @@ export default function AiCoachChatDrawer() {
   const [messages, setMessages] = useState<CoachMessage[]>(() => [getDefaultGreeting(pathname)]);
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [appliedMap, setAppliedMap] = useState<Record<string, boolean>>({});
   const [revertSnapshots, setRevertSnapshots] = useState<Record<string, ProjectState>>({});
   const [applyingKey, setApplyingKey] = useState<string | null>(null);
+  const [wideMode, setWideMode] = useState(false);
 
-  // Multimodal Audio / Voice Dictation state
   const [attachedAudioFile, setAttachedAudioFile] = useState<File | null>(null);
   const [attachProjectVocal, setAttachProjectVocal] = useState(false);
   const [isListeningVoice, setIsListeningVoice] = useState(false);
@@ -149,7 +163,6 @@ export default function AiCoachChatDrawer() {
     project.audio_assets.raw_input_ref
   );
 
-  // Load saved chat thread from IndexedDB when switching projects / global scope
   useEffect(() => {
     let active = true;
     loadedThreadRef.current = null;
@@ -178,7 +191,6 @@ export default function AiCoachChatDrawer() {
     };
   }, [threadId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Persist messages smoothly once thread hydration completed
   useEffect(() => {
     if (loadedThreadRef.current !== threadId || loading) return;
     void saveChatThread(threadId, assistantMode, messages).catch(() => { });
@@ -205,6 +217,7 @@ export default function AiCoachChatDrawer() {
   const handleClearChat = () => {
     abortRef.current?.abort();
     setLoading(false);
+    setStreamStatus(null);
     setAppliedMap({});
     setRevertSnapshots({});
     setActionNotice(null);
@@ -214,11 +227,17 @@ export default function AiCoachChatDrawer() {
       {
         role: 'assistant',
         content:
-          'Đã làm mới cuộc trò chuyện. Hãy chọn chế độ (Producer / Hòa âm / Viết lời / Mix) và đặt câu hỏi hoặc ra lệnh bất kỳ!',
+          'Đã làm mới cuộc trò chuyện. Hãy chọn chế độ (Producer / Hòa âm / Viết lời / Mix) và gõ yêu cầu hoặc gõ `/` để chọn lệnh nhanh!',
       },
     ];
     setMessages(resetMsgs);
     void deleteChatThread(threadId).catch(() => { });
+  };
+
+  const handleStopStreaming = () => {
+    abortRef.current?.abort();
+    setLoading(false);
+    setStreamStatus(null);
   };
 
   const handleVoiceToggle = async () => {
@@ -278,7 +297,6 @@ export default function AiCoachChatDrawer() {
       }
     }
 
-    // Fallback: record short audio snippet and attach for Multimodal Chat analysis
     if (!navigator.mediaDevices?.getUserMedia) {
       setActionNotice('Trình duyệt không hỗ trợ Mic hoặc Web Speech API.');
       return;
@@ -328,10 +346,7 @@ export default function AiCoachChatDrawer() {
     setAttachProjectVocal(false);
   };
 
-  const handleSend = async (overrideText?: string) => {
-    const text = (overrideText ?? inputValue).trim();
-    if (!text || loading) return;
-
+  const sendConversationTurn = async (text: string, baseMessages: CoachMessage[]) => {
     const userDisplay = attachedAudioFile
       ? `${text} [Đính kèm: ${attachedAudioFile.name}]`
       : attachProjectVocal
@@ -339,14 +354,13 @@ export default function AiCoachChatDrawer() {
         : text;
 
     const nextHistory: CoachMessage[] = [
-      ...messages,
+      ...baseMessages,
       { role: 'user', content: userDisplay, timestamp: new Date().toISOString() },
     ];
-    if (overrideText === undefined) setInputValue('');
     setActionNotice(null);
     setLoading(true);
+    setStreamStatus('Đang phân tích Mix, Hợp âm & Cấu trúc...');
 
-    // Append placeholder assistant bubble for live SSE token streaming
     setMessages([...nextHistory, { role: 'assistant', content: '' }]);
     const assistantIndex = nextHistory.length;
 
@@ -361,6 +375,8 @@ export default function AiCoachChatDrawer() {
           message: text,
           mode: assistantMode,
           route: pathname,
+          history: nextHistory.map(({ role, content, timestamp }) => ({ role, content, timestamp })),
+          project_state: project,
           file: attachedAudioFile,
           filename: attachedAudioFile.name,
         });
@@ -398,7 +414,11 @@ export default function AiCoachChatDrawer() {
         },
         {
           signal: controller.signal,
+          onStatus: (st) => {
+            if (st.text) setStreamStatus(st.text);
+          },
           onChunk: (delta) => {
+            setStreamStatus(null);
             setMessages((prev) =>
               prev.map((m, i) =>
                 i === assistantIndex ? { ...m, content: `${m.content}${delta}` } : m
@@ -413,6 +433,7 @@ export default function AiCoachChatDrawer() {
             );
           },
           onDone: (res) => {
+            setStreamStatus(null);
             setMessages((prev) =>
               prev.map((m, i) =>
                 i === assistantIndex
@@ -438,8 +459,31 @@ export default function AiCoachChatDrawer() {
         prev.map((m, i) => (i === assistantIndex ? { role: 'assistant', content: errText } : m))
       );
     } finally {
+      setStreamStatus(null);
       setLoading(false);
     }
+  };
+
+  const handleSend = async (overrideText?: string) => {
+    const text = (overrideText ?? inputValue).trim();
+    if (!text || loading) return;
+    if (overrideText === undefined) setInputValue('');
+    await sendConversationTurn(text, messages);
+  };
+
+  const handleRegenerateLast = () => {
+    if (loading || messages.length < 2) return;
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx < 0) return;
+    const rawUserContent = messages[lastUserIdx].content.replace(/\s*\[(?:Đính kèm|Kèm Vocal)[^\]]*\]$/, '').trim();
+    const priorHistory = messages.slice(0, lastUserIdx);
+    void sendConversationTurn(rawUserContent, priorHistory);
   };
 
   const handleApplyAction = async (msgIdx: number, act: CoachSuggestedAction) => {
@@ -483,36 +527,72 @@ export default function AiCoachChatDrawer() {
     setActionNotice(`Đã hoàn tác đề xuất: ${label}`);
   };
 
+  const handleRevertAll = async (msgIdx: number, acts: CoachSuggestedAction[]) => {
+    let earliestSnap: ProjectState | undefined;
+    const nextApplied = { ...appliedMap };
+    const nextSnaps = { ...revertSnapshots };
+    for (const act of acts) {
+      const key = `${msgIdx}:${act.id}`;
+      if (!earliestSnap && nextSnaps[key]) {
+        earliestSnap = nextSnaps[key];
+      }
+      nextApplied[key] = false;
+      delete nextSnaps[key];
+    }
+    if (!earliestSnap) return;
+    loadProjectIntoSession(earliestSnap, { dirty: true });
+    await engine.syncFromProject(earliestSnap).catch(() => { });
+    setAppliedMap(nextApplied);
+    setRevertSnapshots(nextSnaps);
+    setActionNotice('Đã hoàn tác toàn bộ thay đổi trong nhóm đề xuất.');
+  };
+
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-l border-white/10 bg-[#16191f] shadow-2xl shadow-black/50 xl:w-88">
+    <aside
+      aria-label="AI Music Copilot Drawer"
+      className={`flex shrink-0 flex-col border-l border-white/10 bg-[#16191f] shadow-2xl shadow-black/50 transition-all ${
+        wideMode ? 'w-96 xl:w-[28rem]' : 'w-80 xl:w-88'
+      }`}
+    >
       <input
         ref={fileInputRef}
+        id="studio-coach-audio-file"
         type="file"
+        aria-label="Chọn tệp Audio để đính kèm"
         accept=".wav,.mp3,.m4a,.ogg,.flac,audio/*"
         className="sr-only"
         onChange={handleAttachFile}
       />
 
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-white/[0.08] px-3.5 py-2.5">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-amber-400" />
-          <div>
-            <span className="block font-display text-xs font-bold text-white">
+      <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <Sparkles className="h-4 w-4 shrink-0 text-amber-400" />
+          <div className="min-w-0">
+            <span className="block truncate font-display text-xs font-bold text-white">
               AI Music Copilot
             </span>
-            <span className="block text-[10px] text-slate-400">
+            <span className="block truncate text-[10px] text-slate-300">
               {isStudioRoute ? activeModeSpec.desc : `Hỗ trợ trang ${pathname}`}
             </span>
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            title={wideMode ? 'Thu gọn khung chat' : 'Mở rộng khung chat'}
+            aria-label={wideMode ? 'Thu gọn khung chat' : 'Mở rộng khung chat'}
+            onClick={() => setWideMode((w) => !w)}
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-slate-300 hover:bg-white/10 hover:text-white"
+          >
+            {wideMode ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+          </button>
           <button
             type="button"
             title="Xóa lịch sử chat"
             aria-label="Xóa lịch sử chat"
             onClick={handleClearChat}
-            className="rounded p-1 text-slate-400 hover:bg-white/10 hover:text-white"
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-slate-300 hover:bg-white/10 hover:text-white"
           >
             <RotateCcw className="h-3.5 w-3.5" />
           </button>
@@ -520,11 +600,30 @@ export default function AiCoachChatDrawer() {
             type="button"
             aria-label="Đóng AI Coach"
             onClick={() => setCopilotOpen(false)}
-            className="rounded p-1 text-slate-400 hover:bg-white/10 hover:text-white"
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-slate-300 hover:bg-white/10 hover:text-white"
           >
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
+      </div>
+
+      {/* Live Project Context Strip */}
+      <div className="flex flex-wrap items-center gap-1 border-b border-white/[0.06] bg-[#101319] px-3 py-1.5 font-mono text-[10px] text-slate-300">
+        <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-amber-300">
+          {project.config.genre}
+        </span>
+        <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-sky-200">
+          {project.analysis.detected_key} {project.analysis.detected_scale}
+        </span>
+        <span className="rounded bg-white/[0.06] px-1.5 py-0.5">
+          {Math.round(project.analysis.bpm)} BPM
+        </span>
+        <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-emerald-300">
+          {project.mastering.target_lufs} LUFS
+        </span>
+        <span className="rounded bg-white/[0.06] px-1.5 py-0.5">
+          {project.lyrics.lines.length} câu lời
+        </span>
       </div>
 
       {/* Assistant Persona Mode Switcher */}
@@ -534,10 +633,11 @@ export default function AiCoachChatDrawer() {
             key={m.id}
             type="button"
             onClick={() => setAssistantMode(m.id)}
-            className={`rounded px-1.5 py-1 text-[10px] font-semibold transition ${assistantMode === m.id
-              ? 'bg-amber-500 text-slate-950'
-              : 'bg-white/[0.04] text-slate-300 hover:bg-white/10 hover:text-white'
-              }`}
+            className={`min-h-[24px] rounded px-1.5 py-1 text-[10px] font-semibold transition ${
+              assistantMode === m.id
+                ? 'bg-amber-500 text-slate-950'
+                : 'bg-white/[0.04] text-slate-300 hover:bg-white/10 hover:text-white'
+            }`}
           >
             {m.label}
           </button>
@@ -548,7 +648,7 @@ export default function AiCoachChatDrawer() {
       {latestFitCheck && isStudioRoute && (
         <div className="space-y-2 border-b border-white/[0.08] bg-amber-500/10 p-3 text-xs">
           <p className="font-semibold text-amber-200">Kết quả Overdub Fit Check</p>
-          <p className="text-slate-300">
+          <p className="text-slate-200">
             Lệch nhịp: <strong>{latestFitCheck.timing_offset_ms} ms</strong> •{' '}
             {latestFitCheck.gain_suggestion}
           </p>
@@ -569,8 +669,9 @@ export default function AiCoachChatDrawer() {
                       payload: { fix },
                     })
                   }
-                  className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white ${applied ? 'cursor-default bg-emerald-600/60' : 'bg-sky-600 hover:bg-sky-500'
-                    }`}
+                  className={`min-h-[24px] rounded-full px-2.5 py-1 text-[11px] font-medium text-white ${
+                    applied ? 'cursor-default bg-emerald-700/80' : 'bg-sky-600 hover:bg-sky-500'
+                  }`}
                 >
                   {applied ? `✓ ${fix.label}` : fix.label}
                 </button>
@@ -586,8 +687,9 @@ export default function AiCoachChatDrawer() {
           <span className="truncate">{actionNotice}</span>
           <button
             type="button"
+            aria-label="Đóng thông báo"
             onClick={() => setActionNotice(null)}
-            className="text-emerald-300 hover:text-white"
+            className="inline-flex h-6 w-6 shrink-0 items-center justify-center text-emerald-200 hover:text-white"
           >
             ×
           </button>
@@ -596,190 +698,45 @@ export default function AiCoachChatDrawer() {
 
       {/* Conversation Feed */}
       <div ref={scrollRef} className="flex-1 space-y-2.5 overflow-y-auto p-3 text-xs">
-        {messages.map((m, idx) => {
-          const actions = m.suggested_actions || [];
-          const hasMultipleUnapplied =
-            actions.filter((a) => !appliedMap[`${idx}:${a.id}`]).length >= 2;
-          return (
-            <div
-              key={idx}
-              className={`space-y-2 rounded-2xl p-2.5 leading-relaxed ${m.role === 'user'
-                ? 'ml-6 border border-amber-500/25 bg-amber-500/15 text-amber-100'
-                : 'mr-2 border border-white/[0.08] bg-[#1b1e25] text-slate-200'
-                }`}
-            >
-              {m.role === 'assistant' && m.provider && (
-                <div className="flex items-center justify-between text-[9px] font-bold uppercase tracking-wider text-slate-400">
-                  <span className="flex items-center gap-1 text-sky-300">
-                    <Sparkles className="h-2.5 w-2.5" />
-                    {m.provider}
-                  </span>
-                </div>
-              )}
-
-              <p className="whitespace-pre-wrap">
-                {m.content || (loading && idx === messages.length - 1 ? 'Đang suy nghĩ...' : '')}
-              </p>
-
-              {m.role === 'assistant' && actions.length > 0 && (
-                <div className="space-y-1.5 border-t border-white/[0.07] pt-1.5">
-                  {hasMultipleUnapplied && (
-                    <button
-                      type="button"
-                      onClick={() => void handleApplyAll(idx, actions)}
-                      className="inline-flex items-center gap-1 rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-200 hover:bg-amber-500/35"
-                    >
-                      <CheckCheck className="h-3 w-3" /> Áp dụng tất cả
-                    </button>
-                  )}
-                  <div className="flex flex-wrap gap-1.5">
-                    {actions.map((act) => {
-                      const actionKey = `${idx}:${act.id}`;
-                      const applied = Boolean(appliedMap[actionKey]);
-                      const busy = applyingKey === actionKey;
-                      const canRevert = applied && Boolean(revertSnapshots[actionKey]);
-                      return (
-                        <div key={act.id} className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            disabled={applied || busy}
-                            onClick={() => void handleApplyAction(idx, act)}
-                            className={`rounded-full px-2.5 py-1 text-[11px] font-medium text-white transition ${applied
-                              ? 'cursor-default bg-emerald-600/60'
-                              : 'bg-sky-600 hover:bg-sky-500 disabled:opacity-50'
-                              }`}
-                          >
-                            {busy ? 'Đang xử lý...' : applied ? `✓ ${act.label}` : act.label}
-                          </button>
-                          {canRevert && (
-                            <button
-                              type="button"
-                              title="Hoàn tác thay đổi vừa áp dụng"
-                              onClick={() => void handleRevertAction(actionKey, act.label)}
-                              className="inline-flex items-center gap-0.5 rounded-full border border-white/15 bg-white/10 px-2 py-1 text-[10px] text-slate-200 hover:bg-rose-500/30 hover:text-rose-200"
-                            >
-                              <Undo2 className="h-2.5 w-2.5" /> Hoàn tác
-                            </button>
-                          )}
-                          {act.action === 'rearrange_chords' && (
-                            <button
-                              type="button"
-                              title="Nghe thử hợp âm A/B trước khi áp dụng"
-                              onClick={() => {
-                                const syms = Array.isArray(act.payload?.chords)
-                                  ? (act.payload.chords as string[])
-                                  : ['Am', 'F', 'C', 'G'];
-                                engine.auditionChordProgression(syms);
-                              }}
-                              className="inline-flex items-center gap-0.5 rounded-full border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-500/30"
-                            >
-                              <Volume2 className="h-2.5 w-2.5" /> Nghe thử
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Footer: Quick Prompts + Audio Attachment + Voice Mic + Input */}
-      <div className="space-y-2 border-t border-white/[0.08] p-2.5">
-        <div className="flex flex-wrap gap-1">
-          {quickPrompts.map((promptText) => (
-            <button
-              key={promptText}
-              type="button"
-              disabled={loading}
-              onClick={() => void handleSend(promptText)}
-              className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-slate-300 transition hover:border-amber-400/50 hover:text-amber-200 disabled:opacity-40"
-            >
-              {promptText}
-            </button>
-          ))}
-        </div>
-
-        {(attachedAudioFile || hasProjectVocal) && (
-          <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-            {attachedAudioFile ? (
-              <span className="inline-flex items-center gap-1 rounded bg-cyan-500/20 px-2 py-0.5 text-cyan-200">
-                <Volume2 className="h-3 w-3" /> {attachedAudioFile.name}
-                <button
-                  type="button"
-                  onClick={() => setAttachedAudioFile(null)}
-                  className="ml-1 font-bold hover:text-white"
-                >
-                  ×
-                </button>
-              </span>
-            ) : (
-              hasProjectVocal && (
-                <button
-                  type="button"
-                  onClick={() => setAttachProjectVocal((v) => !v)}
-                  className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 transition ${attachProjectVocal
-                    ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
-                    : 'border-white/15 bg-white/[0.04] text-slate-300 hover:border-emerald-400/40'
-                    }`}
-                >
-                  <Volume2 className="h-3 w-3" />
-                  <span>{attachProjectVocal ? '✓ Kèm Vocal để AI nghe' : 'Gửi kèm Vocal để AI nghe'}</span>
-                </button>
-              )
-            )}
-          </div>
-        )}
-
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            title="Đính kèm đoạn Audio (<= 10MB) để AI nghe & phân tích"
-            aria-label="Đính kèm Audio cho AI"
-            onClick={() => fileInputRef.current?.click()}
-            className="rounded-md border border-white/15 bg-[#1b1e25] p-1.5 text-slate-300 hover:border-cyan-400/50 hover:text-cyan-200"
-          >
-            <Paperclip className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            title={isListeningVoice ? 'Dừng nói / thu âm' : 'Nói câu hỏi bằng giọng nói (Mic)'}
-            aria-label="Nhập câu hỏi bằng giọng nói"
-            onClick={() => void handleVoiceToggle()}
-            className={`rounded-md border p-1.5 transition ${isListeningVoice
-              ? 'animate-pulse border-rose-400 bg-rose-500/25 text-rose-200'
-              : 'border-white/15 bg-[#1b1e25] text-slate-300 hover:border-amber-400/50 hover:text-amber-200'
-              }`}
-          >
-            {isListeningVoice ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
-          </button>
-          <input
-            id="studio-coach-input"
-            name="coachInput"
-            aria-label="Hỏi AI Music Coach"
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleSend();
-            }}
-            placeholder={isStudioRoute ? `Hỏi ${activeModeSpec.label}...` : 'Hỏi bất kỳ điều gì...'}
-            className="min-w-0 flex-1 rounded-full border border-white/15 bg-[#0b0d11] px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-amber-400 focus:outline-none"
+        {messages.map((m, idx) => (
+          <CoachMessageBubble
+            key={idx}
+            message={m}
+            index={idx}
+            isLast={idx === messages.length - 1}
+            loading={loading}
+            statusText={idx === messages.length - 1 ? streamStatus : null}
+            appliedMap={appliedMap}
+            revertSnapshots={revertSnapshots}
+            applyingKey={applyingKey}
+            onApplyAction={handleApplyAction}
+            onApplyAll={handleApplyAll}
+            onRevertAction={handleRevertAction}
+            onRevertAll={handleRevertAll}
+            onAuditionChords={(syms) => engine.auditionChordProgression(syms)}
+            onRegenerate={handleRegenerateLast}
           />
-          <button
-            type="button"
-            aria-label="Gửi câu hỏi tới AI Coach"
-            disabled={loading || !inputValue.trim()}
-            onClick={() => void handleSend()}
-            className="rounded-md bg-amber-500 px-2.5 py-1.5 text-black hover:bg-amber-400 disabled:opacity-40"
-          >
-            <Send className="h-3.5 w-3.5" />
-          </button>
-        </div>
+        ))}
       </div>
+
+      {/* Footer: Slash Menu + Quick Prompts + Multimodal Composer */}
+      <CoachComposerBar
+        inputValue={inputValue}
+        onChangeInput={setInputValue}
+        onSend={handleSend}
+        onStop={handleStopStreaming}
+        loading={loading}
+        quickPrompts={quickPrompts}
+        attachedAudioFile={attachedAudioFile}
+        onClearAttachedFile={() => setAttachedAudioFile(null)}
+        onAttachClick={() => fileInputRef.current?.click()}
+        hasProjectVocal={hasProjectVocal}
+        attachProjectVocal={attachProjectVocal}
+        onToggleAttachProjectVocal={() => setAttachProjectVocal((v) => !v)}
+        isListeningVoice={isListeningVoice}
+        onToggleVoice={handleVoiceToggle}
+        placeholder={isStudioRoute ? `Hỏi ${activeModeSpec.label}...` : 'Hỏi bất kỳ điều gì...'}
+      />
     </aside>
   );
 }

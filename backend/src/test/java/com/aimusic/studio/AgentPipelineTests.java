@@ -739,6 +739,55 @@ class AgentPipelineTests {
         assertTrue(phase6BResp.getSuggestedActions().stream().anyMatch(a -> "set_automation".equals(a.getAction()) && "filter".equals(a.getPayload().get("parameter"))));
     }
 
+    @Test
+    void copilotV2SmartEntitiesDiatonicChordsCustomLyricsAndMultiTurn() {
+        String sharePlaybook = DawPlaybook.retrieveContext("/share", "Làm sao publish bài lên cộng đồng và trending?", "producer");
+        assertTrue(sharePlaybook.contains("/share"), sharePlaybook);
+        String collabPlaybook = DawPlaybook.retrieveContext("/studio/p1", "Lưu checkpoint và khóa track collab như thế nào?", "producer");
+        assertTrue(collabPlaybook.contains("Checkpoint"), collabPlaybook);
+
+        LlmAdapter adapter = new LlmAdapter("", "", "mock", objectMapper);
+        JavaAudioFallbackService audioFallback = new JavaAudioFallbackService(objectMapper);
+        CoachLyricistAgent coach = new CoachLyricistAgent(adapter, audioFallback);
+        ProjectState state = sampleProjectState("enhance", "full_song");
+        state.getAnalysis().setDetectedKey("D");
+        state.getAnalysis().setDetectedScale("minor");
+
+        // 1. Exact BPM + guards against % false match
+        CoachChatResponse energyOnly = coach.chatCoach(state, "Đẩy năng lượng Chorus lên 95%", List.of(), "producer", "/studio/p1", Map.of(), null, null);
+        assertFalse(energyOnly.getSuggestedActions().stream().anyMatch(a -> "update_config".equals(a.getAction()) && a.getPayload().containsKey("bpm")));
+
+        CoachChatResponse exactCmds = coach.chatCoach(state, "Tăng tốc độ lên 128 bpm, chuyển tone sang Am và đặt -9 LUFS", List.of(), "mix", "/studio/p1", Map.of(), null, null);
+        assertTrue(exactCmds.getSuggestedActions().stream().anyMatch(a -> "update_config".equals(a.getAction()) && Integer.valueOf(128).equals(a.getPayload().get("bpm"))));
+        assertTrue(exactCmds.getSuggestedActions().stream().anyMatch(a -> "update_config".equals(a.getAction()) && "A".equals(a.getPayload().get("key")) && "minor".equals(a.getPayload().get("scale"))));
+        assertTrue(exactCmds.getSuggestedActions().stream().anyMatch(a -> "set_mastering".equals(a.getAction()) && Double.valueOf(-9.0).equals(a.getPayload().get("target_lufs"))));
+
+        // 2. Diatonic chord progression adapts to project Key/Scale (Dm) + inline chord sequence
+        CoachChatResponse chordResp = coach.chatCoach(state, "Gợi ý vòng hợp âm buồn phù hợp bài này", List.of(), "arrangement", "/studio/p1", Map.of(), null, null);
+        assertTrue(chordResp.getSuggestedActions().stream().anyMatch(a ->
+                "rearrange_chords".equals(a.getAction())
+                        && a.getPayload().get("chords") instanceof List<?> list
+                        && list.contains("Dm")), chordResp.getSuggestedActions().toString());
+
+        // 3. Topic-aware songwriting generates custom lines + update_lyrics_lines
+        CoachChatResponse lyricResp = coach.chatCoach(state, "Viết 4 câu lời Chorus về mưa đêm Sài Gòn", List.of(), "lyricist", "/studio/p1", Map.of(), null, null);
+        assertTrue(lyricResp.getReply().contains("mưa đêm Sài Gòn"), lyricResp.getReply());
+        assertTrue(lyricResp.getSuggestedActions().stream().anyMatch(a ->
+                "update_lyrics_lines".equals(a.getAction())
+                        && a.getPayload().get("lines") instanceof List<?> lines
+                        && lines.size() == 4));
+
+        // 4. Phase 9/10 checkpoint, publish, collab & community routes + conversation history acceptance
+        List<Map<String, Object>> history = List.of(
+                Map.of("role", "user", "content", "Kiểm tra bài này giúp tôi"),
+                Map.of("role", "assistant", "content", "Đã kiểm tra xong."),
+                Map.of("role", "user", "content", "Lưu checkpoint rồi mở bảng publish demo")
+        );
+        CoachChatResponse phase10Resp = coach.chatCoach(state, "Lưu checkpoint rồi mở bảng publish demo", history, "producer", "/studio/p1", Map.of(), null, null);
+        assertTrue(phase10Resp.getSuggestedActions().stream().anyMatch(a -> "save_checkpoint".equals(a.getAction())));
+        assertTrue(phase10Resp.getSuggestedActions().stream().anyMatch(a -> "open_publish_modal".equals(a.getAction())));
+    }
+
     private static byte[] synthMonoWav(double durationSec, int sampleRate, double amplitude) {
         int numSamples = (int) Math.round(durationSec * sampleRate);
         int dataSize = numSamples * 2;

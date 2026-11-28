@@ -54,6 +54,7 @@ public class LlmAdapter {
 
     public record LlmResponse(Provider provider, String model, String text, Map<String, Object> data, boolean isMock) {}
     public record ToolCall(String name, Map<String, Object> arguments) {}
+    public record ChatTurn(String role, String content) {}
     public record ToolLlmResponse(Provider provider, String model, String text, List<ToolCall> toolCalls, boolean isMock) {}
 
     private final AppProperties properties;
@@ -271,6 +272,20 @@ public class LlmAdapter {
             String role,
             String explicitProvider
     ) {
+        return generateAudioConversationWithTools(
+                List.of(), prompt, systemPrompt, audioBytes, audioMime, toolDeclarations, role, explicitProvider);
+    }
+
+    public ToolLlmResponse generateAudioConversationWithTools(
+            List<ChatTurn> history,
+            String prompt,
+            String systemPrompt,
+            byte[] audioBytes,
+            String audioMime,
+            List<Map<String, Object>> toolDeclarations,
+            String role,
+            String explicitProvider
+    ) {
         Provider selected = resolveProvider(role, explicitProvider);
         boolean hasAudio = audioBytes != null && audioBytes.length > 0 && audioBytes.length <= 6_000_000;
         if (hasAudio && selected != Provider.GEMINI) {
@@ -285,8 +300,8 @@ public class LlmAdapter {
             return new ToolLlmResponse(Provider.MOCK, "mock-music-v1", "", List.of(), true);
         }
         try {
-            return client.generateWithTools(
-                    prompt, systemPrompt, audioBytes, audioMime, toolDeclarations, apiKeyFor(selected), properties);
+            return client.generateConversationWithTools(
+                    history, prompt, systemPrompt, audioBytes, audioMime, toolDeclarations, apiKeyFor(selected), properties);
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             log.warn("LLM tool call via {} interrupted; falling back to mock.", selected.value());

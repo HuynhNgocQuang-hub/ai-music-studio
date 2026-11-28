@@ -143,6 +143,9 @@ public class StudioController {
         chatStreamExecutor.execute(() -> {
             LlmContextHolder.set(llmOverrides);
             try {
+                emitter.send(SseEmitter.event().name("status")
+                        .data(Map.of("stage", "analyzing", "text", "Đang đọc trạng thái Mix, Hợp âm & Audio...")));
+
                 CoachChatResponse full = coachLyricistAgent.chatCoach(
                         state, req.getMessage(), req.getHistory(), req.getMode(),
                         req.getRoute(), req.getContext(), attachedAudio, "audio/wav");
@@ -183,6 +186,8 @@ public class StudioController {
             @RequestParam("message") String message,
             @RequestParam(value = "mode", defaultValue = "producer") String mode,
             @RequestParam(value = "route", defaultValue = "") String route,
+            @RequestParam(value = "history", required = false) String historyJson,
+            @RequestParam(value = "project_state", required = false) String projectStateJson,
             @RequestParam(value = "file", required = false) MultipartFile file,
             HttpServletRequest request
     ) throws IOException {
@@ -203,14 +208,31 @@ public class StudioController {
                 audioMime = file.getContentType();
             }
         }
-        ProjectState state = loadProjectState(projectId, null);
+        ProjectState clientState = null;
+        if (projectStateJson != null && !projectStateJson.isBlank()) {
+            try {
+                clientState = objectMapper.readValue(projectStateJson, ProjectState.class);
+            } catch (Exception ignored) {
+            }
+        }
+        java.util.List<Map<String, Object>> history = java.util.List.of();
+        if (historyJson != null && !historyJson.isBlank()) {
+            try {
+                history = objectMapper.readValue(
+                        historyJson,
+                        new com.fasterxml.jackson.core.type.TypeReference<>() {}
+                );
+            } catch (Exception ignored) {
+            }
+        }
+        ProjectState state = loadProjectState(projectId, clientState);
         if (audioBytes == null) {
             audioBytes = resolveVocalBytes(state, null);
         }
         LlmContextHolder.set(LlmContextHolder.extractFromRequest(request));
         try {
             return coachLyricistAgent.chatCoach(
-                    state, message, java.util.List.of(), mode, route, null, audioBytes, audioMime);
+                    state, message, history, mode, route, null, audioBytes, audioMime);
         } finally {
             LlmContextHolder.clear();
         }
